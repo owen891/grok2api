@@ -77,7 +77,7 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	clientService := clientkeyapp.NewService(nil, nil, nil, 60, 4, nil)
 	selector := NewSelector(accountRepo, concurrency, sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientService, registry, selector, responseRepo, 3)
-	result, err := service.CreateResponse(ctx, Input{RequestID: "req-1", ClientKey: clientKey, PublicModel: "grok-test", Body: []byte(`{"model":"grok-test"}`)})
+	result, err := service.CreateResponse(ctx, Input{RequestID: "req-1", ClientKey: clientKey, PublicModel: "grok-test", Body: []byte(`{"model":"grok-test"}`), PromptCacheSeed: "claude-session"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +92,10 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	}
 	if len(adapter.attempts) != 2 || adapter.attempts[0] != first.ID || adapter.attempts[1] != second.ID {
 		t.Fatalf("attempts = %#v", adapter.attempts)
+	}
+	expectedCacheKey := resolvePromptCacheIdentity(clientKey.ID, account.ProviderBuild, "grok-test", audit.OperationResponses, "", "claude-session")
+	if adapter.lastPromptCacheKey != expectedCacheKey {
+		t.Fatalf("prompt cache key = %q, want %q", adapter.lastPromptCacheKey, expectedCacheKey)
 	}
 	observedAccount, err := accountRepo.Get(ctx, second.ID)
 	if err != nil || observedAccount.ObservedModel != "grok-test-build-free" {
@@ -1019,12 +1023,13 @@ func runQuotaRefreshWorkers(t *testing.T, service *accountapp.Service) {
 }
 
 type failoverAdapter struct {
-	mu             sync.Mutex
-	firstID        uint64
-	attempts       []uint64
-	lastMethod     string
-	lastPath       string
-	resourceStatus int
+	mu                 sync.Mutex
+	firstID            uint64
+	attempts           []uint64
+	lastMethod         string
+	lastPath           string
+	lastPromptCacheKey string
+	resourceStatus     int
 }
 
 type statelessConsoleAdapter struct{}
@@ -1297,6 +1302,7 @@ func (a *failoverAdapter) ForwardResponse(_ context.Context, request provider.Re
 	a.attempts = append(a.attempts, request.Credential.ID)
 	a.lastMethod = request.Method
 	a.lastPath = request.Path
+	a.lastPromptCacheKey = request.PromptCacheKey
 	resourceStatus := a.resourceStatus
 	a.mu.Unlock()
 	status, body := http.StatusOK, "ok"
@@ -1320,6 +1326,7 @@ func (a *failoverAdapter) resetAttempts() {
 	a.attempts = nil
 	a.lastMethod = ""
 	a.lastPath = ""
+	a.lastPromptCacheKey = ""
 }
 func (a *failoverAdapter) ListModels(context.Context, account.Credential) ([]string, error) {
 	return nil, nil
