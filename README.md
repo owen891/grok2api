@@ -19,18 +19,30 @@
 > [!NOTE]
 > 本项目仅供学习与研究交流。请务必遵循 Grok 的使用条款及当地法律法规，不得用于非法用途！
 
-Grok2API 是一个纯 Go 实现的 Grok API 网关。项目将 Grok Build OAuth、Grok Web SSO 与 Grok Console SSO 组织为独立账号池，对外提供 OpenAI 风格接口、Anthropic Messages 兼容接口，以及账号、模型、密钥、用量和代理管理后台。
+Grok2API 是一个纯 Go 实现的 Grok API 网关。本二开版本在原有多 Provider 网关基础上，继续补齐了注册体系、聊天工作区、Grok Web 浏览器链路、媒体任务和一体化管理后台。项目将 Grok Build OAuth、Grok Web SSO 与 Grok Console SSO 组织为独立账号池，对外提供 OpenAI 风格接口、Anthropic Messages 兼容接口，以及账号、模型、密钥、用量、代理和注册流程管理能力。
 
 ## 功能概览
 
-- **三 Provider**：`grok_build`、`grok_web` 与 `grok_console` 独立路由、额度和故障状态
-- **标准接口**：Responses、Chat Completions、Images、异步 Videos、Anthropic Messages
-- **多账号调度**：优先级、并发限制、额度门控、会话粘滞、冷却与故障切换
-- **账号接入**：Device OAuth、OAuth JSON、SSO JSON、逐行 SSO Token
-- **媒体能力**：图片生成、图片编辑、视频生成、图片本地归档与 URL/Base64 返回
+- **三 Provider 网关**：`grok_build`、`grok_web` 与 `grok_console` 独立路由、额度隔离、故障状态与模型映射
+- **标准兼容接口**：Responses、Chat Completions、Images、异步 Videos、Anthropic Messages
+- **多账号调度**：优先级、并发限制、额度门控、会话粘滞、冷却、恢复与故障切换
+- **账号接入与转换**：Device OAuth、OAuth JSON、SSO JSON、逐行 SSO Token，以及 Web SSO 到 Build 的转换链路
+- **注册体系**：内置注册控制器、协议注册流程、CPA/OIDC 导出、结果接管和后台管理入口
+- **聊天与操作台**：前端内置 Chat 工作区、注册页、图库页、视频图库页和 API 文档页
+- **媒体能力**：图片生成、图片编辑、视频生成、图片任务归档与 URL/Base64 返回
+- **Web 浏览器链路**：持久 Chromium 会话、browser worker、Statsig 预热与签名缓存、辅助校验适配
 - **基础设施**：SQLite/PostgreSQL、Memory/Redis、HTTP 与 SOCKS 代理池
 - **安全边界**：AES-256-GCM 凭据加密、客户端密钥哈希、日志脱敏、SSRF 与传输上限
-- **管理后台**：Dashboard、账号、模型、客户端密钥、请求审计、接口文档与热加载设置
+
+## 二开重点
+
+相比上游版本，这个二开分支重点补充了下面几类能力：
+
+1. **注册流程正式并入主系统**：新增 `registration/` 模块、后端注册控制器、前端注册页面，以及 Docker/Compose 运行入口，注册、导出、接管和导入不再依赖仓库外的零散脚本。
+2. **聊天工作区落地到管理台**：新增完整的 Chat 页面、会话存储、SSE 处理、消息渲染、图片灯箱和参数控制，管理端不再只是配置后台，也可以直接验证对话链路。
+3. **Grok Web 浏览器链路增强**：增加 browser worker、持久浏览器会话、Statsig 预热与签名、辅助校验逻辑以及 Fast 生图相关配套链路，强化 Web 侧的可用性和稳定性。
+4. **媒体与任务能力扩展**：补充图片任务处理、图库页、视频图库页、视频任务查询和更多前后端联动能力，方便围绕生成结果做统一管理。
+5. **部署与公开协作更完整**：新增注册容器入口、外部节点辅助脚本，并补齐 `.gitignore` 规则，默认排除 `config.yaml`、运行日志、cookies、调试抓取结果和本地构建产物。
 
 ## 架构
 
