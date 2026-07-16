@@ -9,7 +9,7 @@
 <p align="center">
   <a href="./backend/go.mod"><img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" /></a>
   <a href="./frontend/package.json"><img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827" /></a>
-  <a href="https://github.com/chenyme/grok2api/actions/workflows/docker-publish.yml"><img alt="Docker" src="https://github.com/chenyme/grok2api/actions/workflows/docker-publish.yml/badge.svg" /></a>
+  <a href="https://github.com/owen891/grok2api/actions/workflows/ghcr-image.yml"><img alt="Docker" src="https://github.com/owen891/grok2api/actions/workflows/ghcr-image.yml/badge.svg" /></a>
 </p>
 
 > [!TIP]
@@ -63,7 +63,7 @@ flowchart LR
 1. 准备配置：
 
 ```bash
-git clone https://github.com/chenyme/grok2api.git
+git clone https://github.com/owen891/grok2api.git
 cd grok2api
 cp config.example.yaml config.yaml
 ```
@@ -278,6 +278,7 @@ curl http://127.0.0.1:8000/v1/responses \
 - 本地媒体目录在多实例下必须使用共享卷或实例亲和
 - 持久化备份 `config.yaml`、关系型数据库和媒体目录
 - 不要将 OAuth、SSO、Cloudflare Cookie 或账号导出文件提交到 Git
+- 运行期敏感文件已默认加入 `.gitignore`，包括 `config.yaml`、`data/`、本地日志、cookies、调试抓取结果和本地构建产物
 - 对外暴露前建议配置反向代理、访问日志和基础网络防护
 
 ## 开发
