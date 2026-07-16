@@ -12,6 +12,10 @@
   <a href="https://github.com/owen891/grok2api/actions/workflows/ghcr-image.yml"><img alt="Docker" src="https://github.com/owen891/grok2api/actions/workflows/ghcr-image.yml/badge.svg" /></a>
 </p>
 
+<p align="center">
+  基于 <a href="https://github.com/chenyme/grok2api">chenyme/grok2api</a> 的二开版本
+</p>
+
 > [!TIP]
 > **个人新项目**<br>
 > 推荐个人新项目 [DEEIX-AI：DEEIX-Chat 轻量化 AI 平台](https://github.com/DEEIX-AI/DEEIX-Chat)：企业级模型路由、对话、文件、工具、计费、身份和运维的一体化 AI 平台，全面且极致的低占用，空载运行时仅占用 34 MB。

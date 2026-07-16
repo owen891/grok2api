@@ -221,7 +221,7 @@ export function AppShell() {
               {t("appName")}
             </Link>
             <Button variant="ghost" size="icon" className="size-7 text-muted-foreground [&_svg]:size-[15px]" asChild>
-              <a href="https://github.com/chenyme/grok2api" target="_blank" rel="noreferrer" aria-label="GitHub">
+              <a href="https://github.com/owen891/grok2api" target="_blank" rel="noreferrer" aria-label="GitHub">
                 <GitHubMark />
               </a>
             </Button>
@@ -245,7 +245,7 @@ export function AppShell() {
             </Sheet>
             <span className="text-sm font-semibold">{t("appName")}</span>
             <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-foreground" asChild>
-              <a href="https://github.com/chenyme/grok2api" target="_blank" rel="noreferrer" aria-label="GitHub">
+              <a href="https://github.com/owen891/grok2api" target="_blank" rel="noreferrer" aria-label="GitHub">
                 <GitHubMark />
               </a>
             </Button>
