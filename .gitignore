@@ -23,11 +23,15 @@ Thumbs.db
 /data/
 /backend/data/
 *.log
+__pycache__/
+*.py[cod]
 
 # Go
 /.gocache/
 /.gocache-*/
 /backend/grok2api
+/backend/*.exe
+/backend/frontend/
 /backend/coverage.out
 *.coverprofile
 *.test
@@ -36,10 +40,27 @@ Thumbs.db
 /.pnpm-store/
 /frontend/node_modules/
 /frontend/dist/
+/frontend/dist.bak/
 /frontend/.cache/
 /frontend/*.tsbuildinfo
+/frontend/chat-ui-*.png
+
+# Registration runtime credentials and reports
+/registration/accounts_cli.txt
+/registration/cpa_auths/
+/registration/cookies/
+/registration/screenshots/
+/registration/**/*report*.json
+/registration/**/oauth_output/
+/registration/**/sso_output/
 
 # Temporary files
 /release/
 /.tmp/
 /tmp/
+/*.out
+/*.err
+/*.out.bak.*
+
+# Local debugging captures
+/scripts/flaresolverr_grok_solution.json

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,7 +70,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	}
 	now := time.Now().UTC()
 	job := media.Job{
-		ID: "video_" + token, RequestID: input.RequestID,
+		ID: "video_" + token, Kind: media.JobKindVideo, RequestID: input.RequestID,
 		ClientKeyID: input.ClientKey.ID, ClientKeyName: input.ClientKey.Name,
 		AccountID: accountID, AccountName: lease.Credential.Name,
 		Provider: string(route.Provider), Model: externalModel, ModelRouteID: route.ID, UpstreamModel: model.DisplayUpstreamModel(route.Provider, route.UpstreamModel), Prompt: input.Prompt,
@@ -100,7 +101,7 @@ func (s *Service) GetVideo(ctx context.Context, id string, key clientkey.Key) (m
 		return media.Job{}, ErrResponseNotFound
 	}
 	job, err := s.mediaJobs.GetMediaJob(ctx, id, key.ID)
-	if err != nil {
+	if err != nil || job.Kind != media.JobKindVideo {
 		return media.Job{}, ErrResponseNotFound
 	}
 	return job, nil
@@ -139,7 +140,11 @@ func (s *Service) RunVideoWorkers(ctx context.Context) {
 					return
 				case id := <-s.mediaQueue:
 					err := batch.Do(ctx, func(workCtx context.Context) error {
-						s.processVideoJob(workCtx, id)
+						if strings.HasPrefix(id, "image_") {
+							s.processImageJob(workCtx, id)
+						} else {
+							s.processVideoJob(workCtx, id)
+						}
 						return nil
 					})
 					s.mediaMu.Lock()
@@ -260,6 +265,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	lastProgress := job.Progress
+	generationStarted := time.Now()
 	result, err := adapter.GenerateVideo(ctx, provider.VideoRequest{
 		Credential: lease.Credential, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
 		ReferenceURLs: decodeVideoInput(job.InputJSON),
@@ -277,6 +283,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			updateCancel()
 		},
 	})
+	s.selector.ObserveRouteResult(lease.Credential.ID, route.UpstreamModel, time.Since(generationStarted), err == nil)
 	if err != nil {
 		if parent.Err() != nil {
 			s.deferVideoJob(parent, job)

@@ -17,6 +17,7 @@ const (
 	startupRecoveryBudget    = 20 * time.Second
 	startupCriticalWindow    = 2 * time.Minute
 	startupCriticalLimit     = 100
+	statsigWarmupTimeout     = 90 * time.Second
 	statsigWarmupInterval    = 15 * time.Minute
 	webQuotaStaleAfter       = 30 * time.Minute
 	webQuotaCatchupEvery     = 30 * time.Minute
@@ -328,7 +329,7 @@ func (a *Application) runStatsigWarmup(ctx context.Context) {
 		if err == nil && len(values) == 0 {
 			a.startup.setStatsig("disabled", "没有启用的 Grok Web 账号", 0)
 		} else if err == nil {
-			warmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			warmCtx, cancel := context.WithTimeout(ctx, statsigWarmupTimeout)
 			var warmed int
 			warmed, err = a.web.WarmStatsig(warmCtx, values[0])
 			cancel()
@@ -345,6 +346,9 @@ func (a *Application) runStatsigWarmup(ctx context.Context) {
 }
 
 func (a *Application) queueDueWebQuotaRefresh(ctx context.Context) {
+	if a.web != nil && a.web.BrowserWorkerEnabled() {
+		return
+	}
 	windows, err := a.accounts.ListDueWebQuotaWindows(ctx, time.Now().UTC(), 1000)
 	if err != nil {
 		a.logger.Warn("web_quota_startup_catchup_failed", "error", err)
@@ -361,6 +365,10 @@ func (a *Application) queueDueWebQuotaRefresh(ctx context.Context) {
 }
 
 func (a *Application) runWebQuotaCatchup(ctx context.Context) {
+	if a.web != nil && a.web.BrowserWorkerEnabled() {
+		<-ctx.Done()
+		return
+	}
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {

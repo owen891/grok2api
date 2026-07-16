@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -116,6 +118,9 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 	if err != nil {
 		return account.QuotaWindow{}, err
 	}
+	if cfg.BrowserWorkerURL != "" {
+		return a.syncQuotaModeWithBrowser(ctx, cfg, credential, token, mode)
+	}
 	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, strconv.FormatUint(credential.ID, 10))
 	if err != nil {
 		return account.QuotaWindow{}, err
@@ -153,13 +158,62 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 		break
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		if response.StatusCode != http.StatusForbidden {
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		}
 		if response.StatusCode == http.StatusUnauthorized {
 			return account.QuotaWindow{}, provider.ErrUnauthorized
 		}
 		return account.QuotaWindow{}, fmt.Errorf("Grok Web 额度接口返回 %d", response.StatusCode)
 	}
 	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+	return parseQuotaModeResponse(body, credential.ID, mode)
+}
+
+func (a *Adapter) syncQuotaModeWithBrowser(ctx context.Context, cfg Config, credential account.Credential, token, mode string) (account.QuotaWindow, error) {
+	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, strconv.FormatUint(credential.ID, 10))
+	if err != nil {
+		return account.QuotaWindow{}, err
+	}
+	defer lease.Release()
+
+	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/rest/rate-limits"
+	value := browserWorkerRequest{
+		BaseURL: cfg.BaseURL, Endpoint: endpoint, ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent,
+		CloudflareCookie: lease.CFCookies, SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL,
+		RequestID: newRequestUUID(), TimeoutSeconds: cfg.QuotaTimeoutSeconds,
+		Payload: map[string]any{"modelName": mode},
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.QuotaTimeoutSeconds+60)*time.Second)
+	result, err := callBrowserWorkerQuota(requestCtx, cfg.BrowserWorkerURL, value)
+	cancel()
+	if err != nil {
+		return account.QuotaWindow{}, fmt.Errorf("Grok Web browser worker 额度同步: %w", err)
+	}
+	if strings.TrimSpace(result.Error) != "" {
+		return account.QuotaWindow{}, fmt.Errorf("Grok Web browser worker 额度同步: %s", strings.TrimSpace(result.Error))
+	}
+	if result.StatusCode < 100 || result.StatusCode > 599 {
+		return account.QuotaWindow{}, fmt.Errorf("Grok Web browser worker 返回无效额度状态")
+	}
+	body, err := base64.StdEncoding.DecodeString(result.BodyBase64)
+	if err != nil || len(body) > browserWorkerResponseLimit {
+		return account.QuotaWindow{}, fmt.Errorf("Grok Web browser worker 返回无效额度响应")
+	}
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		if result.StatusCode != http.StatusForbidden {
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, result.StatusCode, nil)
+		}
+		if result.StatusCode == http.StatusUnauthorized {
+			return account.QuotaWindow{}, provider.ErrUnauthorized
+		}
+		return account.QuotaWindow{}, fmt.Errorf("Grok Web 额度接口返回 %d", result.StatusCode)
+	}
+	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, result.StatusCode, nil)
+	return parseQuotaModeResponse(body, credential.ID, mode)
+}
+
+func parseQuotaModeResponse(body []byte, accountID uint64, mode string) (account.QuotaWindow, error) {
 	var value struct {
 		WindowSizeSeconds int `json:"windowSizeSeconds"`
 		RemainingQueries  int `json:"remainingQueries"`
@@ -177,7 +231,7 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 	now := time.Now().UTC()
 	resetAt := now.Add(time.Duration(value.WindowSizeSeconds) * time.Second)
 	return account.QuotaWindow{
-		AccountID: credential.ID, Mode: mode, Remaining: max(0, value.RemainingQueries), Total: value.TotalQueries,
+		AccountID: accountID, Mode: mode, Remaining: max(0, value.RemainingQueries), Total: value.TotalQueries,
 		WindowSeconds: value.WindowSizeSeconds, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream, UpdatedAt: now,
 	}, nil
 }
@@ -218,7 +272,9 @@ func (a *Adapter) syncWeeklyCredits(ctx context.Context, credential account.Cred
 		return account.QuotaWindow{}, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		if response.StatusCode != http.StatusForbidden {
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		}
 		if response.StatusCode == http.StatusUnauthorized {
 			return account.QuotaWindow{}, provider.ErrUnauthorized
 		}

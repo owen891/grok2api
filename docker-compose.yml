@@ -4,16 +4,65 @@ services:
   grok2api:
     container_name: grok2api
     image: "${GROK2API_IMAGE:-ghcr.io/chenyme/grok2api:latest}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NODE_VERSION: "${NODE_VERSION:-22}"
+        GO_VERSION: "${GO_VERSION:-1.26}"
+    pull_policy: missing
     ports:
       - "${GROK2API_PORT:-8000}:8000"
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
+      GROK_WEB_BROWSER_WORKER_URL: "http://grok-web-browser:8192"
+      REGISTRATION_BROWSER_MODE: "${REGISTRATION_BROWSER_MODE:-xvfb}"
+      REGISTRATION_BROWSER_PATH: "${REGISTRATION_BROWSER_PATH:-/usr/bin/chromium}"
+      REGISTRATION_BROWSER_WINDOW: "${REGISTRATION_BROWSER_WINDOW:-1280,900}"
+      REGISTRATION_XVFB_SCREEN: "${REGISTRATION_XVFB_SCREEN:-1280x900x24}"
+    shm_size: "1gb"
     volumes:
       - "${GROK2API_CONFIG:-./config.yaml}:/run/grok2api/config.yaml:ro"
       - grok2api-data:/app/data
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
+    depends_on:
+      grok-web-browser:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+
+  grok-web-browser:
+    container_name: grok-web-browser
+    image: "${FLARESOLVERR_IMAGE:-ghcr.io/flaresolverr/flaresolverr@sha256:139dfee1c6f89249c8d665d1333a42e8ec74ec0a86bc6bb1c8461e10d3a66a47}"
+    command:
+      - /usr/local/bin/python
+      - -u
+      - /opt/grok-worker/grok_web_browser_worker.py
+      - --listen
+      - 0.0.0.0:8192
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      HEADLESS: "true"
+      LOG_LEVEL: info
+      GROK_WORKER_LOOPBACK_PROXY_HOST: "host.docker.internal"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${GROK_WEB_BROWSER_WORKER_PORT:-8192}:8192"
+    volumes:
+      - ./scripts/grok_web_browser_worker.py:/opt/grok-worker/grok_web_browser_worker.py:ro
+    shm_size: "2gb"
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8192/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
     security_opt:
       - no-new-privileges:true
 

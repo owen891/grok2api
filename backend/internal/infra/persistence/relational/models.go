@@ -320,6 +320,7 @@ func (webResponseStateModel) TableName() string { return "web_response_states" }
 
 type mediaJobModel struct {
 	ID              string  `gorm:"size:64;primaryKey;check:chk_media_jobs_id,length(id) BETWEEN 1 AND 64"`
+	Kind            string  `gorm:"size:16;not null;default:'video';check:chk_media_jobs_kind,kind IN ('video','image')"`
 	RequestID       string  `gorm:"size:64;not null;check:chk_media_jobs_request_id,length(request_id) BETWEEN 1 AND 64"`
 	ClientKeyID     uint64  `gorm:"not null;check:chk_media_jobs_client_key_id,client_key_id > 0"`
 	ClientKeyName   string  `gorm:"size:160;not null;default:'';check:chk_media_jobs_client_key_name,length(client_key_name) <= 160"`
@@ -340,6 +341,7 @@ type mediaJobModel struct {
 	Status          string  `gorm:"size:32;not null;check:chk_media_jobs_status,status IN ('queued','in_progress','completed','failed')"`
 	Progress        int     `gorm:"not null;check:chk_media_jobs_progress,progress BETWEEN 0 AND 100"`
 	InputJSON       string  `gorm:"type:text;not null;default:'{}';check:chk_media_jobs_input_json,length(input_json) <= 1048576"`
+	OutputJSON      string  `gorm:"type:text;not null;default:'';check:chk_media_jobs_output_json,length(output_json) <= 134217728"`
 	UpstreamURL     string  `gorm:"type:text;not null;default:'';check:chk_media_jobs_upstream_url,length(upstream_url) <= 8192"`
 	ContentType     string  `gorm:"size:128;not null;default:'';check:chk_media_jobs_content_type,length(content_type) <= 128"`
 	ErrorCode       string  `gorm:"size:100;not null;default:'';check:chk_media_jobs_error_code,length(error_code) <= 100"`

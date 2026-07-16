@@ -3,6 +3,8 @@ import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from "re
 import { Spinner } from "@/components/ui/spinner";
 
 const AccountsPage = lazyNamed(() => import("@/features/accounts/accounts-page"), "AccountsPage");
+const RegistrationPage = lazyNamed(() => import("@/features/registration/registration-page"), "RegistrationPage");
+const ChatPage = lazyNamed(() => import("@/features/chat/chat-page"), "ChatPage");
 const AppShell = lazyNamed(() => import("@/app/app-shell"), "AppShell");
 const RequestAuditsPage = lazyNamed(() => import("@/features/audits/request-audits-page"), "RequestAuditsPage");
 const ClientKeysPage = lazyNamed(() => import("@/features/client-keys/client-keys-page"), "ClientKeysPage");
@@ -23,6 +25,14 @@ function DeferredPage({ page: Page }: { page: ComponentType }) {
 
 export function DeferredAccountsPage() {
   return <DeferredPage page={AccountsPage} />;
+}
+
+export function DeferredRegistrationPage() {
+  return <DeferredPage page={RegistrationPage} />;
+}
+
+export function DeferredChatPage() {
+  return <DeferredPage page={ChatPage} />;
 }
 
 export function DeferredAppShell() {

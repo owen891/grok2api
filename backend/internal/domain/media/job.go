@@ -4,7 +4,12 @@ import "time"
 
 type Status string
 
+type JobKind string
+
 const (
+	JobKindVideo JobKind = "video"
+	JobKindImage JobKind = "image"
+
 	StatusQueued     Status = "queued"
 	StatusInProgress Status = "in_progress"
 	StatusCompleted  Status = "completed"
@@ -14,6 +19,7 @@ const (
 // Job 表示可跨进程重启恢复的异步视频任务。
 type Job struct {
 	ID              string
+	Kind            JobKind
 	RequestID       string
 	ClientKeyID     uint64
 	ClientKeyName   string
@@ -34,6 +40,7 @@ type Job struct {
 	Status          Status
 	Progress        int
 	InputJSON       string
+	OutputJSON      string
 	UpstreamURL     string
 	ContentType     string
 	ErrorCode       string

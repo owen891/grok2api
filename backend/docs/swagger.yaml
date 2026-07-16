@@ -38,6 +38,9 @@ definitions:
       aspect_ratio:
         example: "16:9"
         type: string
+      async:
+        example: true
+        type: boolean
       model:
         example: grok-imagine-image-quality
         type: string
@@ -53,6 +56,9 @@ definitions:
       response_format:
         example: url
         type: string
+      stream:
+        example: false
+        type: boolean
     type: object
   httpserver.SwaggerImageReference:
     properties:
@@ -188,6 +194,32 @@ paths:
       summary: 创建 Chat Completion
       tags:
       - Chat
+  /v1/images/{request_id}:
+    get:
+      parameters:
+      - description: Request ID
+        in: path
+        name: request_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 查询异步图片任务
+      tags:
+      - Images
   /v1/images/edits:
     post:
       consumes:

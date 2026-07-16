@@ -34,6 +34,19 @@ type Lease struct {
 	release   func()
 }
 
+// UnavailableError means at least one enabled node is configured for the
+// requested scope, but every configured node is currently cooling down.
+type UnavailableError struct {
+	Scope domain.Scope
+}
+
+func (e *UnavailableError) Error() string {
+	if e == nil {
+		return "当前没有可用的出口节点"
+	}
+	return fmt.Sprintf("当前没有可用的 %s 出口节点", e.Scope)
+}
+
 type requestClient interface {
 	Do(*http.Request) (*http.Response, error)
 	CloseIdleConnections()
@@ -95,10 +108,13 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		if err != nil {
 			return nil, false, err
 		}
-		configured = configured || len(nodes) > 0
 		candidateAvailable := make([]domain.Node, 0, len(nodes))
 		for _, node := range nodes {
-			if node.Enabled && (node.CooldownUntil == nil || !now.Before(*node.CooldownUntil)) {
+			if !node.Enabled {
+				continue
+			}
+			configured = true
+			if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) {
 				candidateAvailable = append(candidateAvailable, node)
 			}
 		}
@@ -109,7 +125,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	}
 	if len(available) == 0 {
 		if configured {
-			return nil, false, fmt.Errorf("当前没有可用的 %s 出口节点", scope)
+			return nil, false, &UnavailableError{Scope: scope}
 		}
 		if !allowDirect {
 			recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})

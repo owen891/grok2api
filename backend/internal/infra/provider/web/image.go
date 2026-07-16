@@ -230,6 +230,9 @@ func (a *Adapter) GenerateImage(ctx context.Context, request provider.ImageGener
 		if request.Streaming {
 			return invalidImageRequest("grok-imagine-image 不支持 stream")
 		}
+		if err := validateLiteImageOptions(request); err != nil {
+			return invalidImageRequest(err.Error())
+		}
 		if count > maxGeneratedImages {
 			return invalidImageRequest("n 不能超过 10")
 		}
@@ -256,12 +259,34 @@ func (a *Adapter) GenerateImage(ctx context.Context, request provider.ImageGener
 	return a.generateWSImage(ctx, request, count, format, ratio, resolution, modelConfig)
 }
 
+func validateLiteImageOptions(request provider.ImageGenerationRequest) error {
+	if value := strings.ToLower(strings.TrimSpace(request.Resolution)); value != "" && value != "1k" {
+		return fmt.Errorf("grok-imagine-image Fast 只支持 resolution=1k；2k 需要启用 grok-imagine-image-quality")
+	}
+	if strings.TrimSpace(request.AspectRatio) != "" || strings.TrimSpace(request.Size) != "" {
+		ratio, err := resolveImageAspectRatio(request.AspectRatio, request.Size)
+		if err != nil {
+			return err
+		}
+		if ratio != "1:1" {
+			return fmt.Errorf("grok-imagine-image Fast 只支持 aspect_ratio=1:1；其他比例需要启用 grok-imagine-image-quality")
+		}
+	}
+	return nil
+}
+
 func (a *Adapter) generateLiteImage(ctx context.Context, request provider.ImageGenerationRequest, count int, format string) (*provider.Response, error) {
 	spec, _ := Resolve(request.Model)
 	urls := make([]string, 0, count)
 	for len(urls) < count {
 		value, err := a.generateLiteImageURL(ctx, request.Credential, spec, request.Prompt)
 		if err != nil {
+			if isWebUsageLimitError(err) && len(urls) == 0 {
+				return imageUsageLimitResponse(), nil
+			}
+			if errors.Is(err, errWebAntiBot) && len(urls) == 0 {
+				return antiBotProviderResponse(), nil
+			}
 			var upstreamErr *liteUpstreamError
 			if errors.As(err, &upstreamErr) && len(urls) == 0 {
 				return upstreamErr.Response(), nil
@@ -299,18 +324,24 @@ func (e *liteUpstreamError) Response() *provider.Response {
 
 func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.Credential, spec ModelSpec, prompt string) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		upstream, lease, _, statsigTarget, err := a.openChat(ctx, credential, "", spec, normalizedChatInput{Prompt: "Drawing: " + prompt})
+		upstream, lease, statsigTarget, err := a.openLiteImageUpstream(ctx, credential, spec, prompt)
 		if err != nil {
 			return "", err
 		}
 		if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(upstream.Body, 1<<20))
 			_ = upstream.Body.Close()
-			if upstream.StatusCode == http.StatusForbidden {
+			if isAntiBotResponse(upstream.StatusCode, body) {
 				if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, statsigTarget) {
 					lease.Release()
 					continue
 				}
+				a.feedbackAntiBot(ctx, lease, statsigTarget)
+				lease.Release()
+				response := antiBotProviderResponseWithStatus(upstream.StatusCode)
+				body, _ = io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				return "", &liteUpstreamError{StatusCode: http.StatusForbidden, Status: "403 Forbidden", Body: body}
 			}
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
 			lease.Release()
@@ -369,6 +400,7 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 		}
 		if len(parsed.Images) == 0 {
 			diagnostics := inspectLiteCapture(capture.Bytes())
+			candidates := extractCapturedImageCandidates(capture.Bytes())
 			a.log().Warn("web_lite_image_not_found",
 				"account_id", credential.ID,
 				"captured_bytes", len(capture.Bytes()),
@@ -378,11 +410,27 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 				"image_chunks", diagnostics.ImageChunks,
 				"image_urls", diagnostics.ImageURLs,
 				"image_fields", diagnostics.ImageFields,
+				"image_uuids", diagnostics.ImageUUIDs,
+				"candidate_urls", len(candidates),
 				"max_progress", diagnostics.MaxProgress,
 				"soft_stop", diagnostics.SoftStop,
 				"upstream_error_code", diagnostics.ErrorCode,
 				"upstream_error", diagnostics.ErrorMessage,
 			)
+			for _, candidate := range candidates {
+				if raw, err := a.downloadImage(ctx, credential, candidate); err == nil && len(raw) > 0 {
+					a.log().Info("web_lite_image_candidate_recovered",
+						"account_id", credential.ID,
+						"candidate", candidate,
+						"bytes", len(raw),
+					)
+					return candidate, nil
+				}
+			}
+			if attempt == 0 {
+				a.log().Warn("web_lite_image_empty_retry", "account_id", credential.ID)
+				continue
+			}
 			return "", fmt.Errorf("Grok Web Lite 响应结束但未解析到最终图片")
 		}
 		// Lite 上游固定生成两张，但每次查询只计一次 Fast 额度；按旧协议取首张并为 n 重复查询。
@@ -557,6 +605,9 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 	for !collector.Done(modelConfig.NativeBatchSize) {
 		messageType, data, readErr := connection.ReadMessage()
 		if readErr != nil {
+			if isWebUsageLimitError(readErr) {
+				return imageUsageLimitResponse(), nil
+			}
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, readErr)
 			return nil, fmt.Errorf("读取 Imagine WebSocket: %w", readErr)
 		}
@@ -568,23 +619,33 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 			continue
 		}
 		if message["type"] == "error" {
-			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
-			return nil, upstreamErr
+			upstreamErr := webResponseError(message)
+			if isWebUsageLimitError(upstreamErr) {
+				return imageUsageLimitResponse(), nil
+			}
+			if errors.Is(upstreamErr, errWebAntiBot) {
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusForbidden, upstreamErr)
+				return antiBotProviderResponse(), nil
+			}
+			return jsonProviderResponse(http.StatusBadGateway, map[string]any{"error": map[string]any{
+				"message": upstreamErr.Error(), "type": "server_error", "code": "image_generation_failed",
+			}}), nil
 		}
 		collector.Accept(message)
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
 	images := collector.Images()
 	if len(images) == 0 {
+		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusBadGateway, nil)
 		return nil, fmt.Errorf("Imagine WebSocket 完成但没有可用图片")
 	}
 	if len(images) < count {
+		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusBadGateway, nil)
 		return jsonProviderResponse(http.StatusBadGateway, map[string]any{"error": map[string]any{
 			"message": fmt.Sprintf("上游仅返回 %d/%d 张可用图片", len(images), count),
 			"type":    "server_error", "code": "image_generation_incomplete",
 		}}), nil
 	}
+	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
 	urls := make([]string, 0, len(images))
 	blobs := make([]string, 0, len(images))
 	for _, image := range images {
@@ -596,6 +657,14 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 		result.QuotaUnits = count
 	}
 	return result, err
+}
+
+func imageUsageLimitResponse() *provider.Response {
+	return jsonProviderResponse(http.StatusTooManyRequests, map[string]any{"error": map[string]any{
+		"message": "当前 Grok 账号的图片额度已用完，正在尝试其他账号",
+		"type":    "rate_limit_error",
+		"code":    "usage_limit_reached",
+	}})
 }
 
 func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditRequest) (*provider.Response, error) {
@@ -716,6 +785,66 @@ func extractCapturedImageURLs(data []byte) []string {
 	return results
 }
 
+// extractCapturedImageCandidates collects looser candidate URLs (including uuid heuristics) for soft_stop recovery.
+func extractCapturedImageCandidates(data []byte) []string {
+	results := extractCapturedImageURLs(data)
+	uuids := make([]string, 0, 2)
+	_ = consumeJSONObjects(bytes.NewReader(data), 8<<20, func(frame []byte) error {
+		var value any
+		if json.Unmarshal(frame, &value) == nil {
+			collectCapturedImageUUIDs(value, &uuids)
+		}
+		return nil
+	})
+	for _, uuid := range uuids {
+		for _, candidate := range imageCandidatesFromUUID(uuid) {
+			if !containsString(results, candidate) {
+				results = append(results, candidate)
+			}
+		}
+	}
+	return results
+}
+
+func collectCapturedImageUUIDs(value any, results *[]string) {
+	switch current := value.(type) {
+	case map[string]any:
+		if uuid := firstString(current, "imageUuid", "image_uuid", "uuid"); uuid != "" {
+			if !containsString(*results, uuid) {
+				*results = append(*results, uuid)
+			}
+		}
+		for _, nested := range current {
+			collectCapturedImageUUIDs(nested, results)
+		}
+	case []any:
+		for _, nested := range current {
+			collectCapturedImageUUIDs(nested, results)
+		}
+	case string:
+		trimmed := strings.TrimSpace(current)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			var nested any
+			if json.Unmarshal([]byte(trimmed), &nested) == nil {
+				collectCapturedImageUUIDs(nested, results)
+			}
+		}
+	}
+}
+
+func imageCandidatesFromUUID(uuid string) []string {
+	uuid = strings.TrimSpace(uuid)
+	if uuid == "" || strings.ContainsAny(uuid, "/\\{}[]\"") {
+		return nil
+	}
+	// Common soft_stop shape: image_chunk only has imageUuid; final assets live under assets.grok.com.
+	return []string{
+		"https://assets.grok.com/generated/" + uuid + "/image.jpg",
+		"https://assets.grok.com/generated/" + uuid + ".jpg",
+		"https://assets.grok.com/" + uuid,
+	}
+}
+
 type liteCaptureDiagnostics struct {
 	Frames         int
 	ResponseFields []string
@@ -723,6 +852,7 @@ type liteCaptureDiagnostics struct {
 	ImageChunks    int
 	ImageURLs      int
 	ImageFields    []string
+	ImageUUIDs     []string
 	MaxProgress    int
 	SoftStop       bool
 	ErrorCode      string
@@ -785,8 +915,13 @@ func inspectLiteCaptureValue(value any, result *liteCaptureDiagnostics, imageFie
 					for field := range chunk {
 						imageFields[field] = struct{}{}
 					}
-					if firstString(chunk, "imageUrl", "image_url", "url") != "" {
+					if firstString(chunk, "imageUrl", "image_url", "url", "generatedImageUrl", "finalImageUrl") != "" {
 						result.ImageURLs++
+					}
+					if uuid := firstString(chunk, "imageUuid", "image_uuid", "uuid", "id"); uuid != "" {
+						if !containsString(result.ImageUUIDs, uuid) {
+							result.ImageUUIDs = append(result.ImageUUIDs, uuid)
+						}
 					}
 					if progress, ok := numberAsInt(chunk["progress"]); ok && progress > result.MaxProgress {
 						result.MaxProgress = progress
@@ -814,13 +949,20 @@ func sortedSetValues(values map[string]struct{}) []string {
 func collectCapturedImageURLs(value any, results *[]string) {
 	switch current := value.(type) {
 	case map[string]any:
+		moderated, _ := current["moderated"].(bool)
+		if moderated {
+			return
+		}
 		if rawURL := imageURLFromCardData(current); rawURL != "" {
 			appendCapturedImageURL(results, rawURL)
 		}
-		moderated, _ := current["moderated"].(bool)
 		progress, hasProgress := numberAsInt(current["progress"])
-		if !moderated && hasProgress && progress >= 100 {
-			appendCapturedImageURL(results, firstString(current, "imageUrl", "image_url", "url"))
+		finalFlag, hasFinal := current["isFinal"].(bool)
+		urlValue := firstString(current, "imageUrl", "image_url", "url", "generatedImageUrl", "finalImageUrl", "mediaUrl", "assetUrl")
+		if urlValue != "" {
+			if (hasFinal && finalFlag) || (hasProgress && progress >= 100) || (!strings.Contains(urlValue, "-part-") && (strings.Contains(urlValue, "/generated/") || strings.Contains(urlValue, "assets.grok.com") || strings.Contains(urlValue, "imagine-public.x.ai"))) {
+				appendCapturedImageURL(results, urlValue)
+			}
 		}
 		for _, nested := range current {
 			collectCapturedImageURLs(nested, results)
@@ -844,7 +986,16 @@ func collectCapturedImageURLs(value any, results *[]string) {
 
 func appendCapturedImageURL(results *[]string, value string) {
 	value = strings.TrimSpace(value)
-	if !strings.Contains(value, "/generated/") || strings.Contains(value, "-part-") || strings.ContainsAny(value, "{}[]\"") {
+	if value == "" || strings.Contains(value, "-part-") || strings.ContainsAny(value, "{}[]\"") {
+		return
+	}
+	lower := strings.ToLower(value)
+	assetLike := strings.Contains(value, "/generated/") ||
+		strings.Contains(lower, "assets.grok.com") ||
+		strings.Contains(lower, "imagine-public.x.ai") ||
+		strings.HasPrefix(value, "users/") ||
+		strings.HasPrefix(value, "/users/")
+	if !assetLike {
 		return
 	}
 	if !strings.HasPrefix(value, "https://") && !strings.HasPrefix(value, "users/") && !strings.HasPrefix(value, "/users/") {
@@ -1039,6 +1190,11 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 				_ = writer.CloseWithError(ctx.Err())
 				return
 			}
+			if isWebUsageLimitError(readErr) {
+				writeImagineStreamFailure(writer, streamID, "usage_limit_reached", "当前 Grok 账号的图片额度已用完")
+				_ = writer.CloseWithError(readErr)
+				return
+			}
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, readErr)
 			writeImagineStreamFailure(writer, streamID, "upstream_stream_error", "图片生成流意外中断")
 			_ = writer.CloseWithError(readErr)
@@ -1052,9 +1208,16 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 			continue
 		}
 		if message["type"] == "error" {
-			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
-			writeImagineStreamFailure(writer, streamID, "upstream_error", "上游图片生成失败")
+			upstreamErr := webResponseError(message)
+			if isWebUsageLimitError(upstreamErr) {
+				writeImagineStreamFailure(writer, streamID, "usage_limit_reached", "当前 Grok 账号的图片额度已用完")
+				_ = writer.CloseWithError(upstreamErr)
+				return
+			}
+			if errors.Is(upstreamErr, errWebAntiBot) {
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusForbidden, upstreamErr)
+			}
+			writeImagineStreamFailure(writer, streamID, "upstream_error", upstreamErr.Error())
 			_ = writer.CloseWithError(upstreamErr)
 			return
 		}

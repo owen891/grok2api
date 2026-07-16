@@ -137,6 +137,22 @@ func TestParseImportedCredentialsOfficialOAuthResponse(t *testing.T) {
 	}
 }
 
+func TestParseImportedCredentialsLegacyCPAFile(t *testing.T) {
+	expiresAt := time.Date(2026, 7, 14, 21, 0, 0, 0, time.UTC)
+	data, _ := json.Marshal(map[string]any{
+		"type": "cpa", "auth_kind": "oauth", "access_token": "opaque-access", "refresh_token": "refresh",
+		"token_type": "Bearer", "email": "legacy@example.com", "sub": "legacy-subject", "expired": expiresAt.Format(time.RFC3339),
+	})
+
+	values, err := parseImportedCredentials(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].UserID != "legacy-subject" || values[0].Email != "legacy@example.com" || !values[0].ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("旧 CPA 凭据导入结果不正确: %#v", values)
+	}
+}
+
 func TestParseImportedCredentialsRejectsUnsupportedMap(t *testing.T) {
 	_, err := parseImportedCredentials([]byte(`{"https://auth.x.ai::client":{"key":"access","refresh_token":"refresh"}}`))
 	if err == nil {

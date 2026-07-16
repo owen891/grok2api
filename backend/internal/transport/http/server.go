@@ -17,6 +17,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
+	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
@@ -28,6 +29,7 @@ import (
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	modelhttp "github.com/chenyme/grok2api/backend/internal/transport/http/model"
+	registrationhttp "github.com/chenyme/grok2api/backend/internal/transport/http/registration"
 	settingshttp "github.com/chenyme/grok2api/backend/internal/transport/http/settings"
 	systemhttp "github.com/chenyme/grok2api/backend/internal/transport/http/system"
 	"github.com/gin-gonic/gin"
@@ -58,6 +60,7 @@ type Dependencies struct {
 	Media        *mediaapp.Service
 	Settings     *settingsapp.Service
 	Egress       *egressapp.Service
+	Registration *registrationapp.Controller
 }
 
 type ReadinessComponent struct {
@@ -143,6 +146,9 @@ func New(deps Dependencies) *gin.Engine {
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
+	if deps.Registration != nil {
+		registrationhttp.NewHandler(deps.Registration).Register(adminProtected)
+	}
 	systemhttp.NewHandler(deps.PublicAPIBaseURL).Register(adminProtected)
 
 	v1 := router.Group("/v1")

@@ -94,7 +94,20 @@ docker compose up -d
 
 访问 `http://127.0.0.1:8000`。
 
+使用当前源码构建镜像时执行：
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+`docker compose pull` 使用官方镜像；`docker compose build` 才会包含当前工作树的后端、前端和注册 worker 改动。
+
 官方镜像已经包含前端构建产物，管理端与 API 由同一个 Go 服务提供。Compose 默认将 `config.yaml` 只读挂载到容器，并使用 `grok2api-data` 命名卷保存 SQLite 数据库和本地媒体。
+
+Compose 同时启动 `grok-web-browser` 服务为 Basic 账号的 Fast 生图保持持久 Chromium 会话。Go 服务仍负责账号调度、额度和图片归档，Grok REST 与 Statsig 签名请求在同一浏览器、代理出口和 Cookie Jar 中完成。服务启动时会用一个启用的 Web 账号和实际出口预热 Grok 页面及 Statsig，`/healthz` 检查 worker 进程，`/readyz` 仅在浏览器会话完成初始化后返回成功。管理端 `grok_web` 节点如果使用宿主机 `127.0.0.1` 代理，worker 会在容器内映射为 `host.docker.internal`。源码运行时可在 `provider.web.browserWorkerURL` 配置 `http://127.0.0.1:8192`。Compose 默认固定到已验证的 FlareSolverr v3.5.0 镜像 digest，可通过 `FLARESOLVERR_IMAGE` 显式覆盖。
+
+Basic 账号的 `grok-imagine-image` Fast 路由只承诺提示词、数量和 `1:1`/`1k` 默认规格；其他宽高比或 `2k` 会返回参数错误，不会静默生成默认规格。需要这些规格时启用 `grok-imagine-image-quality` 并使用支持的账号额度。
 
 常用命令：
 

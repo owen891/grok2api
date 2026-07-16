@@ -49,6 +49,17 @@ func TestMediaJobRepositoryListMediaJobsPaginatesAndFilters(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	imageJob := testMediaJob("image_job_completed", accountValue.ID, key.ID, mediadomain.StatusCompleted, now)
+	imageJob.Kind = mediadomain.JobKindImage
+	imageJob.Model = "grok-imagine-image"
+	imageJob.OutputJSON = `{"created":123,"data":[{"url":"https://example.com/image.png"}]}`
+	if err := jobRepo.CreateMediaJob(ctx, imageJob); err != nil {
+		t.Fatal(err)
+	}
+	storedImage, err := jobRepo.GetMediaJob(ctx, imageJob.ID, key.ID)
+	if err != nil || storedImage.Kind != mediadomain.JobKindImage || storedImage.OutputJSON != imageJob.OutputJSON {
+		t.Fatalf("stored image job = %#v, err = %v", storedImage, err)
+	}
 
 	firstPage, total, err := jobRepo.ListMediaJobs(ctx, repository.MediaJobListQuery{
 		Page: repository.PageQuery{Offset: 0, Limit: 2},

@@ -157,18 +157,24 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		}
 		previous = currentPrevious
 		if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
-			if upstream.StatusCode == http.StatusForbidden {
+			body, _ := io.ReadAll(io.LimitReader(upstream.Body, 1<<20))
+			_ = upstream.Body.Close()
+			if isAntiBotStatus(upstream.StatusCode) || looksLikeAntiBot(body) {
 				if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, statsigTarget) {
-					a.releaseStatsigRetry(upstream, lease)
+					lease.Release()
 					continue
 				}
+				a.feedbackAntiBot(ctx, lease, statsigTarget)
+				lease.Release()
+				return antiBotProviderResponseWithStatus(upstream.StatusCode), nil
 			}
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
+			lease.Release()
 			return &provider.Response{
-				StatusCode: upstream.StatusCode, Status: upstream.Status, Header: http.Header(upstream.Header),
-				Body: &releaseBody{ReadCloser: upstream.Body, release: func() {
-					a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
-					lease.Release()
-				}},
+				StatusCode: upstream.StatusCode,
+				Status:     upstream.Status,
+				Header:     http.Header(upstream.Header),
+				Body:       io.NopCloser(bytes.NewReader(body)),
 			}, nil
 		}
 
@@ -246,6 +252,9 @@ func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 		line, err := reader.ReadString('\n')
 		if line != "" {
 			prefetched.WriteString(line)
+			if looksLikeAntiBot(prefetched.Bytes()) {
+				return nil, fmt.Errorf("%w: %s", errWebAntiBot, cloudflareChallengeMessage(0))
+			}
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "data:") {
 				trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
@@ -264,6 +273,9 @@ func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) && prefetched.Len() > 0 {
+				if looksLikeAntiBot(prefetched.Bytes()) {
+					return nil, fmt.Errorf("%w: %s", errWebAntiBot, cloudflareChallengeMessage(0))
+				}
 				return &readerCloser{Reader: bytes.NewReader(prefetched.Bytes()), closer: source}, nil
 			}
 			return nil, err
@@ -271,7 +283,6 @@ func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 	}
 	return nil, fmt.Errorf("Grok Web 首个流事件超过安全检查上限")
 }
-
 func (a *Adapter) openChat(ctx context.Context, credential account.Credential, previousResponseID string, spec ModelSpec, input normalizedChatInput) (*http.Response, *infraegress.Lease, *inferencedomain.WebResponseState, string, error) {
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
@@ -281,6 +292,13 @@ func (a *Adapter) openChat(ctx context.Context, credential account.Credential, p
 	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, fmt.Sprintf("%d", credential.ID))
 	if err != nil {
 		return nil, nil, nil, "", err
+	}
+	if lease.NodeID == 0 {
+		a.log().Warn("web_using_direct_egress",
+			"account_id", credential.ID,
+			"scope", "web",
+			"hint", "no grok_web egress node configured; Cloudflare challenges are likely",
+		)
 	}
 	mode := spec.Mode
 	endpoint := cfg.BaseURL + "/rest/app-chat/conversations/new"
@@ -800,13 +818,11 @@ func parseUpstreamFrame(data []byte, parsed *parsedChat) (string, string, error)
 		}
 	}
 	if imageResponse, _ := response["streamingImageGenerationResponse"].(map[string]any); imageResponse != nil {
-		rawURL, _ := imageResponse["imageUrl"].(string)
-		if rawURL == "" {
-			rawURL, _ = imageResponse["url"].(string)
-		}
+		rawURL := firstString(imageResponse, "imageUrl", "image_url", "url", "generatedImageUrl", "finalImageUrl", "mediaUrl", "assetUrl")
 		if rawURL != "" {
 			completed, _ := imageResponse["isFinal"].(bool)
-			if completed || imageResponse["progress"] == float64(100) {
+			progress, hasProgress := numberAsInt(imageResponse["progress"])
+			if completed || (hasProgress && progress >= 100) || imageResponse["progress"] == float64(100) {
 				rawURL = absoluteAssetURL(rawURL)
 				parsed.Images = appendUniqueString(parsed.Images, rawURL)
 				return "image", rawURL, nil
@@ -825,18 +841,20 @@ func webResponseError(value map[string]any) error {
 	if code == 7 || strings.Contains(strings.ToLower(message), "anti-bot") {
 		return fmt.Errorf("%w: %s", errWebAntiBot, message)
 	}
-	normalized := strings.ToLower(message)
-	if strings.Contains(normalized, "usage limit") || strings.Contains(normalized, "usage quota") {
+	if isWebUsageLimitMessage(message) {
 		return fmt.Errorf("%w: %s", errWebUsageLimit, message)
 	}
 	return errors.New(message)
 }
 
-func antiBotProviderResponse() *provider.Response {
-	return jsonProviderResponse(http.StatusForbidden, map[string]any{"error": map[string]any{
-		"message": "Grok Web 出口会话被上游反机器人规则拒绝，请检查代理、User-Agent 与 Cloudflare Cookie 是否来自同一浏览器会话",
-		"type":    "upstream_error", "code": "anti_bot_rejected",
-	}})
+func isWebUsageLimitMessage(message string) bool {
+	normalized := strings.ToLower(message)
+	return strings.Contains(normalized, "usage limit") || strings.Contains(normalized, "usage quota") ||
+		strings.Contains(normalized, "image rate limit") || strings.Contains(normalized, "rate limit")
+}
+
+func isWebUsageLimitError(err error) bool {
+	return errors.Is(err, errWebUsageLimit) || (err != nil && isWebUsageLimitMessage(err.Error()))
 }
 
 func collectModelResponseImages(parsed *parsedChat, modelResponse map[string]any) string {

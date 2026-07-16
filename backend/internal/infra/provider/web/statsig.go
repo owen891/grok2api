@@ -294,15 +294,21 @@ func fetchStatsigMetaContent(ctx context.Context, baseURL, token string, lease *
 		return "", err
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("Grok index 返回 %d", response.StatusCode)
-	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, statsigMetaBodyLimit+1))
 	if err != nil {
 		return "", err
 	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if isAntiBotResponse(response.StatusCode, body) {
+			return "", fmt.Errorf("%w: %s", errWebAntiBot, cloudflareChallengeMessage(response.StatusCode))
+		}
+		return "", fmt.Errorf("Grok index returned %d", response.StatusCode)
+	}
 	if len(body) > statsigMetaBodyLimit {
 		return "", fmt.Errorf("Grok index 超过安全上限")
+	}
+	if looksLikeAntiBot(body) {
+		return "", fmt.Errorf("%w: %s", errWebAntiBot, cloudflareChallengeMessage(response.StatusCode))
 	}
 	content, err := extractStatsigMetaContent(body)
 	if err != nil {
@@ -394,6 +400,28 @@ func (a *Adapter) applySignedStatsig(ctx context.Context, request *http.Request,
 // WarmStatsig 只使用一个 Web 账号和一个出口租约预热共享签名，不会逐账号访问上游。
 func (a *Adapter) WarmStatsig(ctx context.Context, credential account.Credential) (int, error) {
 	cfg := a.config()
+	if cfg.BrowserWorkerURL != "" {
+		token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
+		if err != nil {
+			return 0, err
+		}
+		lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, fmt.Sprintf("%d", credential.ID))
+		if err != nil {
+			return 0, err
+		}
+		defer lease.Release()
+		baseURL := strings.TrimRight(cfg.BaseURL, "/")
+		value := browserWorkerRequest{
+			BaseURL: cfg.BaseURL, Endpoint: baseURL + "/rest/app-chat/conversations/new",
+			ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent, CloudflareCookie: lease.CFCookies,
+			SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL, RequestID: newRequestUUID(),
+			TimeoutSeconds: cfg.ImageTimeoutSeconds, Payload: map[string]any{},
+		}
+		if err := callBrowserWorkerWarm(ctx, cfg.BrowserWorkerURL, value); err != nil {
+			return 0, fmt.Errorf("Grok Web browser worker 预热: %w", err)
+		}
+		return 1, nil
+	}
 	if cfg.StatsigMode == "manual" {
 		if !validStatsigID(strings.TrimSpace(cfg.StatsigManualValue)) {
 			return 0, fmt.Errorf("手动 Statsig 配置无效")

@@ -125,7 +125,7 @@ func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job
 	if value.ClaimToken != "" {
 		query = query.Where("claim_token = ?", value.ClaimToken)
 	}
-	result := query.Select("request_id", "client_key_name", "account_id", "account_name", "egress_node_id", "egress_node_name", "egress_scope", "egress_mode", "provider", "model", "model_route_id", "upstream_model", "prompt", "seconds", "size", "quality", "status", "progress", "input_json", "upstream_url", "content_type", "error_code", "error_message", "lease_until", "claim_token", "updated_at", "completed_at", "usage_recorded_at").Updates(updates)
+	result := query.Select("kind", "request_id", "client_key_name", "account_id", "account_name", "egress_node_id", "egress_node_name", "egress_scope", "egress_mode", "provider", "model", "model_route_id", "upstream_model", "prompt", "seconds", "size", "quality", "status", "progress", "input_json", "output_json", "upstream_url", "content_type", "error_code", "error_message", "lease_until", "claim_token", "updated_at", "completed_at", "usage_recorded_at").Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -137,7 +137,7 @@ func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job
 
 // ListMediaJobs 通过固定搜索字段和排序白名单返回稳定分页结果。
 func (r *MediaJobRepository) ListMediaJobs(ctx context.Context, input repository.MediaJobListQuery) ([]media.Job, int64, error) {
-	query := r.db.db.WithContext(ctx).Model(&mediaJobModel{})
+	query := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("kind = ?", media.JobKindVideo)
 	if input.Filter.Status != "" {
 		query = query.Where("status = ?", input.Filter.Status)
 	}
@@ -176,7 +176,7 @@ func (r *MediaJobRepository) ListMediaJobs(ctx context.Context, input repository
 // SummarizeMediaJobs 通过单次条件聚合查询统计全部任务状态。
 func (r *MediaJobRepository) SummarizeMediaJobs(ctx context.Context) (repository.MediaJobStats, error) {
 	var stats repository.MediaJobStats
-	err := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Select(`
+	err := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("kind = ?", media.JobKindVideo).Select(`
 		COUNT(*) AS total_jobs,
 		COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS completed,
 		COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS failed,
@@ -193,7 +193,7 @@ func (r *MediaJobRepository) ListUnrecordedTerminalMediaJobs(ctx context.Context
 		limit = 200
 	}
 	var rows []mediaJobModel
-	if err := r.db.db.WithContext(ctx).Where("status IN ? AND usage_recorded_at IS NULL", []media.Status{media.StatusCompleted, media.StatusFailed}).Order("completed_at ASC, id ASC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := r.db.db.WithContext(ctx).Where("kind = ? AND status IN ? AND usage_recorded_at IS NULL", media.JobKindVideo, []media.Status{media.StatusCompleted, media.StatusFailed}).Order("completed_at ASC, id ASC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	values := make([]media.Job, 0, len(rows))
@@ -256,14 +256,18 @@ func (r *MediaJobRepository) TryClaimMediaJob(ctx context.Context, id string, no
 }
 
 func mediaJobFromDomain(value media.Job) *mediaJobModel {
+	kind := value.Kind
+	if kind == "" {
+		kind = media.JobKindVideo
+	}
 	return &mediaJobModel{
-		ID: value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName,
+		ID: value.ID, Kind: string(kind), RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName,
 		AccountID: value.AccountID, AccountName: value.AccountName,
 		EgressNodeID: value.EgressNodeID, EgressNodeName: value.EgressNodeName, EgressScope: value.EgressScope, EgressMode: value.EgressMode,
 		Provider: value.Provider,
 		Model:    value.Model, ModelRouteID: value.ModelRouteID, UpstreamModel: value.UpstreamModel,
 		Prompt: value.Prompt, Seconds: value.Seconds, Size: value.Size, Quality: value.Quality,
-		Status: string(value.Status), Progress: value.Progress, InputJSON: value.InputJSON, UpstreamURL: value.UpstreamURL,
+		Status: string(value.Status), Progress: value.Progress, InputJSON: value.InputJSON, OutputJSON: value.OutputJSON, UpstreamURL: value.UpstreamURL,
 		ContentType: value.ContentType, ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage,
 		LeaseUntil: value.LeaseUntil, ClaimToken: value.ClaimToken, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 		CompletedAt: value.CompletedAt, UsageRecordedAt: value.UsageRecordedAt,
@@ -272,13 +276,13 @@ func mediaJobFromDomain(value media.Job) *mediaJobModel {
 
 func mediaJobToDomain(row mediaJobModel) media.Job {
 	return media.Job{
-		ID: row.ID, RequestID: row.RequestID, ClientKeyID: row.ClientKeyID, ClientKeyName: row.ClientKeyName,
+		ID: row.ID, Kind: media.JobKind(row.Kind), RequestID: row.RequestID, ClientKeyID: row.ClientKeyID, ClientKeyName: row.ClientKeyName,
 		AccountID: row.AccountID, AccountName: row.AccountName,
 		EgressNodeID: row.EgressNodeID, EgressNodeName: row.EgressNodeName, EgressScope: row.EgressScope, EgressMode: row.EgressMode,
 		Provider: row.Provider,
 		Model:    row.Model, ModelRouteID: row.ModelRouteID, UpstreamModel: row.UpstreamModel,
 		Prompt: row.Prompt, Seconds: row.Seconds, Size: row.Size, Quality: row.Quality,
-		Status: media.Status(row.Status), Progress: row.Progress, InputJSON: row.InputJSON, UpstreamURL: row.UpstreamURL,
+		Status: media.Status(row.Status), Progress: row.Progress, InputJSON: row.InputJSON, OutputJSON: row.OutputJSON, UpstreamURL: row.UpstreamURL,
 		ContentType: row.ContentType, ErrorCode: row.ErrorCode, ErrorMessage: row.ErrorMessage,
 		LeaseUntil: row.LeaseUntil, ClaimToken: row.ClaimToken, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		CompletedAt: row.CompletedAt, UsageRecordedAt: row.UsageRecordedAt,

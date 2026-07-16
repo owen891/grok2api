@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Box, ChevronDown, Eye, Image, KeyRound, Languages, LayoutDashboard, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreHorizontal, Settings, Sun, Users, Video } from "lucide-react";
+import { Box, ChevronDown, Eye, Image, KeyRound, Languages, LayoutDashboard, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreHorizontal, Settings, Sun, Terminal, Users, Video } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
@@ -21,7 +21,9 @@ import { cn } from "@/shared/lib/cn";
 
 const navigation = [
   { href: "/dashboard", label: "nav.dashboard", icon: LayoutDashboard },
+  { href: "/chat", label: "nav.chat", icon: MessageSquareText },
   { href: "/accounts", label: "nav.accounts", icon: Users },
+  { href: "/registration", label: "nav.registration", icon: Terminal },
   { href: "/client-keys", label: "nav.clientKeys", icon: KeyRound },
   { href: "/models", label: "nav.models", icon: Box },
   { href: "/gallery", label: "nav.gallery", icon: Image },
@@ -44,6 +46,7 @@ const documentation = [
     icon: Image,
     items: [
       { href: "/docs/image/generations", label: "Image Generations", method: "POST" },
+      { href: "/docs/image/get", label: "Get Image Job", method: "GET" },
       { href: "/docs/image/edits", label: "Image Edits", method: "POST" },
     ],
   },
@@ -248,7 +251,7 @@ export function AppShell() {
             </Button>
           </header>
 
-          <main className="mx-auto w-full max-w-[1280px] flex-1 px-5 py-8 sm:px-8 lg:py-20">
+          <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col px-3 py-3 sm:px-4 lg:px-5 lg:py-4">
             <Outlet />
           </main>
           <SiteFooter />

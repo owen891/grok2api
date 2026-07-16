@@ -520,6 +520,13 @@ export function AccountsPage() {
   const providerAccountTotal = provider === "grok_build" ? buildSummary.total : provider === "grok_web" ? webSummary.total : consoleSummary.total;
   const hasProviderAccounts = providerAccountTotal > 0 || (result?.total ?? 0) > 0;
   const syncAllPending = allBillingMutation.isPending || allWebQuotaMutation.isPending || allConsoleQuotaMutation.isPending;
+  const quickStatusFilters = [
+    { value: "all", label: t("common.all") },
+    { value: "active", label: t("accounts.statusActive") },
+    { value: "disabled", label: t("accounts.statusDisabled") },
+    { value: "reauthRequired", label: t("accounts.statusReauthRequired") },
+    { value: "cooldown", label: t("accounts.statusCooldown") },
+  ] as const;
 
   return (
     <div className="space-y-8">
@@ -559,7 +566,7 @@ export function AccountsPage() {
         <DataTableShell
         toolbar={(
           <>
-            <div className="flex w-full items-center gap-2 sm:w-auto">
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
               <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input className="h-8 pl-9 text-xs" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder={t("accounts.search")} aria-label={t("accounts.search")} />
@@ -588,16 +595,35 @@ export function AccountsPage() {
                   { value: "unrefreshable", label: t("accountCredential.noAutoRefresh") },
                 ] }] : []),
               ]} />
+              <Tabs
+                value={statusFilter || "all"}
+                onValueChange={(value) => { setStatusFilter(value === "all" ? "" : value); setPage(1); }}
+                className="w-full sm:w-auto"
+                aria-label={t("accounts.status")}
+              >
+                <TabsList className="max-w-full overflow-x-auto">
+                  {quickStatusFilters.map((filter) => (
+                    <TabsTrigger key={filter.value} value={filter.value}>{filter.label}</TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
+              {selected.size > 0 ? (
+                <div className="ml-1 border-l border-border/70 pl-2">
+                  <Button variant="destructive" size="sm" onClick={() => setBatchDeleteOpen(true)}>
+                    <Trash2 />
+                    {t("common.delete")}
+                  </Button>
+                </div>
+              ) : null}
             </div>
             {selected.size > 0 ? (
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5 sm:border-l sm:border-border/70 sm:pl-3">
                 <span className="mr-1 text-xs text-muted-foreground">{t("common.selectedCount", { count: selected.size })}</span>
                 <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(true)}>{t("common.enable")}</Button>
                 <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(false)}>{t("common.disable")}</Button>
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets([...selected])}>{t("accounts.convertToBuild")}</Button> : null}
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets([...selected])}>{t("webConsoleSync.action")}</Button> : null}
                 {provider === "grok_build" ? <Button variant="secondary" size="sm" onClick={() => batchBillingMutation.mutate()}>{t("accounts.refreshBilling")}</Button> : null}
-                <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => setBatchDeleteOpen(true)}>{t("common.delete")}</Button>
               </div>
             ) : (
               <div className="flex items-center gap-1.5">

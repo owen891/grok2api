@@ -131,6 +131,24 @@ func TestGatewayErrorPreservesSanitizedUpstreamClassification(t *testing.T) {
 	}
 }
 
+func TestGatewayErrorExplainsUnavailableEgress(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		writeGatewayError(c, &gateway.UpstreamFailure{
+			HTTPStatus:    http.StatusServiceUnavailable,
+			Code:          "egress_unavailable",
+			PublicMessage: "Grok Web 出口节点暂不可用，请检查代理与 Cloudflare Cookie，或停用故障节点后重试",
+			Cause:         errors.New("proxy credentials are secret"),
+		})
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"egress_unavailable"`) || !strings.Contains(recorder.Body.String(), "Cloudflare Cookie") || strings.Contains(recorder.Body.String(), "proxy credentials") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -219,6 +237,38 @@ func TestVideoGenerationResponseMatchesOfficialPollingShape(t *testing.T) {
 	errorValue, ok := failed["error"].(gin.H)
 	if failed["status"] != "failed" || !ok || errorValue["code"] != "service_unavailable" || failed["model"] != nil || failed["progress"] != nil {
 		t.Fatalf("failed response=%#v", failed)
+	}
+}
+
+func TestImageGenerationJobResponseSupportsPollingShape(t *testing.T) {
+	pending := imageGenerationJobResponse(mediadomain.Job{Model: "grok-imagine-image", Status: mediadomain.StatusInProgress, Progress: 35})
+	if pending["status"] != "pending" || pending["progress"] != 35 || pending["model"] != "grok-imagine-image" {
+		t.Fatalf("pending response=%#v", pending)
+	}
+	done := imageGenerationJobResponse(mediadomain.Job{
+		Model: "grok-imagine-image", Status: mediadomain.StatusCompleted,
+		OutputJSON: `{"created":123,"data":[{"url":"https://example.com/image.png"}]}`,
+	})
+	data, ok := done["data"].([]any)
+	if done["status"] != "done" || done["progress"] != 100 || done["created"] != float64(123) || !ok || len(data) != 1 {
+		t.Fatalf("done response=%#v", done)
+	}
+	failed := imageGenerationJobResponse(mediadomain.Job{Status: mediadomain.StatusFailed, ErrorCode: "generation_failed", ErrorMessage: "upstream failed"})
+	if failed["status"] != "failed" || failed["error"] == nil {
+		t.Fatalf("failed response=%#v", failed)
+	}
+}
+
+func TestImageGenerationRejectsAsyncStreamingCombination(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	NewHandler(nil, nil, 1<<20).Register(router.Group("/v1"))
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"grok-imagine-image","prompt":"test","async":true,"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "async") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

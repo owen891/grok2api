@@ -65,9 +65,25 @@ jobs:
         working-directory: frontend
         run: pnpm lint
 
+      - name: Test chat runtime boundaries
+        working-directory: frontend
+        run: pnpm test:chat
+
       - name: Build frontend
         working-directory: frontend
         run: pnpm build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install registration dependencies
+        run: python -m pip install --require-hashes -r registration/requirements.lock
+
+      - name: Test registration worker
+        working-directory: registration
+        run: python -m unittest discover -v
 
   check_ghcr_image:
     name: Build image (${{ matrix.arch }})

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -15,6 +16,7 @@ import (
 
 type Config struct {
 	BaseURL             string
+	BrowserWorkerURL    string
 	StatsigMode         string
 	StatsigManualValue  string
 	StatsigSignerURL    string
@@ -59,6 +61,7 @@ func normalizedConfig(cfg Config) Config {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://grok.com"
 	}
+	cfg.BrowserWorkerURL = strings.TrimRight(strings.TrimSpace(cfg.BrowserWorkerURL), "/")
 	if cfg.StatsigMode == "" {
 		cfg.StatsigMode = "url"
 	}
@@ -107,6 +110,10 @@ func (a *Adapter) QuotaMode(upstreamModel string) string {
 		return spec.Mode
 	}
 	return ""
+}
+
+func (a *Adapter) BrowserWorkerEnabled() bool {
+	return a.config().BrowserWorkerURL != ""
 }
 
 func (a *Adapter) TierOrder(upstreamModel string) []account.WebTier {

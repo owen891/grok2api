@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 func TestParseCapturedWeeklyCreditsResponse(t *testing.T) {
@@ -154,4 +156,101 @@ func TestSyncQuotaCorrectsStoredSuperFromFreshWebQuota(t *testing.T) {
 	if snapshot.Tier != account.WebTierBasic || len(snapshot.Windows) != 2 || snapshot.Windows[0].Mode != "auto" || snapshot.Windows[0].Total != 7 || snapshot.Windows[1].Mode != "fast" || snapshot.Windows[1].Total != 30 {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
+}
+
+func TestQuotaForbiddenDoesNotPoisonWorkingImageEgress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &quotaEgressRepository{node: egressdomain.Node{ID: 1, Name: "image-egress", Scope: egressdomain.ScopeWeb, Enabled: true, Health: 1}}
+	adapter := NewAdapter(Config{
+		BaseURL: server.URL, StatsigMode: "manual", StatsigManualValue: "test-signature",
+	}, infraegress.NewManager(repository, cipher), cipher, nil, nil)
+
+	_, err = adapter.SyncQuotaMode(context.Background(), account.Credential{ID: 1, EncryptedAccessToken: encrypted}, "fast")
+	if err == nil {
+		t.Fatal("forbidden quota response unexpectedly succeeded")
+	}
+	if repository.updates != 0 || repository.node.Health != 1 || repository.node.LastError != "" {
+		t.Fatalf("quota 403 poisoned egress: updates=%d node=%#v", repository.updates, repository.node)
+	}
+}
+
+func TestSyncQuotaModeUsesBrowserWorkerWhenConfigured(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/grok/quota" {
+			t.Fatalf("worker path = %s", request.URL.Path)
+		}
+		var value browserWorkerRequest
+		if err := json.NewDecoder(request.Body).Decode(&value); err != nil {
+			t.Fatal(err)
+		}
+		if value.Endpoint != "https://grok.com/rest/rate-limits" || value.Payload["modelName"] != "fast" || value.SSOToken != "test-sso" {
+			t.Fatalf("worker request = %#v", value)
+		}
+		body := []byte(`{"windowSizeSeconds":7200,"remainingQueries":29,"totalQueries":30}`)
+		_ = json.NewEncoder(writer).Encode(browserWorkerResponse{
+			StatusCode: http.StatusOK, Status: "200 OK",
+			Headers: map[string]string{"content-type": "application/json"}, BodyBase64: base64.StdEncoding.EncodeToString(body),
+		})
+	}))
+	defer worker.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(Config{BaseURL: "https://grok.com", BrowserWorkerURL: worker.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
+	window, err := adapter.SyncQuotaMode(context.Background(), account.Credential{ID: 42, EncryptedAccessToken: encrypted}, "fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window.AccountID != 42 || window.Mode != "fast" || window.Remaining != 29 || window.Total != 30 {
+		t.Fatalf("window = %#v", window)
+	}
+}
+
+type quotaEgressRepository struct {
+	node    egressdomain.Node
+	updates int
+}
+
+func (r *quotaEgressRepository) ListEgressNodes(_ context.Context, scope egressdomain.Scope, _ repository.SortQuery) ([]egressdomain.Node, error) {
+	if scope != "" && scope != r.node.Scope {
+		return nil, nil
+	}
+	return []egressdomain.Node{r.node}, nil
+}
+
+func (r *quotaEgressRepository) GetEgressNode(context.Context, uint64) (egressdomain.Node, error) {
+	return r.node, nil
+}
+
+func (r *quotaEgressRepository) CreateEgressNode(_ context.Context, value egressdomain.Node) (egressdomain.Node, error) {
+	r.node = value
+	return value, nil
+}
+
+func (r *quotaEgressRepository) UpdateEgressNode(_ context.Context, value egressdomain.Node) (egressdomain.Node, error) {
+	r.node = value
+	r.updates++
+	return value, nil
+}
+
+func (r *quotaEgressRepository) DeleteEgressNode(context.Context, uint64) error {
+	return nil
 }

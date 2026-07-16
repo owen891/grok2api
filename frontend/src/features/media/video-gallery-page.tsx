@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
 import { getVideoStats, listVideos } from "@/features/media/media-api";
+import { VideoJobDialog } from "@/features/chat/image-lightbox";
 import type { MediaJobDTO } from "@/features/media/types";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
@@ -32,6 +33,7 @@ export function VideoGalleryPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<VideoStatusFilter>("");
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
+  const [selectedJob, setSelectedJob] = useState<MediaJobDTO | null>(null);
   const debouncedSearch = useDebouncedValue(search);
   const normalizedSearch = debouncedSearch.trim();
 
@@ -145,7 +147,11 @@ export function VideoGalleryPage() {
             </TableHeader>
             <TableBody>
               {videosQuery.isPending ? <TableLoadingRow colSpan={8} /> : result?.items.map((job) => (
-                <TableRow key={job.id}>
+                <TableRow
+                  key={job.id}
+                  className="cursor-pointer"
+                  onClick={() => setSelectedJob(job)}
+                >
                   <TableCell className="min-w-0 py-3">
                     <div className="min-w-0">
                       <span className="block truncate text-xs font-medium" title={job.prompt}>{job.prompt || "-"}</span>
@@ -176,6 +182,16 @@ export function VideoGalleryPage() {
           </Table>
         ) : null}
       </DataTableShell>
+
+      <VideoJobDialog
+        key={selectedJob?.id ?? "closed"}
+        job={selectedJob}
+        open={Boolean(selectedJob)}
+        onOpenChange={(open) => {
+          if (!open) setSelectedJob(null);
+        }}
+        locale={i18n.language}
+      />
     </div>
   );
 }

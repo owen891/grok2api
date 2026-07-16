@@ -241,9 +241,11 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		ClientIdentifier: value.ProviderBuild.ClientIdentifier, TokenAuth: value.ProviderBuild.TokenAuth,
 		UserAgent: value.ProviderBuild.UserAgent,
 	}
+	browserWorkerURL := base.Provider.Web.BrowserWorkerURL
 	base.Provider.Web = config.WebProviderConfig{
 		BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: config.Duration(value.ProviderWeb.QuotaTimeout),
-		StatsigMode: value.ProviderWeb.StatsigMode, StatsigManualValue: value.ProviderWeb.StatsigManualValue, StatsigSignerURL: value.ProviderWeb.StatsigSignerURL,
+		BrowserWorkerURL: browserWorkerURL,
+		StatsigMode:      value.ProviderWeb.StatsigMode, StatsigManualValue: value.ProviderWeb.StatsigManualValue, StatsigSignerURL: value.ProviderWeb.StatsigSignerURL,
 		ChatTimeout: config.Duration(value.ProviderWeb.ChatTimeout), ImageTimeout: config.Duration(value.ProviderWeb.ImageTimeout),
 		VideoTimeout:     config.Duration(value.ProviderWeb.VideoTimeout),
 		MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,

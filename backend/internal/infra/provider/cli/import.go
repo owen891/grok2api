@@ -34,7 +34,9 @@ type importedCredentialEntry struct {
 	Email        string `json:"email"`
 	UserID       string `json:"user_id"`
 	PrincipalID  string `json:"principal_id"`
+	Sub          string `json:"sub"`
 	TeamID       string `json:"team_id"`
+	Expired      string `json:"expired"`
 }
 
 func marshalCredentials(values []provider.CredentialSeed) ([]byte, error) {
@@ -114,7 +116,7 @@ func normalizeImportedCredential(entry importedCredentialEntry) (provider.Creden
 	}
 
 	claims := decodeJWTClaims(firstNonEmpty(entry.IDToken, accessToken))
-	userID := firstNonEmpty(entry.UserID, entry.PrincipalID, stringClaim(claims, "sub"))
+	userID := firstNonEmpty(entry.UserID, entry.PrincipalID, entry.Sub, stringClaim(claims, "sub"))
 	email := firstNonEmpty(entry.Email, stringClaim(claims, "email"))
 	teamID := firstNonEmpty(entry.TeamID, stringClaim(claims, "team_id"))
 	expiresAt, err := importedCredentialExpiry(entry, claims)
@@ -136,6 +138,13 @@ func importedCredentialExpiry(entry importedCredentialEntry, claims map[string]a
 		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.ExpiresAt))
 		if err != nil {
 			return time.Time{}, fmt.Errorf("expires_at 必须是 RFC3339 时间: %w", err)
+		}
+		return parsed.UTC(), nil
+	}
+	if strings.TrimSpace(entry.Expired) != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.Expired))
+		if err != nil {
+			return time.Time{}, fmt.Errorf("expired 必须是 RFC3339 时间: %w", err)
 		}
 		return parsed.UTC(), nil
 	}

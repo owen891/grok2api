@@ -52,6 +52,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/chat/completions", h.createChatCompletion)
 	router.POST("/messages", h.createMessage)
 	router.POST("/images/generations", h.generateImage)
+	router.GET("/images/:requestId", h.getImage)
 	router.POST("/images/edits", h.editImage)
 	router.POST("/videos/generations", h.generateVideo)
 	router.GET("/videos/:requestId", h.getVideo)
@@ -89,6 +90,7 @@ type imageGenerationRequest struct {
 	ResponseFormat string          `json:"response_format"`
 	StorageOptions json.RawMessage `json:"storage_options"`
 	Stream         bool            `json:"stream"`
+	Async          bool            `json:"async"`
 }
 
 type imageEditJSONImage struct {
@@ -253,6 +255,10 @@ func (h *Handler) generateImage(c *gin.Context) {
 		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前 Grok Web Provider 不支持 storage_options")
 		return
 	}
+	if request.Async && request.Stream {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "async 与 stream 不能同时启用")
+		return
+	}
 	count := 1
 	if request.Count != nil {
 		if *request.Count < 1 || *request.Count > 10 {
@@ -265,6 +271,19 @@ func (h *Handler) generateImage(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if request.Async {
+		job, err := h.gateway.CreateImageJob(c.Request.Context(), gateway.AsyncImageInput{
+			RequestID: requestID, ClientKey: clientKey, PublicModel: request.Model, Prompt: request.Prompt,
+			Count: count, Size: request.Size, AspectRatio: request.AspectRatio,
+			Resolution: request.Resolution, ResponseFormat: request.ResponseFormat,
+		})
+		if err != nil {
+			writeGatewayError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"request_id": job.ID})
+		return
+	}
 	result, err := h.gateway.GenerateImage(c.Request.Context(), gateway.ImageGenerationInput{
 		RequestID: requestID, ClientKey: clientKey, PublicModel: request.Model, Prompt: request.Prompt,
 		Count: count, Size: request.Size, AspectRatio: request.AspectRatio,
@@ -275,6 +294,38 @@ func (h *Handler) generateImage(c *gin.Context) {
 		return
 	}
 	h.writeResult(c, result, request.Stream)
+}
+
+func (h *Handler) getImage(c *gin.Context) {
+	clientKey, _, ok := requestIdentity(c)
+	if !ok {
+		return
+	}
+	job, err := h.gateway.GetImageJob(c.Request.Context(), strings.TrimSpace(c.Param("requestId")), clientKey)
+	if err != nil {
+		writeGatewayError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, imageGenerationJobResponse(job))
+}
+
+func imageGenerationJobResponse(job mediadomain.Job) gin.H {
+	switch job.Status {
+	case mediadomain.StatusCompleted:
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(job.OutputJSON), &payload); err != nil || payload == nil {
+			return gin.H{"status": "failed", "error": gin.H{"code": "internal_error", "message": "图片任务结果读取失败"}}
+		}
+		payload["status"], payload["model"], payload["progress"] = "done", job.Model, 100
+		return gin.H(payload)
+	case mediadomain.StatusFailed:
+		return gin.H{
+			"status": "failed",
+			"error":  gin.H{"code": officialVideoErrorCode(job.ErrorCode), "message": job.ErrorMessage},
+		}
+	default:
+		return gin.H{"status": "pending", "model": job.Model, "progress": min(99, max(0, job.Progress))}
+	}
 }
 
 func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {

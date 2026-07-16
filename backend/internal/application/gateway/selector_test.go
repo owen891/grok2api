@@ -356,6 +356,97 @@ func TestSelectorUsesBatchConcurrencySnapshot(t *testing.T) {
 	}
 }
 
+func TestSelectorPrefersHealthyPeerWithEqualPriority(t *testing.T) {
+	selector := &Selector{
+		concurrency:    memory.NewConcurrencyLimiter(),
+		lastSelectedAt: make(map[uint64]time.Time),
+	}
+	values := []account.RoutingCandidate{
+		{Credential: account.Credential{ID: 1, Priority: 10, FailureCount: 2}},
+		{Credential: account.Credential{ID: 2, Priority: 10}},
+	}
+	if err := selector.sortCandidates(context.Background(), values, time.Now().UTC(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if values[0].Credential.ID != 2 {
+		t.Fatalf("sorted candidates = %#v, want healthy account first", values)
+	}
+}
+
+func TestSelectorPrefersFreshHigherWebQuotaAtEqualLoad(t *testing.T) {
+	now := time.Now().UTC()
+	selector := &Selector{
+		concurrency:    memory.NewConcurrencyLimiter(),
+		lastSelectedAt: make(map[uint64]time.Time),
+	}
+	values := []account.RoutingCandidate{
+		{Credential: account.Credential{ID: 1, Priority: 10}, QuotaWindow: &account.QuotaWindow{Remaining: 1, Total: 10, SyncedAt: &now}},
+		{Credential: account.Credential{ID: 2, Priority: 10}, QuotaWindow: &account.QuotaWindow{Remaining: 8, Total: 10, SyncedAt: &now}},
+	}
+	if err := selector.sortCandidates(context.Background(), values, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if values[0].Credential.ID != 2 {
+		t.Fatalf("sorted candidates = %#v, want higher remaining quota first", values)
+	}
+}
+
+func TestSelectorUsesModelScopedRecentPerformance(t *testing.T) {
+	now := time.Now().UTC()
+	selector := &Selector{
+		concurrency:    memory.NewConcurrencyLimiter(),
+		lastSelectedAt: make(map[uint64]time.Time),
+		performance:    make(map[routePerformanceKey]routePerformance),
+	}
+	selector.ObserveRouteResult(1, "image-model", 100*time.Millisecond, false)
+	selector.ObserveRouteResult(2, "image-model", 2*time.Second, true)
+	values := []account.RoutingCandidate{
+		{Credential: account.Credential{ID: 1, Priority: 10}},
+		{Credential: account.Credential{ID: 2, Priority: 10}},
+	}
+	if err := selector.sortCandidates(context.Background(), values, now, nil, "image-model"); err != nil {
+		t.Fatal(err)
+	}
+	if values[0].Credential.ID != 2 {
+		t.Fatalf("performance-ranked candidates = %#v, want successful account first", values)
+	}
+	if err := selector.sortCandidates(context.Background(), values, now, nil, "different-model"); err != nil {
+		t.Fatal(err)
+	}
+	if values[0].Credential.ID != 1 {
+		t.Fatalf("performance leaked across models: %#v", values)
+	}
+}
+
+func TestSelectorSuccessClearsPersistedFailureHealth(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "selector-health.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "recovering", SourceKey: "recovering", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, FailureCount: 3, LastError: "upstream status 502",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	selector.MarkSuccess(ctx, value)
+	updated, err := accounts.Get(ctx, value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FailureCount != 0 || updated.LastError != "" {
+		t.Fatalf("updated health = %#v", updated)
+	}
+}
+
 func TestSelectorConsumesOnlyMatchingQuotaSnapshot(t *testing.T) {
 	key := candidateCacheKey{provider: account.ProviderWeb, upstreamModel: "chat", quotaMode: "fast"}
 	selector := &Selector{candidates: map[candidateCacheKey]candidateSnapshot{

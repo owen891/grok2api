@@ -351,7 +351,9 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	forwardResponse := func(credential accountdomain.Credential) (*provider.Response, error) {
 		started := time.Now()
 		response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
-		timing.markUpstream(time.Since(started))
+		elapsed := time.Since(started)
+		timing.markUpstream(elapsed)
+		s.selector.ObserveRouteResult(credential.ID, route.UpstreamModel, elapsed, err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300)
 		return response, err
 	}
 	ensureCredential := func(credential accountdomain.Credential, force bool) (accountdomain.Credential, error) {
@@ -805,9 +807,14 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 	var credential accountdomain.Credential
 	var response *provider.Response
 	var lastCredentialFailure *accountdomain.Credential
+	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
 		if err != nil {
+			if lastCredentialFailure != nil {
+				writeFailureAudit(http.StatusBadGateway, "upstream_unavailable", lastCredentialFailure)
+				return nil, firstError(lastErr, err)
+			}
 			writeFailureAudit(http.StatusServiceUnavailable, "upstream_unavailable", lastCredentialFailure)
 			return nil, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
 		}
@@ -820,38 +827,69 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			lease.Release()
 			continue
 		}
+		executionStarted := time.Now()
 		response, err = execute(ctx, adapter, credential, route.UpstreamModel)
+		if !provider.IsMediaPostProcessingError(err) {
+			s.selector.ObserveRouteResult(credential.ID, route.UpstreamModel, time.Since(executionStarted), err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300)
+		}
 		if err != nil {
 			s.logger.Error("image_upstream_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", credential.ID, "error", err)
+			var egressUnavailable *infraegress.UnavailableError
+			if errors.As(err, &egressUnavailable) {
+				lease.Release()
+				writeFailureAudit(http.StatusServiceUnavailable, "egress_unavailable", &credential)
+				return nil, &UpstreamFailure{
+					HTTPStatus:    http.StatusServiceUnavailable,
+					Code:          "egress_unavailable",
+					PublicMessage: "Grok Web 出口节点暂不可用，请检查代理与 Cloudflare Cookie，或停用故障节点后重试",
+					Cause:         err,
+				}
+			}
+			lastErr = err
+			failedCredential := credential
+			lastCredentialFailure = &failedCredential
 			if !provider.IsMediaPostProcessingError(err) {
 				s.selector.MarkFailure(ctx, credential, 0, 0)
 			}
 			lease.Release()
-			errorCode := "upstream_unavailable"
-			if provider.IsMediaPostProcessingError(err) {
-				errorCode = "media_postprocessing_failed"
+			if provider.IsMediaPostProcessingError(err) || attempt+1 >= attempts {
+				errorCode := "upstream_unavailable"
+				if provider.IsMediaPostProcessingError(err) {
+					errorCode = "media_postprocessing_failed"
+				}
+				writeFailureAudit(http.StatusBadGateway, errorCode, &credential)
+				return nil, err
 			}
-			writeFailureAudit(http.StatusBadGateway, errorCode, &credential)
-			return nil, err
-		}
-		if s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden && attempt == 0 && attempt+1 < attempts {
-			_, _ = readRetryableBody(response.Body)
-			lease.Release()
-			delete(excluded, credential.ID)
 			continue
 		}
-		if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && response.StatusCode == http.StatusTooManyRequests && lease.QuotaMode != "" {
-			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-			exhausted, reconcileErr := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
-			s.selector.MarkQuotaStateChanged(credential.Provider)
-			if reconcileErr != nil || !exhausted {
-				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
+		if response == nil {
+			lastErr = errors.New("image provider returned an empty response")
+			lease.Release()
+			if attempt+1 >= attempts {
+				writeFailureAudit(http.StatusBadGateway, "upstream_unavailable", &credential)
+				return nil, lastErr
 			}
-			if attempt+1 < attempts {
-				_, _ = readRetryableBody(response.Body)
-				lease.Release()
-				continue
+			continue
+		}
+		if isRetryableMediaStatus(response.StatusCode) && attempt+1 < attempts {
+			status := response.StatusCode
+			lastErr = fmt.Errorf("image provider returned status %d", status)
+			failedCredential := credential
+			lastCredentialFailure = &failedCredential
+			if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && status == http.StatusTooManyRequests && lease.QuotaMode != "" {
+				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
+				exhausted, reconcileErr := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
+				s.selector.MarkQuotaStateChanged(credential.Provider)
+				if reconcileErr != nil || !exhausted {
+					s.selector.MarkFailure(ctx, credential, status, retryAfter)
+				}
 			}
+			_, _ = readRetryableBody(response.Body)
+			lease.Release()
+			if status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(credential.Provider) {
+				delete(excluded, credential.ID)
+			}
+			continue
 		}
 		break
 	}
@@ -873,6 +911,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			record.DurationMS, record.CreatedAt = time.Since(startedAt).Milliseconds(), time.Now().UTC()
 			applyAuditEgress(&record, egressTrace, route.Provider)
 			if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" {
+				s.selector.markSuccess(persistCtx, credential, false)
 				record.MediaOutputImages = int64(max(0, requestedCount))
 				var pricing audit.PricingResult
 				var priced bool
@@ -1033,6 +1072,12 @@ func (b *finalizingBody) Close() error {
 
 func isRetryable(status int) bool {
 	return status == 402 || status == 403 || status == 429 || status >= 500
+}
+
+func isRetryableMediaStatus(status int) bool {
+	return status == http.StatusPaymentRequired || status == http.StatusForbidden ||
+		status == http.StatusRequestTimeout || status == http.StatusTooEarly ||
+		status == http.StatusTooManyRequests || status >= 500
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {

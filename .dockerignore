@@ -26,3 +26,19 @@ backend/**/*_test.go
 
 !docker/
 !docker/entrypoint.sh
+!docker/registration-entrypoint.sh
+
+!registration/
+!registration/**
+registration/config.json
+registration/accounts_cli.txt
+registration/cpa_auths/
+registration/cookies/
+registration/screenshots/
+registration/**/*report*.json
+registration/**/oauth_output/
+registration/**/sso_output/
+registration/*failed*.txt
+registration/test_*.py
+registration/**/__pycache__/
+registration/**/*.py[cod]

@@ -39,6 +39,8 @@ type SwaggerImageGenerationRequest struct {
 	AspectRatio    string `json:"aspect_ratio,omitempty" example:"16:9"`
 	Resolution     string `json:"resolution,omitempty" example:"2k"`
 	ResponseFormat string `json:"response_format,omitempty" example:"url"`
+	Stream         bool   `json:"stream,omitempty" example:"false"`
+	Async          bool   `json:"async,omitempty" example:"true"`
 }
 
 // SwaggerImageReference 表示图片 URL 输入。
@@ -176,6 +178,17 @@ func swaggerMessages() {}
 // @Failure 400 {object} map[string]any
 // @Router /v1/images/generations [post]
 func swaggerGenerateImage() {}
+
+// swaggerGetImageJob godoc
+// @Summary 查询异步图片任务
+// @Tags Images
+// @Security BearerAuth
+// @Produce json
+// @Param request_id path string true "Request ID"
+// @Success 200 {object} map[string]any
+// @Failure 404 {object} map[string]any
+// @Router /v1/images/{request_id} [get]
+func swaggerGetImageJob() {}
 
 // swaggerEditImage godoc
 // @Summary 编辑图片

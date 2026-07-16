@@ -1,0 +1,2 @@
+本目录协议客户端源自 grokcli-2api/grok-build-auth（xconsole_client），用于 v3 协议注册主路径。
+请保留上游 LICENSE/NOTICE。仅用于本地自用研究；请遵守 xAI 服务条款。

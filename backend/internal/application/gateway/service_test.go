@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
+	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
@@ -540,6 +542,8 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	runQuotaRefreshWorkers(t, accountService)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(keyRepo, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
+	mediaJobRepo := relational.NewMediaJobRepository(database)
+	service.ConfigureMedia(mediaJobRepo, 1)
 
 	result, err := service.GenerateImage(ctx, ImageGenerationInput{
 		RequestID: "req-image-stream", ClientKey: key, PublicModel: "grok-imagine-image-quality",
@@ -653,6 +657,18 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	if adapter.EditResolution() != "2k" {
 		t.Fatalf("image edit resolution = %q", adapter.EditResolution())
 	}
+	asyncJob, err := service.CreateImageJob(ctx, AsyncImageInput{
+		RequestID: "req-image-async", ClientKey: key, PublicModel: "grok-imagine-image-quality",
+		Prompt: "async test", Count: 1, Resolution: "1k", ResponseFormat: "url",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processImageJob(ctx, asyncJob.ID)
+	storedAsyncJob, err := mediaJobRepo.GetMediaJob(ctx, asyncJob.ID, key.ID)
+	if err != nil || storedAsyncJob.Kind != media.JobKindImage || storedAsyncJob.Status != media.StatusCompleted || storedAsyncJob.Progress != 100 || !strings.Contains(storedAsyncJob.OutputJSON, "image.png") {
+		t.Fatalf("async image job = %#v, err = %v", storedAsyncJob, err)
+	}
 
 	billingBeforeFailure, err := keyRepo.Get(ctx, key.ID)
 	if err != nil {
@@ -671,6 +687,26 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	}
 	selector.MarkQuotaStateChanged(account.ProviderWeb)
 	service.UpdateMaxAttempts(3)
+	adapter.SetResponseStatuses(http.StatusBadGateway, http.StatusOK)
+	attemptsBeforeRetry := len(adapter.Attempts())
+	retryResult, err := service.GenerateImage(ctx, ImageGenerationInput{
+		RequestID: "req-image-retry", ClientKey: key, PublicModel: "grok-imagine-image-quality",
+		Prompt: "test", Count: 1, Resolution: "1k", ResponseFormat: "url",
+	})
+	if err != nil {
+		t.Fatalf("expected image retry to recover: %v", err)
+	}
+	if attempts := len(adapter.Attempts()); attempts != attemptsBeforeRetry+2 {
+		t.Fatalf("image retry attempts = %d, want %d", attempts, attemptsBeforeRetry+2)
+	}
+	_, _ = io.ReadAll(retryResult.Body)
+	retryResult.Finalize(Usage{}, "", "")
+	_ = retryResult.Body.Close()
+	adapter.SetResponseStatuses()
+	billingBeforeFailure, err = keyRepo.Get(ctx, key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	attemptsBeforeFailure := len(adapter.Attempts())
 	adapter.FailWithEgress(infraegress.NewManager(relational.NewEgressRepository(database), testCipher(t)))
 	if _, err := service.GenerateImage(ctx, ImageGenerationInput{
@@ -679,11 +715,11 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected image transport failure")
 	}
-	if attempts := adapter.Attempts(); len(attempts) != attemptsBeforeFailure+1 {
+	if attempts := adapter.Attempts(); len(attempts) != attemptsBeforeFailure+2 {
 		t.Fatalf("image failure switched accounts after generation started: %#v", attempts)
 	}
 	logs, total, err = auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 5 || len(logs) != 5 {
+	if err != nil || total != 7 || len(logs) != 7 {
 		t.Fatalf("failure audit logs=%#v total=%d err=%v", logs, total, err)
 	}
 	failureAudit := logs[0]
@@ -888,6 +924,7 @@ type webImageStreamAdapter struct {
 	editResolution string
 	synced         chan string
 	failureEgress  *infraegress.Manager
+	responseStatus []int
 	attempts       []uint64
 }
 
@@ -927,6 +964,11 @@ func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provi
 	a.streaming = request.Streaming
 	failureEgress := a.failureEgress
 	a.attempts = append(a.attempts, request.Credential.ID)
+	responseStatus := http.StatusOK
+	if len(a.responseStatus) > 0 {
+		responseStatus = a.responseStatus[0]
+		a.responseStatus = a.responseStatus[1:]
+	}
 	a.mu.Unlock()
 	if failureEgress != nil {
 		lease, err := failureEgress.Acquire(ctx, egressdomain.ScopeWeb, "image-failure")
@@ -935,6 +977,15 @@ func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provi
 		}
 		lease.Release()
 		return nil, errors.New("simulated image transport failure")
+	}
+	if responseStatus != http.StatusOK {
+		return &provider.Response{StatusCode: responseStatus, Status: fmt.Sprintf("%d response", responseStatus), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"temporary"}`))}, nil
+	}
+	if !request.Streaming {
+		return &provider.Response{
+			StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"created":1,"data":[{"url":"https://example.com/image.png"}]}`)), QuotaUnits: request.Count,
+		}, nil
 	}
 	body := "event: image_generation.completed\ndata: {}\n\ndata: [DONE]\n\n"
 	return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body)), QuotaUnits: 1}, nil
@@ -968,6 +1019,11 @@ func (a *webImageStreamAdapter) FailWithEgress(manager *infraegress.Manager) {
 	a.mu.Lock()
 	a.failureEgress = manager
 	a.mu.Unlock()
+}
+func (a *webImageStreamAdapter) SetResponseStatuses(statuses ...int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.responseStatus = append([]int(nil), statuses...)
 }
 func (a *webImageStreamAdapter) Attempts() []uint64 {
 	a.mu.Lock()

@@ -27,6 +27,14 @@ type accountLease struct {
 const quotaProbeLease = 5 * time.Minute
 const successPersistInterval = 30 * time.Second
 const candidateCacheTTL = time.Second
+const routePerformanceTTL = 30 * time.Minute
+
+const (
+	routePerformanceAlpha   = 0.25
+	routePerformancePrior   = 0.90
+	routePerformanceWarmup  = 8
+	routePerformanceMaxSize = 4096
+)
 
 type candidateSnapshot struct {
 	values    []account.RoutingCandidate
@@ -37,6 +45,18 @@ type candidateCacheKey struct {
 	provider      account.Provider
 	upstreamModel string
 	quotaMode     string
+}
+
+type routePerformanceKey struct {
+	accountID     uint64
+	upstreamModel string
+}
+
+type routePerformance struct {
+	successEWMA float64
+	latencyEWMA time.Duration
+	samples     int
+	updatedAt   time.Time
 }
 
 type SelectionUnavailableReason string
@@ -98,6 +118,7 @@ type Selector struct {
 	lastSelectedAt map[uint64]time.Time
 	lastSuccessAt  map[uint64]time.Time
 	candidates     map[candidateCacheKey]candidateSnapshot
+	performance    map[routePerformanceKey]routePerformance
 	candidateLoads singleflight.Group
 	tierOrders     interface {
 		TierOrder(account.Provider, string) []account.WebTier
@@ -111,7 +132,7 @@ func NewSelector(accounts repository.AccountRepository, concurrency repository.C
 	if len(capacityWait) > 0 && capacityWait[0] > 0 {
 		wait = capacityWait[0]
 	}
-	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot)}
+	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot), performance: make(map[routePerformanceKey]routePerformance)}
 }
 
 func (s *Selector) UpdateConfig(stickyTTL, cooldownBase, cooldownMax time.Duration, capacityWait ...time.Duration) {
@@ -206,7 +227,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 		return nil, &SelectionUnavailableError{Reason: reason, RetryAfter: retryDelay(now, earliestRetry)}
 	}
 	if len(probeCandidates) > 0 {
-		if err := s.sortCandidates(ctx, probeCandidates, now, s.resolveTierOrder(provider, upstreamModel)); err != nil {
+		if err := s.sortCandidates(ctx, probeCandidates, now, s.resolveTierOrder(provider, upstreamModel), upstreamModel); err != nil {
 			return nil, err
 		}
 		for _, candidate := range probeCandidates {
@@ -256,7 +277,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	waitDeadline := time.Now().Add(capacityWait)
 	for {
 		currentTime := time.Now().UTC()
-		if err := s.sortCandidates(ctx, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel)); err != nil {
+		if err := s.sortCandidates(ctx, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel), upstreamModel); err != nil {
 			return nil, err
 		}
 		for _, candidate := range normalCandidates {
@@ -455,6 +476,58 @@ func (s *Selector) MarkPaidQuotaExhausted(ctx context.Context, credential accoun
 // MarkQuotaStateChanged 在 Billing 探测改变持久化额度状态后立即失效候选快照。
 func (s *Selector) MarkQuotaStateChanged(provider account.Provider) { s.invalidateCandidates(provider) }
 
+// ObserveRouteResult keeps a short-lived per-account/model signal for adaptive selection.
+func (s *Selector) ObserveRouteResult(accountID uint64, upstreamModel string, latency time.Duration, success bool) {
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if accountID == 0 || upstreamModel == "" {
+		return
+	}
+	if latency < 0 {
+		latency = 0
+	}
+	now := time.Now().UTC()
+	key := routePerformanceKey{accountID: accountID, upstreamModel: upstreamModel}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.performance == nil {
+		s.performance = make(map[routePerformanceKey]routePerformance)
+	}
+	value, exists := s.performance[key]
+	if !exists && len(s.performance) >= routePerformanceMaxSize {
+		var oldestKey routePerformanceKey
+		var oldestAt time.Time
+		for candidateKey, candidate := range s.performance {
+			if now.Sub(candidate.updatedAt) > routePerformanceTTL {
+				delete(s.performance, candidateKey)
+				continue
+			}
+			if oldestAt.IsZero() || candidate.updatedAt.Before(oldestAt) {
+				oldestKey, oldestAt = candidateKey, candidate.updatedAt
+			}
+		}
+		if len(s.performance) >= routePerformanceMaxSize && !oldestAt.IsZero() {
+			delete(s.performance, oldestKey)
+		}
+	}
+	sample := 0.0
+	if success {
+		sample = 1
+	}
+	if !exists || now.Sub(value.updatedAt) > routePerformanceTTL {
+		value = routePerformance{successEWMA: sample, latencyEWMA: latency, samples: 1}
+	} else {
+		value.successEWMA = routePerformanceAlpha*sample + (1-routePerformanceAlpha)*value.successEWMA
+		if value.latencyEWMA <= 0 {
+			value.latencyEWMA = latency
+		} else if latency > 0 {
+			value.latencyEWMA = time.Duration(routePerformanceAlpha*float64(latency) + (1-routePerformanceAlpha)*float64(value.latencyEWMA))
+		}
+		value.samples++
+	}
+	value.updatedAt = now
+	s.performance[key] = value
+}
+
 // ConsumeQuota 将成功请求的本地额度变化应用到候选快照，避免为单账号变化清空整个 Provider 缓存。
 func (s *Selector) ConsumeQuota(provider account.Provider, accountID uint64, mode string, amount int) {
 	if accountID == 0 || mode == "" || mode == "weekly" || amount <= 0 {
@@ -641,15 +714,30 @@ func retryDelay(now, retryAt time.Time) time.Duration {
 	return retryAt.Sub(now)
 }
 
-func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingCandidate, now time.Time, tierOrder []account.WebTier) error {
+func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingCandidate, now time.Time, tierOrder []account.WebTier, upstreamModels ...string) error {
+	upstreamModel := ""
+	if len(upstreamModels) > 0 {
+		upstreamModel = strings.TrimSpace(upstreamModels[0])
+	}
 	s.mu.Lock()
 	lastSelected := make(map[uint64]time.Time, len(s.lastSelectedAt))
 	for id, value := range s.lastSelectedAt {
 		lastSelected[id] = value
 	}
+	performance := make(map[uint64]routePerformance, len(values))
+	if upstreamModel != "" {
+		for _, candidate := range values {
+			key := routePerformanceKey{accountID: candidate.Credential.ID, upstreamModel: upstreamModel}
+			if value, ok := s.performance[key]; ok && now.Sub(value.updatedAt) <= routePerformanceTTL {
+				performance[candidate.Credential.ID] = value
+			}
+		}
+	}
 	s.mu.Unlock()
 	remaining := make(map[uint64]float64, len(values))
 	fresh := make(map[uint64]bool, len(values))
+	quotaRemaining := make(map[uint64]float64, len(values))
+	quotaFresh := make(map[uint64]bool, len(values))
 	inFlight := make(map[uint64]int, len(values))
 	concurrencyKeys := make([]string, 0, len(values))
 	for _, candidate := range values {
@@ -682,6 +770,13 @@ func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingC
 			remaining[value.ID] = candidate.Billing.Remaining()
 			fresh[value.ID] = now.Sub(candidate.Billing.SyncedAt) <= 30*time.Minute
 		}
+		if candidate.QuotaWindow != nil {
+			quotaRemaining[value.ID] = float64(max(0, candidate.QuotaWindow.Remaining))
+			if candidate.QuotaWindow.Total > 0 {
+				quotaRemaining[value.ID] /= float64(candidate.QuotaWindow.Total)
+			}
+			quotaFresh[value.ID] = candidate.QuotaWindow.SyncedAt != nil && now.Sub(*candidate.QuotaWindow.SyncedAt) <= 30*time.Minute
+		}
 	}
 	sort.SliceStable(values, func(i, j int) bool {
 		leftCandidate, rightCandidate := values[i], values[j]
@@ -699,11 +794,30 @@ func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingC
 		if left.Priority != right.Priority {
 			return left.Priority > right.Priority
 		}
+		if left.FailureCount != right.FailureCount {
+			return left.FailureCount < right.FailureCount
+		}
 		if fresh[left.ID] != fresh[right.ID] {
 			return fresh[left.ID]
 		}
 		if inFlight[left.ID] != inFlight[right.ID] {
 			return inFlight[left.ID] < inFlight[right.ID]
+		}
+		leftPerformance, leftKnown := performance[left.ID]
+		rightPerformance, rightKnown := performance[right.ID]
+		leftQuality := routePerformanceQuality(leftPerformance, leftKnown)
+		rightQuality := routePerformanceQuality(rightPerformance, rightKnown)
+		if leftQuality != rightQuality {
+			return leftQuality > rightQuality
+		}
+		if leftKnown && rightKnown && leftPerformance.latencyEWMA != rightPerformance.latencyEWMA {
+			return leftPerformance.latencyEWMA < rightPerformance.latencyEWMA
+		}
+		if quotaFresh[left.ID] != quotaFresh[right.ID] {
+			return quotaFresh[left.ID]
+		}
+		if quotaRemaining[left.ID] != quotaRemaining[right.ID] {
+			return quotaRemaining[left.ID] > quotaRemaining[right.ID]
 		}
 		if remaining[left.ID] != remaining[right.ID] {
 			return remaining[left.ID] > remaining[right.ID]
@@ -714,6 +828,15 @@ func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingC
 		return left.ID < right.ID
 	})
 	return nil
+}
+
+func routePerformanceQuality(value routePerformance, known bool) int {
+	if !known || value.samples <= 0 {
+		return int(routePerformancePrior * 20)
+	}
+	confidence := min(1, float64(value.samples)/routePerformanceWarmup)
+	quality := routePerformancePrior*(1-confidence) + value.successEWMA*confidence
+	return int(quality*20 + 0.5)
 }
 
 func (s *Selector) resolveTierOrder(provider account.Provider, upstreamModel string) []account.WebTier {

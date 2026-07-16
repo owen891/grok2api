@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { ImageLightbox, type LightboxImage } from "@/features/chat/image-lightbox";
 import { getImageStats, listImages } from "@/features/media/media-api";
 import type { MediaAssetDTO } from "@/features/media/types";
 import { EmptyState, ErrorState, LoadingState } from "@/shared/components/data-state";
@@ -19,6 +20,7 @@ export function GalleryPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [search, setSearch] = useState("");
+  const [preview, setPreview] = useState<LightboxImage | null>(null);
   const debouncedSearch = useDebouncedValue(search);
   const normalizedSearch = debouncedSearch.trim();
 
@@ -79,7 +81,14 @@ export function GalleryPage() {
 
         {!imagesQuery.isPending && result && result.items.length > 0 ? (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {result.items.map((image) => <ImageCard key={image.id} image={image} locale={i18n.language} />)}
+            {result.items.map((image) => (
+              <ImageCard
+                key={image.id}
+                image={image}
+                locale={i18n.language}
+                onOpen={() => setPreview({ url: image.url, name: image.id })}
+              />
+            ))}
           </div>
         ) : null}
 
@@ -93,14 +102,28 @@ export function GalleryPage() {
           />
         ) : null}
       </section>
+
+      <ImageLightbox key={preview ? `${preview.url}:${preview.index ?? 0}` : "closed"} image={preview} onClose={() => setPreview(null)} />
     </div>
   );
 }
 
-function ImageCard({ image, locale }: { image: MediaAssetDTO; locale: string }) {
+function ImageCard({
+  image,
+  locale,
+  onOpen,
+}: {
+  image: MediaAssetDTO;
+  locale: string;
+  onOpen: () => void;
+}) {
   const { t } = useTranslation();
   return (
-    <a href={image.url} target="_blank" rel="noreferrer" className="group overflow-hidden rounded-lg bg-card transition-colors hover:bg-secondary/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group w-full overflow-hidden rounded-lg bg-card text-left transition-colors hover:bg-secondary/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+    >
       <div className="aspect-square overflow-hidden bg-muted">
         <img src={image.url} alt={image.id} loading="lazy" className="size-full object-cover transition-transform duration-200 group-hover:scale-[1.02]" />
       </div>
@@ -115,7 +138,7 @@ function ImageCard({ image, locale }: { image: MediaAssetDTO; locale: string }) 
         </div>
         <div className="truncate font-mono text-[10px] text-muted-foreground/75" title={image.sha256}>{t("media.images.sha256")}: {image.sha256}</div>
       </div>
-    </a>
+    </button>
   );
 }
 

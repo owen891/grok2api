@@ -231,6 +231,26 @@ func TestValidateStatsigModes(t *testing.T) {
 	}
 }
 
+func TestValidateBrowserWorkerURL(t *testing.T) {
+	base := defaultConfig()
+	base.Secrets.JWTSecret = "12345678901234567890123456789012"
+	base.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+	for _, workerURL := range []string{"http://127.0.0.1:8192", "http://grok-web-browser:8192"} {
+		value := base
+		value.Provider.Web.BrowserWorkerURL = workerURL
+		if err := value.Validate(); err != nil {
+			t.Fatalf("valid browser worker URL %q rejected: %v", workerURL, err)
+		}
+	}
+
+	invalid := base
+	invalid.Provider.Web.BrowserWorkerURL = "http://example.com:8192"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("public browser worker URL was accepted")
+	}
+}
+
 func TestValidateInfrastructureDrivers(t *testing.T) {
 	base := defaultConfig()
 	base.Secrets.JWTSecret = "12345678901234567890123456789012"

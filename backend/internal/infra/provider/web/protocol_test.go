@@ -301,6 +301,17 @@ func TestParseLiteNestedUsageLimit(t *testing.T) {
 	}
 }
 
+func TestImagineWebSocketRateLimitClassification(t *testing.T) {
+	for _, message := range []string{
+		"You've hit your image rate limit. Please try again later.",
+		"You've reached your usage limit. Please try again later.",
+	} {
+		if !isWebUsageLimitError(errors.New(message)) {
+			t.Fatalf("message was not classified as usage limit: %q", message)
+		}
+	}
+}
+
 func TestParseLiteImageCardAttachmentVariants(t *testing.T) {
 	parsed := &parsedChat{}
 	frame := map[string]any{"result": map[string]any{"response": map[string]any{
@@ -371,6 +382,13 @@ func TestExtractCapturedImageURLsHandlesNestedJSONData(t *testing.T) {
 	want := []string{"https://assets.grok.com/users/test/generated/id/image.jpg"}
 	if got := extractCapturedImageURLs(fixture); !slices.Equal(got, want) {
 		t.Fatalf("urls = %#v, want %#v", got, want)
+	}
+}
+
+func TestExtractCapturedImageURLsSkipsModeratedImage(t *testing.T) {
+	fixture := []byte(`{"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"users/test/generated/blocked/image.jpg","progress":100,"moderated":true}}}}`)
+	if got := extractCapturedImageURLs(fixture); len(got) != 0 {
+		t.Fatalf("moderated image URLs = %#v", got)
 	}
 }
 
@@ -505,6 +523,22 @@ func TestImageAspectRatioFollowsXAIContractAndSizeAlias(t *testing.T) {
 	}
 	if _, err := resolveImageAspectRatio("7:5", ""); err == nil {
 		t.Fatal("unsupported aspect ratio accepted")
+	}
+}
+
+func TestLiteImageOptionsAreExplicitlyLimited(t *testing.T) {
+	base := provider.ImageGenerationRequest{Model: "grok-imagine-image"}
+	if err := validateLiteImageOptions(base); err != nil {
+		t.Fatalf("default options rejected: %v", err)
+	}
+	base.AspectRatio = "16:9"
+	if err := validateLiteImageOptions(base); err == nil {
+		t.Fatal("Fast model accepted unsupported aspect ratio")
+	}
+	base.AspectRatio = "1:1"
+	base.Resolution = "2k"
+	if err := validateLiteImageOptions(base); err == nil {
+		t.Fatal("Fast model accepted unsupported resolution")
 	}
 }
 

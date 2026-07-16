@@ -21,6 +21,7 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	quotarecoveryapp "github.com/chenyme/grok2api/backend/internal/application/quotarecovery"
+	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
@@ -41,25 +42,27 @@ import (
 
 // Application 管理后端进程生命周期和本地后台任务。
 type Application struct {
-	logger        *slog.Logger
-	database      *relational.Database
-	server        *http.Server
-	audits        *auditapp.Service
-	responses     repository.ResponseRepository
-	runtime       io.Closer
-	settingsBus   repository.SettingsChangeBus
-	settings      *settingsapp.Service
-	gateway       *gateway.Service
-	media         *mediaapp.Service
-	quotaRecovery *quotarecoveryapp.Service
-	accounts      *accountapp.Service
-	models        *modelapp.Service
-	clientKeys    *clientkeyapp.Service
-	accountRepo   repository.AccountRepository
-	modelRepo     repository.ModelRepository
-	providers     *provider.Registry
-	web           *webprovider.Adapter
-	startup       *startupState
+	logger            *slog.Logger
+	database          *relational.Database
+	server            *http.Server
+	audits            *auditapp.Service
+	responses         repository.ResponseRepository
+	runtime           io.Closer
+	settingsBus       repository.SettingsChangeBus
+	settings          *settingsapp.Service
+	gateway           *gateway.Service
+	media             *mediaapp.Service
+	quotaRecovery     *quotarecoveryapp.Service
+	registrationSpool *registrationapp.Service
+	registration      *registrationapp.Controller
+	accounts          *accountapp.Service
+	models            *modelapp.Service
+	clientKeys        *clientkeyapp.Service
+	accountRepo       repository.AccountRepository
+	modelRepo         repository.ModelRepository
+	providers         *provider.Registry
+	web               *webprovider.Adapter
+	startup           *startupState
 }
 
 // New 完成数据库、Provider、应用服务和 HTTP 路由装配。
@@ -227,6 +230,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountSyncService := accountsyncapp.NewService(logger, accountService, accountService, accountService, modelService)
 	accountSyncService.SetBulkPool(importPool)
 	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
+	var registrationSpool *registrationapp.Service
+	registrationConfig := registrationapp.Config{
+		Enabled: cfg.Registration.Enabled, SpoolPath: cfg.Registration.SpoolPath, PollInterval: cfg.Registration.PollInterval.Value(),
+		WorkDir: cfg.Registration.WorkDir, ConfigPath: cfg.Registration.ConfigPath,
+		Command: append([]string(nil), cfg.Registration.Command...), BrowserMode: cfg.Registration.BrowserMode, BrowserPath: cfg.Registration.BrowserPath,
+	}
+	registrationController := registrationapp.NewController(logger, registrationConfig)
+	if cfg.Registration.Enabled {
+		registrationSpool = registrationapp.NewService(logger, accountService, accountSyncService, registrationConfig)
+	}
 	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, cfg.Provider.Console.UserAgent)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
 	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
@@ -277,12 +290,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Registration: registrationController})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
 		audits: auditService, responses: responseRepo, runtime: runtimeStore,
-		settingsBus: settingsBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService,
+		settingsBus: settingsBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, registrationSpool: registrationSpool, registration: registrationController, accounts: accountService, models: modelService, clientKeys: clientKeyService,
 		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, startup: startup,
 	}, nil
 }
@@ -293,8 +306,9 @@ func maxBatchConcurrency(value config.BatchConfig) int {
 
 func webProviderConfig(cfg config.Config) webprovider.Config {
 	return webprovider.Config{
-		BaseURL: cfg.Provider.Web.BaseURL, QuotaTimeoutSeconds: int(cfg.Provider.Web.QuotaTimeout.Value().Seconds()),
-		StatsigMode: cfg.Provider.Web.StatsigMode, StatsigManualValue: cfg.Provider.Web.StatsigManualValue,
+		BaseURL: cfg.Provider.Web.BaseURL, BrowserWorkerURL: cfg.Provider.Web.BrowserWorkerURL,
+		QuotaTimeoutSeconds: int(cfg.Provider.Web.QuotaTimeout.Value().Seconds()),
+		StatsigMode:         cfg.Provider.Web.StatsigMode, StatsigManualValue: cfg.Provider.Web.StatsigManualValue,
 		StatsigSignerURL:   cfg.Provider.Web.StatsigSignerURL,
 		ChatTimeoutSeconds: int(cfg.Provider.Web.ChatTimeout.Value().Seconds()), ImageTimeoutSeconds: int(cfg.Provider.Web.ImageTimeout.Value().Seconds()),
 		VideoTimeoutSeconds: int(cfg.Provider.Web.VideoTimeout.Value().Seconds()), MaxInputImageBytes: cfg.Media.MaxImageBytes,
@@ -319,6 +333,15 @@ func mediaConfig(cfg config.Config) mediaapp.Config {
 
 // Run 启动 HTTP 服务和本地后台维护任务。
 func (a *Application) Run(ctx context.Context) error {
+	if a.registration != nil {
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := a.registration.Close(stopCtx); err != nil {
+				a.logger.Warn("registration_shutdown_failed", "error", err)
+			}
+		}()
+	}
 	a.audits.Start()
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -377,6 +400,9 @@ func (a *Application) Run(ctx context.Context) error {
 		a.quotaRecovery.Run(taskCtx)
 		return nil
 	})
+	if a.registrationSpool != nil {
+		startBackground("registration_spool", a.registrationSpool.Run)
+	}
 	startBackground("web_quota_refresh", func(taskCtx context.Context) error {
 		a.accounts.RunWebQuotaRefresh(taskCtx)
 		return nil

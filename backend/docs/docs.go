@@ -207,6 +207,47 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/images/{request_id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Images"
+                ],
+                "summary": "查询异步图片任务",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Request ID",
+                        "name": "request_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/v1/media/images/{asset_id}": {
             "get": {
                 "produces": [
@@ -642,6 +683,10 @@ const docTemplate = `{
                     "type": "string",
                     "example": "16:9"
                 },
+                "async": {
+                    "type": "boolean",
+                    "example": true
+                },
                 "model": {
                     "type": "string",
                     "example": "grok-imagine-image-quality"
@@ -661,6 +706,10 @@ const docTemplate = `{
                 "response_format": {
                     "type": "string",
                     "example": "url"
+                },
+                "stream": {
+                    "type": "boolean",
+                    "example": false
                 }
             }
         },

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -42,6 +43,7 @@ type Config struct {
 	Database          DatabaseConfig          `yaml:"database"`
 	RuntimeStore      RuntimeStoreConfig      `yaml:"runtimeStore"`
 	Auth              AuthConfig              `yaml:"auth"`
+	Registration      RegistrationConfig      `yaml:"registration"`
 	Secrets           Secrets                 `yaml:"secrets"`
 	BootstrapAdmin    BootstrapAdminConfig    `yaml:"bootstrapAdmin"`
 	Provider          ProviderConfig          `yaml:"provider"`
@@ -101,6 +103,17 @@ type AuthConfig struct {
 	SecureCookies   bool     `yaml:"secureCookies"`
 }
 
+type RegistrationConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	SpoolPath    string   `yaml:"spoolPath"`
+	PollInterval Duration `yaml:"pollInterval"`
+	WorkDir      string   `yaml:"workDir"`
+	ConfigPath   string   `yaml:"configPath"`
+	Command      []string `yaml:"command"`
+	BrowserMode  string   `yaml:"browserMode"`
+	BrowserPath  string   `yaml:"browserPath"`
+}
+
 type ProviderConfig struct {
 	Build   BuildProviderConfig   `yaml:"build"`
 	Web     WebProviderConfig     `yaml:"web"`
@@ -117,6 +130,7 @@ type BuildProviderConfig struct {
 
 type WebProviderConfig struct {
 	BaseURL             string   `yaml:"baseURL"`
+	BrowserWorkerURL    string   `yaml:"browserWorkerURL"`
 	StatsigMode         string   `yaml:"-"`
 	StatsigManualValue  string   `yaml:"-"`
 	StatsigSignerURL    string   `yaml:"-"`
@@ -239,6 +253,9 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
+	if workerURL := strings.TrimSpace(os.Getenv("GROK_WEB_BROWSER_WORKER_URL")); workerURL != "" {
+		cfg.Provider.Web.BrowserWorkerURL = workerURL
+	}
 	if loadedFrom != "" {
 		if err := resolveRelativePaths(&cfg, loadedFrom); err != nil {
 			return Config{}, err
@@ -269,6 +286,23 @@ func resolveRelativePaths(cfg *Config, configPath string) error {
 	staticPath := strings.TrimSpace(cfg.Frontend.StaticPath)
 	if staticPath != "" && !filepath.IsAbs(staticPath) {
 		cfg.Frontend.StaticPath = filepath.Clean(filepath.Join(baseDir, staticPath))
+	}
+	spoolPath := strings.TrimSpace(cfg.Registration.SpoolPath)
+	if spoolPath != "" && !filepath.IsAbs(spoolPath) {
+		cfg.Registration.SpoolPath = filepath.Clean(filepath.Join(baseDir, spoolPath))
+	}
+	for index, command := range cfg.Registration.Command {
+		if index == 0 && command != "" && !filepath.IsAbs(command) && strings.ContainsAny(command, `/\\`) {
+			cfg.Registration.Command[index] = filepath.Clean(filepath.Join(baseDir, command))
+		}
+	}
+	workDir := strings.TrimSpace(cfg.Registration.WorkDir)
+	if workDir != "" && !filepath.IsAbs(workDir) {
+		cfg.Registration.WorkDir = filepath.Clean(filepath.Join(baseDir, workDir))
+	}
+	registrationConfigPath := strings.TrimSpace(cfg.Registration.ConfigPath)
+	if registrationConfigPath != "" && !filepath.IsAbs(registrationConfigPath) {
+		cfg.Registration.ConfigPath = filepath.Clean(filepath.Join(baseDir, registrationConfigPath))
 	}
 	return nil
 }
@@ -357,6 +391,20 @@ func (c Config) Validate() error {
 	if c.Auth.AccessTokenTTL.Value() <= 0 || c.Auth.RefreshTokenTTL.Value() <= 0 {
 		return errors.New("JWT 有效期必须大于零")
 	}
+	if c.Registration.Enabled {
+		if strings.TrimSpace(c.Registration.SpoolPath) == "" {
+			return errors.New("registration.spoolPath 不能为空")
+		}
+		if c.Registration.PollInterval.Value() < time.Second || c.Registration.PollInterval.Value() > time.Minute {
+			return errors.New("registration.pollInterval 必须在 1 秒到 1 分钟之间")
+		}
+		if strings.TrimSpace(c.Registration.WorkDir) == "" || strings.TrimSpace(c.Registration.ConfigPath) == "" || len(c.Registration.Command) == 0 || strings.TrimSpace(c.Registration.Command[0]) == "" {
+			return errors.New("registration worker 工作目录、配置路径和命令不能为空")
+		}
+		if c.Registration.BrowserMode != "" && c.Registration.BrowserMode != "xvfb" && c.Registration.BrowserMode != "headless" && c.Registration.BrowserMode != "headed" && c.Registration.BrowserMode != "background" {
+			return errors.New("registration.browserMode 必须是 xvfb、headless、headed 或 background")
+		}
+	}
 	providerURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Build.BaseURL))
 	if err != nil || providerURL.Scheme == "" || providerURL.Host == "" {
 		return errors.New("provider.build.baseURL 必须是有效 URL")
@@ -367,6 +415,12 @@ func (c Config) Validate() error {
 	webURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Web.BaseURL))
 	if err != nil || webURL.Scheme != "https" || webURL.Host == "" || webURL.User != nil {
 		return errors.New("provider.web.baseURL 必须是无凭据的 HTTPS URL")
+	}
+	if workerURL := strings.TrimSpace(c.Provider.Web.BrowserWorkerURL); workerURL != "" {
+		parsedWorkerURL, workerErr := url.ParseRequestURI(workerURL)
+		if workerErr != nil || parsedWorkerURL.Scheme != "http" || parsedWorkerURL.Host == "" || parsedWorkerURL.User != nil || (parsedWorkerURL.Path != "" && parsedWorkerURL.Path != "/") || parsedWorkerURL.RawQuery != "" || parsedWorkerURL.Fragment != "" || !isInternalWorkerHost(parsedWorkerURL.Hostname()) {
+			return errors.New("provider.web.browserWorkerURL 必须是无凭据的内部 HTTP URL")
+		}
 	}
 	switch c.Provider.Web.StatsigMode {
 	case StatsigModeManual:
@@ -445,6 +499,11 @@ func defaultConfig() Config {
 			AccessTokenTTL:  Duration(15 * time.Minute),
 			RefreshTokenTTL: Duration(30 * 24 * time.Hour),
 		},
+		Registration: RegistrationConfig{
+			SpoolPath: "./data/registration/spool", PollInterval: Duration(2 * time.Second),
+			WorkDir: "./registration", ConfigPath: "./data/registration/config.json",
+			Command: []string{"grok2api-registration"},
+		},
 		Provider: ProviderConfig{
 			Build: BuildProviderConfig{
 				BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: RecommendedBuildClientVersion,
@@ -506,4 +565,13 @@ func isExampleSecret(value string) bool {
 	default:
 		return false
 	}
+}
+
+func isInternalWorkerHost(value string) bool {
+	host := strings.ToLower(strings.TrimSpace(value))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".internal") || !strings.Contains(host, ".") {
+		return host != ""
+	}
+	address := net.ParseIP(host)
+	return address != nil && (address.IsLoopback() || address.IsPrivate())
 }

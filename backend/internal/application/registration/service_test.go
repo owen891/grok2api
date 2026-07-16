@@ -1,0 +1,180 @@
+package registration
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+
+	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
+)
+
+type importerStub struct {
+	result   accountapp.ImportResult
+	err      error
+	calls    int
+	webCalls int
+}
+
+func (s *importerStub) ImportCredentials(context.Context, []byte) (accountapp.ImportResult, error) {
+	s.calls++
+	return s.result, s.err
+}
+
+func (s *importerStub) ImportWebCredentials(context.Context, []byte) (accountapp.ImportResult, error) {
+	s.webCalls++
+	return s.result, s.err
+}
+
+type syncerStub struct {
+	result accountsyncapp.Result
+	ids    []uint64
+}
+
+func (s *syncerStub) Sync(_ context.Context, ids ...uint64) accountsyncapp.Result {
+	s.ids = append([]uint64(nil), ids...)
+	return s.result
+}
+
+func TestProcessOnceMovesSuccessfulCredentialToProcessed(t *testing.T) {
+	root := t.TempDir()
+	importer := &importerStub{result: accountapp.ImportResult{Created: 1, AccountIDs: []uint64{42}}}
+	syncer := &syncerStub{result: accountsyncapp.Result{Succeeded: 1}}
+	service := newTestService(root, importer, syncer)
+	writeIncoming(t, root, "account.json", []byte(`{"refresh_token":"synthetic"}`))
+
+	if err := service.processOnce(context.Background()); err != nil {
+		t.Fatalf("processOnce() error = %v", err)
+	}
+	assertExists(t, filepath.Join(root, "processed", "account.json"))
+	result := readResult(t, filepath.Join(root, "processed", "account.result.json"))
+	if result.Status != "processed" || result.Created != 1 || result.Synced != 1 || result.SyncFailed != 0 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(syncer.ids) != 1 || syncer.ids[0] != 42 {
+		t.Fatalf("Sync() ids = %v", syncer.ids)
+	}
+}
+
+func TestProcessOnceRoutesWebCredentialToWebImporter(t *testing.T) {
+	root := t.TempDir()
+	importer := &importerStub{result: accountapp.ImportResult{Created: 1, AccountIDs: []uint64{43}}}
+	syncer := &syncerStub{result: accountsyncapp.Result{Succeeded: 1}}
+	service := newTestService(root, importer, syncer)
+	writeIncoming(t, root, "web.json", []byte(`{"provider":"grok_web","accounts":[{"sso_token":"synthetic"}]}`))
+
+	if err := service.processOnce(context.Background()); err != nil {
+		t.Fatalf("processOnce() error = %v", err)
+	}
+	if importer.webCalls != 1 || importer.calls != 0 {
+		t.Fatalf("web calls = %d, build calls = %d", importer.webCalls, importer.calls)
+	}
+	assertExists(t, filepath.Join(root, "processed", "web.json"))
+}
+
+func TestProcessOnceMovesInitialSyncFailureToFailed(t *testing.T) {
+	root := t.TempDir()
+	importer := &importerStub{result: accountapp.ImportResult{Updated: 1, AccountIDs: []uint64{7}}}
+	syncer := &syncerStub{result: accountsyncapp.Result{Failed: 1}}
+	service := newTestService(root, importer, syncer)
+	writeIncoming(t, root, "account.json", []byte(`{"refresh_token":"synthetic"}`))
+
+	if err := service.processOnce(context.Background()); err != nil {
+		t.Fatalf("processOnce() error = %v", err)
+	}
+	assertExists(t, filepath.Join(root, "failed", "account.json"))
+	result := readResult(t, filepath.Join(root, "failed", "account.result.json"))
+	if result.Status != "sync_failed" || result.Updated != 1 || result.Synced != 0 || result.SyncFailed != 1 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestProcessOnceRejectsOversizedCredential(t *testing.T) {
+	root := t.TempDir()
+	importer := &importerStub{}
+	syncer := &syncerStub{}
+	service := newTestService(root, importer, syncer)
+	writeIncoming(t, root, "large.json", make([]byte, maxCredentialBytes+1))
+
+	if err := service.processOnce(context.Background()); err != nil {
+		t.Fatalf("processOnce() error = %v", err)
+	}
+	assertExists(t, filepath.Join(root, "failed", "large.json"))
+	result := readResult(t, filepath.Join(root, "failed", "large.result.json"))
+	if result.Status != "rejected" || importer.calls != 0 {
+		t.Fatalf("result = %+v, importer calls = %d", result, importer.calls)
+	}
+}
+
+func TestEnsureDirectoriesTightensExistingDirectories(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX directory permissions")
+	}
+	root := t.TempDir()
+	incoming := filepath.Join(root, "incoming")
+	if err := os.MkdirAll(incoming, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	service := newTestService(root, &importerStub{}, &syncerStub{})
+	if _, _, _, err := service.ensureDirectories(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		incoming,
+		filepath.Join(root, "processed"),
+		filepath.Join(root, "failed"),
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("directory %s remains group/world accessible: %o", path, info.Mode().Perm())
+		}
+	}
+}
+
+func newTestService(root string, importer credentialImporter, syncer accountSynchronizer) *Service {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewService(logger, importer, syncer, Config{SpoolPath: root, PollInterval: time.Second})
+}
+
+func writeIncoming(t *testing.T, root, name string, data []byte) {
+	t.Helper()
+	directory := filepath.Join(root, "incoming")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, name), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readResult(t *testing.T, path string) fileResult {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result fileResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ProcessedAt.IsZero() {
+		t.Fatal("processedAt is zero")
+	}
+	return result
+}
+
+func assertExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
+	}
+}

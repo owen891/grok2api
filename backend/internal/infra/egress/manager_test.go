@@ -49,6 +49,29 @@ func TestConfiguredCoolingAppNodesNeverFallBackToDirect(t *testing.T) {
 	}}}, cipher)
 	if _, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account"); err == nil {
 		t.Fatal("cooling configured node unexpectedly fell back to direct")
+	} else {
+		var unavailable *UnavailableError
+		if !errors.As(err, &unavailable) || unavailable.Scope != domain.ScopeWeb {
+			t.Fatalf("error = %T %v", err, err)
+		}
+	}
+}
+
+func TestDisabledConfiguredNodesFallBackToDirect(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
+		ID: 1, Name: "disabled-proxy", Scope: domain.ScopeWeb, Enabled: false,
+	}}}, cipher)
+	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if lease.NodeID != 0 || lease.NodeName != "direct" || lease.ProxyURL != "" {
+		t.Fatalf("lease = %#v", lease)
 	}
 }
 
