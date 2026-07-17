@@ -649,20 +649,17 @@ export function AccountsPage() {
                     ))}
                   </TabsList>
                 </Tabs>
-                {provider === "grok_web" ? <Button variant={nsfwFilter === "enabled" ? "secondary" : "ghost"} size="sm" onClick={() => { setNsfwFilter((value) => value === "enabled" ? "" : "enabled"); setPage(1); setSelected(new Set()); }}>{t("accounts.nsfw")}</Button> : null}
-                {(result?.total ?? 0) > 0 ? (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="sm" disabled={filteredSelectionMutation.isPending}>
-                        {filteredSelectionMutation.isPending ? <Spinner /> : <ListChecks />}
-                        {t("common.selection")}
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuItem onClick={() => filteredSelectionMutation.mutate("all")}><ListChecks />{t("common.selectAllFiltered")}</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => filteredSelectionMutation.mutate("invert")}><ListRestart />{t("common.invertFilteredSelection")}</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                {provider === "grok_web" ? (
+                  <div className="flex h-8 items-center rounded-md bg-muted/55 p-0.5">
+                    <Button
+                      variant={nsfwFilter === "enabled" ? "secondary" : "ghost"}
+                      size="sm"
+                      className="h-7 px-3 text-xs shadow-none"
+                      onClick={() => { setNsfwFilter((value) => value === "enabled" ? "" : "enabled"); setPage(1); setSelected(new Set()); }}
+                    >
+                      {t("accounts.nsfw")}
+                    </Button>
+                  </div>
                 ) : null}
               </div>
               <div className="flex flex-wrap items-center justify-end gap-1.5">
