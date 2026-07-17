@@ -1,0 +1,18 @@
+{
+  "//_readme": "Pure protocol registration worker configuration. Runtime paths are managed by Grok2API.",
+  "engine": "protocol",
+  "email_provider": "yyds",
+  "email_provider_fallbacks": [],
+  "yyds_api_key": "",
+  "yyds_jwt": "",
+  "tempmail_api_key": "",
+  "proxy": "",
+  "captcha_solver": "local",
+  "captcha_endpoint": "",
+  "captcha_client_key": "local",
+  "yescaptcha_api_key": "",
+  "turnstile_timeout": 120,
+  "protocol_attempt_multiplier": 3,
+  "protocol_stage_retry_limit": 2,
+  "cpa_hotload_result_timeout_sec": 300
+}

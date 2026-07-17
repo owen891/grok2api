@@ -113,6 +113,82 @@ func TestControllerStartsPersistsStateAndReturnsNewestLogs(t *testing.T) {
 	}
 }
 
+func TestDeploymentEnvironmentOverridesWorkerNetworkSettings(t *testing.T) {
+	t.Setenv("REGISTRATION_CAPTCHA_ENDPOINT", "http://grok-turnstile-solver:5072")
+	t.Setenv("REGISTRATION_PROXY", "")
+	controller := newControllerTest(t, 0)
+	value := map[string]any{
+		"captcha_endpoint": "docker://grokcli-2api:5072",
+		"proxy":            "http://127.0.0.1:7890",
+	}
+
+	controller.forceSafeWorkerSettings(value)
+
+	if value["captcha_endpoint"] != "http://grok-turnstile-solver:5072" {
+		t.Fatalf("captcha endpoint = %#v", value["captcha_endpoint"])
+	}
+	if value["proxy"] != "" {
+		t.Fatalf("proxy = %#v, want empty deployment override", value["proxy"])
+	}
+}
+
+func TestEmailSourcesMigratePersistAndDriveProviderOrder(t *testing.T) {
+	value := map[string]any{
+		"email_provider":           "yyds",
+		"email_provider_fallbacks": []string{},
+		"yyds_api_key":             "existing-secret",
+	}
+
+	view := settingsView(value)
+	if len(view.EmailSources) != 1 || view.EmailSources[0].Type != "yyds" || !view.EmailSources[0].APIKeyConfigured {
+		t.Fatalf("legacy source migration = %+v", view.EmailSources)
+	}
+	if view.EmailSources[0].APIKey != "" {
+		t.Fatal("settings view leaked an email source secret")
+	}
+
+	patch := []EmailSourceSettings{
+		{ID: view.EmailSources[0].ID, Type: "yyds", Enabled: true, APIBase: "https://maliapi.215.im/v1"},
+		{ID: "source-2", Type: "tempmail_lol", Enabled: true, APIBase: "https://api.tempmail.lol", Prefix: "xai"},
+	}
+	if err := applyEmailSourcesPatch(value, patch); err != nil {
+		t.Fatalf("applyEmailSourcesPatch() error = %v", err)
+	}
+	if value["email_provider"] != "yyds" {
+		t.Fatalf("primary provider = %#v", value["email_provider"])
+	}
+	fallbacks := stringSlice(value["email_provider_fallbacks"])
+	if len(fallbacks) != 1 || fallbacks[0] != "tempmail_lol" {
+		t.Fatalf("fallback providers = %#v", fallbacks)
+	}
+	if value["yyds_api_key"] != "existing-secret" {
+		t.Fatal("blank secret patch did not preserve the configured YYDS key")
+	}
+
+	patch[0].Enabled = false
+	if err := applyEmailSourcesPatch(value, patch); err != nil {
+		t.Fatalf("apply disabled source patch: %v", err)
+	}
+	if value["email_provider"] != "tempmail_lol" || len(stringSlice(value["email_provider_fallbacks"])) != 0 {
+		t.Fatalf("enabled provider order was not synchronized: %#v", value)
+	}
+}
+
+func TestEmailSourcesRejectDuplicateTypesAndAllDisabled(t *testing.T) {
+	value := map[string]any{"email_provider": "yyds"}
+	duplicate := []EmailSourceSettings{
+		{ID: "one", Type: "yyds", Enabled: true, APIBase: "https://maliapi.215.im/v1"},
+		{ID: "two", Type: "yyds", Enabled: true, APIBase: "https://maliapi.215.im/v1"},
+	}
+	if err := applyEmailSourcesPatch(value, duplicate); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("duplicate type error = %v", err)
+	}
+	allDisabled := []EmailSourceSettings{{ID: "one", Type: "tempmail_lol", Enabled: false, APIBase: "https://api.tempmail.lol"}}
+	if err := applyEmailSourcesPatch(value, allDisabled); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("all-disabled error = %v", err)
+	}
+}
+
 func mustLogs(t *testing.T, controller *Controller) LogResult {
 	t.Helper()
 	logs, err := controller.Logs(20)
@@ -151,7 +227,8 @@ func TestControllerProtocolModeUsesConfiguredWorkerDispatcher(t *testing.T) {
 	}
 	settings := map[string]any{
 		"engine":                       "protocol",
-		"email_provider":               "tempmail_lol",
+		"email_provider":               "yyds",
+		"yyds_api_key":                 "synthetic",
 		"captcha_solver":               "yescaptcha",
 		"yescaptcha_api_key":           "synthetic",
 		"cpa_base_url":                 "https://cli-chat-proxy.grok.com/v1",
@@ -193,19 +270,6 @@ func TestControllerProtocolModeUsesConfiguredWorkerDispatcher(t *testing.T) {
 	}
 	if slices.Contains(values, "-u") || slices.Contains(values, filepath.Join(controller.config.WorkDir, "protocol_register_cli.py")) {
 		t.Fatalf("protocol script leaked through the configured worker wrapper: %q", values)
-	}
-}
-
-func TestWorkerEnvironmentInheritsAndOverridesBrowserMode(t *testing.T) {
-	t.Setenv("REGISTRATION_BROWSER_MODE", "xvfb")
-	controller := &Controller{config: Config{SpoolPath: t.TempDir()}}
-	if value := environmentValue(controller.workerEnvironment(), "REGISTRATION_BROWSER_MODE"); value != "xvfb" {
-		t.Fatalf("inherited browser mode = %q", value)
-	}
-
-	controller.config.BrowserMode = "background"
-	if value := environmentValue(controller.workerEnvironment(), "REGISTRATION_BROWSER_MODE"); value != "background" {
-		t.Fatalf("overridden browser mode = %q", value)
 	}
 }
 
@@ -291,25 +355,6 @@ func TestProtocolProgressMigratesLegacyDoneAttempts(t *testing.T) {
 	}
 }
 
-func TestBrowserProgressReadsUsableCredentialCounters(t *testing.T) {
-	controller := newControllerTest(t, 0)
-	worker := map[string]any{"done": 2, "target": 4, "attempted": 3, "ok": 2, "failed": 1}
-	data, _ := json.Marshal(worker)
-	if err := os.MkdirAll(controller.dataPath(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(controller.browserStatePath(), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	progress, ok := controller.browserProgressLocked(persistedState{ProgressMode: "extra"}, 12)
-	if !ok || progress.Done != 2 || progress.Attempted != 3 || progress.Succeeded != 2 || progress.Failed != 1 {
-		t.Fatalf("unexpected browser progress: ok=%v progress=%+v", ok, progress)
-	}
-	if progress.Percent == nil || *progress.Percent != 50 {
-		t.Fatalf("unexpected browser percent: %+v", progress.Percent)
-	}
-}
-
 func TestCountProtocolAccountsSupportsJSONLAndLegacyArray(t *testing.T) {
 	root := t.TempDir()
 	jsonl := filepath.Join(root, "protocol_accounts.jsonl")
@@ -360,9 +405,15 @@ func newControllerTest(t *testing.T, sleepMS int) *Controller {
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(workdir, "protocol_register_cli.py"), []byte("# synthetic\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	example := map[string]any{
-		"email_provider":               "tempmail_lol",
-		"tempmail_lol_api_base":        "https://api.tempmail.lol/v2",
+		"engine":                       "protocol",
+		"email_provider":               "yyds",
+		"yyds_api_key":                 "synthetic",
+		"captcha_solver":               "yescaptcha",
+		"yescaptcha_api_key":           "synthetic",
 		"cpa_base_url":                 "https://cli-chat-proxy.grok.com/v1",
 		"cpa_probe_chat":               true,
 		"cpa_close_browser_after_auth": true,

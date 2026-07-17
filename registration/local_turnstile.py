@@ -13,6 +13,7 @@ import os
 import subprocess
 import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -30,6 +31,24 @@ def _task_payload(website_url: str, website_key: str, task_type: str, proxy: str
     if proxy:
         task["proxy"] = proxy
     return {"clientKey": client_key or "local", "task": task}
+
+
+def _dockerize_loopback_proxy(proxy: str) -> str:
+    """Map a host loopback proxy to Docker Desktop's host gateway."""
+    value = (proxy or "").strip()
+    if not value:
+        return ""
+    parsed = urlsplit(value)
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return value
+    userinfo = ""
+    if parsed.username:
+        userinfo = parsed.username
+        if parsed.password:
+            userinfo += f":{parsed.password}"
+        userinfo += "@"
+    port = f":{parsed.port}" if parsed.port else ""
+    return urlunsplit((parsed.scheme, f"{userinfo}host.docker.internal{port}", parsed.path, parsed.query, parsed.fragment))
 
 
 def _extract_token(result: dict[str, Any]) -> str:
@@ -103,6 +122,10 @@ def _docker_solve(endpoint: str, payload: dict[str, Any], timeout: float) -> str
         port = int(port_s)
     else:
         container, port = raw, 5072
+
+    task = payload.get("task")
+    if isinstance(task, dict) and task.get("proxy"):
+        payload = {**payload, "task": {**task, "proxy": _dockerize_loopback_proxy(str(task["proxy"]))}}
 
     create_data = _docker_exec_json(container, "/createTask", payload, port)
     if create_data.get("errorId", 0) not in (0, "0", None):

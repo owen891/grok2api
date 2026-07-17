@@ -104,14 +104,13 @@ type AuthConfig struct {
 }
 
 type RegistrationConfig struct {
-	Enabled      bool     `yaml:"enabled"`
-	SpoolPath    string   `yaml:"spoolPath"`
-	PollInterval Duration `yaml:"pollInterval"`
-	WorkDir      string   `yaml:"workDir"`
-	ConfigPath   string   `yaml:"configPath"`
-	Command      []string `yaml:"command"`
-	BrowserMode  string   `yaml:"browserMode"`
-	BrowserPath  string   `yaml:"browserPath"`
+	Enabled         bool     `yaml:"enabled"`
+	SpoolPath       string   `yaml:"spoolPath"`
+	PollInterval    Duration `yaml:"pollInterval"`
+	FailedRetention Duration `yaml:"failedRetention"`
+	WorkDir         string   `yaml:"workDir"`
+	ConfigPath      string   `yaml:"configPath"`
+	Command         []string `yaml:"command"`
 }
 
 type ProviderConfig struct {
@@ -398,11 +397,11 @@ func (c Config) Validate() error {
 		if c.Registration.PollInterval.Value() < time.Second || c.Registration.PollInterval.Value() > time.Minute {
 			return errors.New("registration.pollInterval 必须在 1 秒到 1 分钟之间")
 		}
+		if c.Registration.FailedRetention.Value() < time.Hour || c.Registration.FailedRetention.Value() > 365*24*time.Hour {
+			return errors.New("registration.failedRetention must be between 1 hour and 365 days")
+		}
 		if strings.TrimSpace(c.Registration.WorkDir) == "" || strings.TrimSpace(c.Registration.ConfigPath) == "" || len(c.Registration.Command) == 0 || strings.TrimSpace(c.Registration.Command[0]) == "" {
 			return errors.New("registration worker 工作目录、配置路径和命令不能为空")
-		}
-		if c.Registration.BrowserMode != "" && c.Registration.BrowserMode != "xvfb" && c.Registration.BrowserMode != "headless" && c.Registration.BrowserMode != "headed" && c.Registration.BrowserMode != "background" {
-			return errors.New("registration.browserMode 必须是 xvfb、headless、headed 或 background")
 		}
 	}
 	providerURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Build.BaseURL))
@@ -500,7 +499,7 @@ func defaultConfig() Config {
 			RefreshTokenTTL: Duration(30 * 24 * time.Hour),
 		},
 		Registration: RegistrationConfig{
-			SpoolPath: "./data/registration/spool", PollInterval: Duration(2 * time.Second),
+			SpoolPath: "./data/registration/spool", PollInterval: Duration(2 * time.Second), FailedRetention: Duration(7 * 24 * time.Hour),
 			WorkDir: "./registration", ConfigPath: "./data/registration/config.json",
 			Command: []string{"grok2api-registration"},
 		},

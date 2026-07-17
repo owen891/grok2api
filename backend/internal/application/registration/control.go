@@ -100,34 +100,73 @@ type PreflightResult struct {
 	Config WorkerSettings   `json:"config"`
 }
 
+type EmailSourceSettings struct {
+	ID               string `json:"id"`
+	Type             string `json:"type"`
+	Enabled          bool   `json:"enabled"`
+	APIBase          string `json:"apiBase"`
+	APIKey           string `json:"apiKey"`
+	JWT              string `json:"jwt"`
+	Domain           string `json:"domain"`
+	Prefix           string `json:"prefix"`
+	APIKeyConfigured bool   `json:"apiKeyConfigured"`
+	JWTConfigured    bool   `json:"jwtConfigured"`
+}
+
+type storedEmailSource struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Enabled bool   `json:"enabled"`
+	APIBase string `json:"api_base,omitempty"`
+	APIKey  string `json:"api_key,omitempty"`
+	JWT     string `json:"jwt,omitempty"`
+	Domain  string `json:"domain,omitempty"`
+	Prefix  string `json:"prefix,omitempty"`
+}
+
 type WorkerSettings struct {
-	Engine                   string   `json:"engine"`
-	EmailProvider            string   `json:"emailProvider"`
-	EmailProviderFallbacks   []string `json:"emailProviderFallbacks"`
-	TempmailLolAPIBase       string   `json:"tempmailLolApiBase"`
-	TempmailLolDomain        string   `json:"tempmailLolDomain"`
-	TempmailLolPrefix        string   `json:"tempmailLolPrefix"`
-	Proxy                    string   `json:"proxy"`
-	CPABaseURL               string   `json:"cpaBaseURL"`
-	CPAProxy                 string   `json:"cpaProxy"`
-	CPAHeadless              bool     `json:"cpaHeadless"`
-	CPAProbeChat             bool     `json:"cpaProbeChat"`
-	CPACloseBrowserAfterAuth bool     `json:"cpaCloseBrowserAfterAuth"`
+	Engine                   string                `json:"engine"`
+	EmailSources             []EmailSourceSettings `json:"emailSources"`
+	EmailProvider            string                `json:"emailProvider"`
+	EmailProviderFallbacks   []string              `json:"emailProviderFallbacks"`
+	TempmailLolAPIBase       string                `json:"tempmailLolApiBase"`
+	TempmailLolDomain        string                `json:"tempmailLolDomain"`
+	TempmailLolPrefix        string                `json:"tempmailLolPrefix"`
+	Proxy                    string                `json:"proxy"`
+	CPABaseURL               string                `json:"cpaBaseURL"`
+	CPAProxy                 string                `json:"cpaProxy"`
+	CPAHeadless              bool                  `json:"cpaHeadless"`
+	CPAProbeChat             bool                  `json:"cpaProbeChat"`
+	CPACloseBrowserAfterAuth bool                  `json:"cpaCloseBrowserAfterAuth"`
+	CaptchaSolver            string                `json:"captchaSolver"`
+	CaptchaEndpoint          string                `json:"captchaEndpoint"`
+	YydsAPIKey               string                `json:"yydsApiKey"`
+	YydsJWT                  string                `json:"yydsJwt"`
+	YesCaptchaAPIKey         string                `json:"yescaptchaApiKey"`
+	YydsAPIKeyConfigured     bool                  `json:"yydsApiKeyConfigured"`
+	YydsJWTConfigured        bool                  `json:"yydsJwtConfigured"`
+	YesCaptchaKeyConfigured  bool                  `json:"yescaptchaApiKeyConfigured"`
 }
 
 type WorkerSettingsPatch struct {
-	Engine                   *string   `json:"engine"`
-	EmailProvider            *string   `json:"emailProvider"`
-	EmailProviderFallbacks   *[]string `json:"emailProviderFallbacks"`
-	TempmailLolAPIBase       *string   `json:"tempmailLolApiBase"`
-	TempmailLolDomain        *string   `json:"tempmailLolDomain"`
-	TempmailLolPrefix        *string   `json:"tempmailLolPrefix"`
-	Proxy                    *string   `json:"proxy"`
-	CPABaseURL               *string   `json:"cpaBaseURL"`
-	CPAProxy                 *string   `json:"cpaProxy"`
-	CPAHeadless              *bool     `json:"cpaHeadless"`
-	CPAProbeChat             *bool     `json:"cpaProbeChat"`
-	CPACloseBrowserAfterAuth *bool     `json:"cpaCloseBrowserAfterAuth"`
+	Engine                   *string                `json:"engine"`
+	EmailSources             *[]EmailSourceSettings `json:"emailSources"`
+	EmailProvider            *string                `json:"emailProvider"`
+	EmailProviderFallbacks   *[]string              `json:"emailProviderFallbacks"`
+	TempmailLolAPIBase       *string                `json:"tempmailLolApiBase"`
+	TempmailLolDomain        *string                `json:"tempmailLolDomain"`
+	TempmailLolPrefix        *string                `json:"tempmailLolPrefix"`
+	Proxy                    *string                `json:"proxy"`
+	CPABaseURL               *string                `json:"cpaBaseURL"`
+	CPAProxy                 *string                `json:"cpaProxy"`
+	CPAHeadless              *bool                  `json:"cpaHeadless"`
+	CPAProbeChat             *bool                  `json:"cpaProbeChat"`
+	CPACloseBrowserAfterAuth *bool                  `json:"cpaCloseBrowserAfterAuth"`
+	CaptchaSolver            *string                `json:"captchaSolver"`
+	CaptchaEndpoint          *string                `json:"captchaEndpoint"`
+	YydsAPIKey               *string                `json:"yydsApiKey"`
+	YydsJWT                  *string                `json:"yydsJwt"`
+	YesCaptchaAPIKey         *string                `json:"yescaptchaApiKey"`
 }
 
 type persistedState struct {
@@ -196,88 +235,41 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 		return Status{}, err
 	}
 
-	accountsPath := c.accountsPath()
-	initialCount := countNonEmptyLines(accountsPath)
 	mode := "count"
-	var target *int
+	value := input.Count
 	if input.Extra > 0 {
 		mode = "extra"
-		value := initialCount + input.Extra
-		target = &value
+		value = input.Extra
 	} else if input.Count == 0 {
-		mode = "unlimited"
-	} else {
-		value := input.Count
-		target = &value
+		value = 1
 	}
-
-	configValue, _ := readJSONMap(c.config.ConfigPath)
-	settings := settingsView(configValue)
-	engine := settings.Engine
-	if engine != "protocol" {
-		engine = "browser"
-	}
-	if engine == "protocol" {
-		if err := os.Remove(c.protocolStatePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-			c.releaseLockLocked()
-			return Status{}, fmt.Errorf("清理协议注册状态: %w", err)
-		}
-		if input.Extra > 0 {
-			mode = "extra"
-			value := input.Extra
-			target = &value
-		} else if input.Count > 0 {
-			mode = "count"
-			value := input.Count
-			target = &value
-		} else {
-			mode = "count"
-			value := 1
-			target = &value
-		}
-	} else if err := os.Remove(c.browserStatePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	target := &value
+	if err := os.Remove(c.protocolStatePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		c.releaseLockLocked()
-		return Status{}, fmt.Errorf("清理浏览器注册状态: %w", err)
+		return Status{}, fmt.Errorf("清理协议注册状态: %w", err)
 	}
 
-	var command *exec.Cmd
-	if engine == "protocol" {
-		protocolScript := filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
-		if _, err := os.Stat(protocolScript); err != nil {
-			c.releaseLockLocked()
-			return Status{}, fmt.Errorf("协议注册脚本不存在: %w", err)
-		}
-		arguments := protocolWorkerArguments(c.config.Command, protocolScript,
-			"--config", c.config.ConfigPath,
-			"--state-dir", c.dataPath(),
-			"--log-file", c.logPath(),
-			"--count", strconv.Itoa(input.Count),
-			"--threads", strconv.Itoa(input.Threads),
-			"--account-type", accountType,
-		)
-		if input.Extra > 0 {
-			arguments = append(arguments, "--extra", strconv.Itoa(input.Extra))
-		}
-		if input.Fast {
-			arguments = append(arguments, "--fast")
-		}
-		command = exec.Command(c.config.Command[0], arguments...)
-		c.appendLogLocked(fmt.Sprintf("[website] 启动协议注册任务: 类型=%s 数量=%d 追加=%d 线程=%d", accountType, input.Count, input.Extra, input.Threads))
-	} else {
-		arguments := append([]string(nil), c.config.Command[1:]...)
-		arguments = append(arguments, "--count", strconv.Itoa(input.Count))
-		if input.Extra > 0 {
-			arguments = append(arguments, "--extra", strconv.Itoa(input.Extra))
-		}
-		arguments = append(arguments, "--threads", strconv.Itoa(input.Threads), "--account-type", accountType, "--accounts-file", accountsPath)
-		if input.Fast {
-			arguments = append(arguments, "--fast")
-		} else {
-			arguments = append(arguments, "--no-fast")
-		}
-		command = exec.Command(c.config.Command[0], arguments...)
-		c.appendLogLocked(fmt.Sprintf("[website] 启动浏览器注册任务: 类型=%s 数量=%d 追加=%d 线程=%d", accountType, input.Count, input.Extra, input.Threads))
+	protocolScript := filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
+	if _, err := os.Stat(protocolScript); err != nil {
+		c.releaseLockLocked()
+		return Status{}, fmt.Errorf("协议注册脚本不存在: %w", err)
 	}
+	arguments := protocolWorkerArguments(c.config.Command, protocolScript,
+		"--config", c.config.ConfigPath,
+		"--state-dir", c.dataPath(),
+		"--log-file", c.logPath(),
+		"--count", strconv.Itoa(input.Count),
+		"--threads", strconv.Itoa(input.Threads),
+		"--account-type", accountType,
+	)
+	if input.Extra > 0 {
+		arguments = append(arguments, "--extra", strconv.Itoa(input.Extra))
+	}
+	if input.Fast {
+		arguments = append(arguments, "--fast")
+	}
+	command := exec.Command(c.config.Command[0], arguments...)
+	c.appendLogLocked(fmt.Sprintf("[website] 启动协议注册任务: 类型=%s 数量=%d 追加=%d 线程=%d", accountType, input.Count, input.Extra, input.Threads))
 	command.Dir = c.config.WorkDir
 	command.Env = c.workerEnvironment()
 	prepareProcess(command)
@@ -297,8 +289,8 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 	writer.Close()
 	now := time.Now().UTC()
 	state = persistedState{
-		Engine: engine, Running: true, PID: command.Process.Pid, StartedAt: &now,
-		ProgressMode: mode, InitialAccountCount: initialCount, TargetCount: target,
+		Engine: "protocol", Running: true, PID: command.Process.Pid, StartedAt: &now,
+		ProgressMode: mode, TargetCount: target,
 	}
 	if err := c.writeStateLocked(state); err != nil {
 		_ = stopProcessTree(context.Background(), command.Process.Pid)
@@ -459,90 +451,69 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		configValue, _ = readJSONMap(c.config.ConfigPath)
 		settings = settingsView(configValue)
 	}
-	engine := settings.Engine
-	if engine != "protocol" {
-		engine = "browser"
+	add("engine", true, "protocol")
+	enabledSources := make([]EmailSourceSettings, 0, len(settings.EmailSources))
+	credentialsReady := true
+	for _, source := range settings.EmailSources {
+		if !source.Enabled {
+			continue
+		}
+		enabledSources = append(enabledSources, source)
+		if source.Type == "yyds" && !source.APIKeyConfigured && !source.JWTConfigured {
+			credentialsReady = false
+		}
 	}
-	add("engine", engine == "browser" || engine == "protocol", engine)
-	providerOK := slices.Contains([]string{"tempmail_lol", "duckmail", "yyds", "cloudflare", "cloudmail"}, settings.EmailProvider)
-	add("emailProvider", providerOK, settings.EmailProvider)
-	if engine == "protocol" {
-		// 协议路径不依赖浏览器 CPA 探测地址；仅校验 proxy 可选性。
-		add("cpaBaseURL", true, "protocol mode skips browser CPA probe")
-		proxyOK, proxyDetail := proxyReady(settings.Proxy)
-		add("proxy", proxyOK, proxyDetail)
-		add("cpaProxy", true, "protocol mode skips cpaProxy")
-		solver := strings.ToLower(strings.TrimSpace(stringValue(configValue["captcha_solver"], "local")))
-		if solver == "" {
-			solver = "local"
+	providerNames := make([]string, 0, len(enabledSources))
+	for _, source := range enabledSources {
+		providerNames = append(providerNames, source.Type)
+	}
+	add("emailSources", len(enabledSources) > 0, strings.Join(providerNames, ", "))
+	add("emailCredentials", len(enabledSources) > 0 && credentialsReady, "API key or YYDS JWT for every enabled source")
+	// 协议路径不依赖浏览器 CPA 探测地址；仅校验 proxy 可选性。
+	add("cpaBaseURL", true, "protocol mode skips browser CPA probe")
+	proxyOK, proxyDetail := proxyReady(settings.Proxy)
+	add("proxy", proxyOK, proxyDetail)
+	add("cpaProxy", true, "protocol mode skips cpaProxy")
+	solver := strings.ToLower(strings.TrimSpace(stringValue(configValue["captcha_solver"], "local")))
+	if solver == "" {
+		solver = "local"
+	}
+	yesKey := strings.TrimSpace(stringValue(configValue["yescaptcha_api_key"], ""))
+	if yesKey == "" {
+		yesKey = strings.TrimSpace(stringValue(configValue["yes_captcha_key"], ""))
+	}
+	if yesKey == "" {
+		yesKey = strings.TrimSpace(stringValue(configValue["captcha_api_key"], ""))
+	}
+	// YYDS 的 AC- key 不能当 YesCaptcha
+	if strings.HasPrefix(yesKey, "AC-") {
+		yesKey = ""
+	}
+	if solver == "local" {
+		ep := strings.TrimSpace(stringValue(configValue["captcha_endpoint"], ""))
+		if ep == "" {
+			ep = strings.TrimSpace(stringValue(configValue["local_captcha_endpoint"], ""))
 		}
-		yesKey := strings.TrimSpace(stringValue(configValue["yescaptcha_api_key"], ""))
-		if yesKey == "" {
-			yesKey = strings.TrimSpace(stringValue(configValue["yes_captcha_key"], ""))
-		}
-		if yesKey == "" {
-			yesKey = strings.TrimSpace(stringValue(configValue["captcha_api_key"], ""))
-		}
-		// YYDS 的 AC- key 不能当 YesCaptcha
-		if strings.HasPrefix(yesKey, "AC-") {
-			yesKey = ""
-		}
-		if solver == "local" {
-			ep := strings.TrimSpace(stringValue(configValue["captcha_endpoint"], ""))
-			if ep == "" {
-				ep = strings.TrimSpace(stringValue(configValue["local_captcha_endpoint"], ""))
-			}
-			add("captchaEndpoint", ep != "", ep)
-			add("captchaSolver", true, "local-http")
-		} else {
-			add("yescaptcha", yesKey != "", "yescaptcha_api_key")
-		}
-		protocolScript := filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
-		_, protocolErr := os.Stat(protocolScript)
-		add("protocolWorker", protocolErr == nil, protocolScript)
+		add("captchaEndpoint", ep != "", ep)
+		add("captchaSolver", true, "local-http")
 	} else {
-		_, cpaErr := validateCPABaseURL(settings.CPABaseURL)
-		add("cpaBaseURL", cpaErr == nil, settings.CPABaseURL)
-		proxyOK, proxyDetail := proxyReady(settings.Proxy)
-		add("proxy", proxyOK, proxyDetail)
-		cpaProxyOK, cpaProxyDetail := proxyReady(settings.CPAProxy)
-		add("cpaProxy", cpaProxyOK, cpaProxyDetail)
+		add("yescaptcha", yesKey != "", "yescaptcha_api_key")
 	}
+	protocolScript := filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
+	_, protocolErr := os.Stat(protocolScript)
+	add("protocolWorker", protocolErr == nil, protocolScript)
 
 	dependencyOK := false
 	dependencyDetail := "worker unavailable"
 	if commandErr == nil && workErr == nil {
 		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		if engine == "protocol" {
-			protocolScript := filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
-			arguments := protocolWorkerArguments(c.config.Command, protocolScript,
-				"--preflight",
-				"--config", c.config.ConfigPath,
-				"--state-dir", c.dataPath(),
-				"--log-file", c.logPath(),
-			)
-			probe := exec.CommandContext(probeCtx, c.config.Command[0], arguments...)
-			probe.Dir = c.config.WorkDir
-			probe.Env = c.workerEnvironment()
-			output, err := probe.CombinedOutput()
-			dependencyOK = err == nil
-			dependencyDetail = "ready"
-			if err != nil {
-				dependencyDetail = strings.TrimSpace(string(output))
-				if dependencyDetail == "" {
-					dependencyDetail = err.Error()
-				}
-			}
-			add("dependencies", dependencyOK, truncateText(dependencyDetail, 500))
-			result := PreflightResult{OK: true, Checks: checks, Config: settings}
-			for _, check := range checks {
-				result.OK = result.OK && check.OK
-			}
-			return result
-		}
-		arguments := append([]string(nil), c.config.Command[1:]...)
-		arguments = append(arguments, "--help")
+		arguments := protocolWorkerArguments(c.config.Command, protocolScript,
+			"--preflight",
+			"--config", c.config.ConfigPath,
+			"--state-dir", c.dataPath(),
+			"--log-file", c.logPath(),
+		)
 		probe := exec.CommandContext(probeCtx, c.config.Command[0], arguments...)
 		probe.Dir = c.config.WorkDir
 		probe.Env = c.workerEnvironment()
@@ -612,69 +583,7 @@ func (c *Controller) statusLocked(state persistedState) Status {
 }
 
 func (c *Controller) progressLocked(state persistedState) Progress {
-	accountCount := countNonEmptyLines(c.accountsPath())
-	if state.Engine == "protocol" {
-		accountCount = countProtocolAccounts(c.protocolLedgerPath())
-		return c.protocolProgressLocked(state, accountCount)
-	}
-	if progress, ok := c.browserProgressLocked(state, accountCount); ok {
-		return progress
-	}
-	done := max(0, accountCount-state.InitialAccountCount)
-	progress := Progress{Mode: state.ProgressMode, Done: done, Indeterminate: state.TargetCount == nil, AccountCount: accountCount}
-	if state.TargetCount != nil {
-		total := max(0, *state.TargetCount-state.InitialAccountCount)
-		if state.ProgressMode == "count" {
-			done = min(accountCount, *state.TargetCount)
-			total = *state.TargetCount
-			progress.Done = done
-		}
-		progress.Total = &total
-		percent := float64(100)
-		if total > 0 {
-			percent = min(100, float64(progress.Done)*100/float64(total))
-		}
-		progress.Percent = &percent
-	}
-	return progress
-}
-
-func (c *Controller) browserProgressLocked(state persistedState, accountCount int) (Progress, bool) {
-	data, err := os.ReadFile(c.browserStatePath())
-	if err != nil {
-		return Progress{}, false
-	}
-	var worker struct {
-		Done      int  `json:"done"`
-		Target    *int `json:"target"`
-		Attempted int  `json:"attempted"`
-		OK        int  `json:"ok"`
-		Failed    int  `json:"failed"`
-	}
-	if json.Unmarshal(data, &worker) != nil {
-		return Progress{}, false
-	}
-	progress := Progress{
-		Mode:         state.ProgressMode,
-		Done:         max(0, worker.Done),
-		AccountCount: accountCount,
-		Attempted:    max(0, worker.Attempted),
-		Succeeded:    max(0, worker.OK),
-		Failed:       max(0, worker.Failed),
-	}
-	if worker.Target == nil {
-		progress.Indeterminate = true
-		return progress, true
-	}
-	total := max(0, *worker.Target)
-	progress.Total = &total
-	percent := float64(100)
-	if total > 0 {
-		progress.Done = min(progress.Done, total)
-		percent = min(100, float64(progress.Done)*100/float64(total))
-	}
-	progress.Percent = &percent
-	return progress, true
+	return c.protocolProgressLocked(state, countProtocolAccounts(c.protocolLedgerPath()))
 }
 
 func (c *Controller) protocolProgressLocked(state persistedState, accountCount int) Progress {
@@ -814,6 +723,18 @@ func (c *Controller) ensureWorkerConfigLocked() error {
 }
 
 func (c *Controller) forceSafeWorkerSettings(value map[string]any) {
+	value["engine"] = "protocol"
+	delete(value, "protocol_fallback_browser")
+	if !isSupportedEmailProvider(stringValue(value["email_provider"], "")) {
+		value["email_provider"] = "yyds"
+	}
+	fallbacks := make([]string, 0)
+	for _, provider := range stringSlice(value["email_provider_fallbacks"]) {
+		if isSupportedEmailProvider(provider) {
+			fallbacks = append(fallbacks, provider)
+		}
+	}
+	value["email_provider_fallbacks"] = fallbacks
 	value["cpa_remote_import_enabled"] = false
 	value["grok2api_auto_add_remote"] = false
 	value["grok2api_auto_add_local"] = false
@@ -822,6 +743,12 @@ func (c *Controller) forceSafeWorkerSettings(value map[string]any) {
 	value["cpa_hotload_dir"] = filepath.Join(c.config.SpoolPath, "incoming")
 	value["spool_dir"] = filepath.Join(c.config.SpoolPath, "incoming")
 	value["cpa_auth_dir"] = filepath.Join(c.dataPath(), "cpa_auths")
+	if endpoint, ok := os.LookupEnv("REGISTRATION_CAPTCHA_ENDPOINT"); ok {
+		value["captcha_endpoint"] = strings.TrimSpace(endpoint)
+	}
+	if proxy, ok := os.LookupEnv("REGISTRATION_PROXY"); ok {
+		value["proxy"] = strings.TrimSpace(proxy)
+	}
 	value["registration_config_version"] = 4
 }
 
@@ -835,29 +762,6 @@ func (c *Controller) workerEnvironment() []string {
 		"REGISTRATION_CPA_HOTLOAD_DIR":       filepath.Join(c.config.SpoolPath, "incoming"),
 		"REGISTRATION_DISABLE_REMOTE_IMPORT": "1",
 	}
-	mode := strings.TrimSpace(c.config.BrowserMode)
-	if mode != "" {
-		values["REGISTRATION_BROWSER_MODE"] = mode
-	}
-	if c.config.BrowserPath != "" {
-		values["REGISTRATION_BROWSER_PATH"] = c.config.BrowserPath
-	} else if path := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); path != "" {
-		// 优先系统 Chrome
-		candidates := []string{
-			filepath.Join(path, "Google", "Chrome", "Application", "chrome.exe"),
-			filepath.Join(os.Getenv("PROGRAMFILES"), "Google", "Chrome", "Application", "chrome.exe"),
-			filepath.Join(os.Getenv("PROGRAMFILES(X86)"), "Google", "Chrome", "Application", "chrome.exe"),
-		}
-		for _, candidate := range candidates {
-			if candidate == "" {
-				continue
-			}
-			if _, err := os.Stat(candidate); err == nil {
-				values["REGISTRATION_BROWSER_PATH"] = candidate
-				break
-			}
-		}
-	}
 	for key, value := range values {
 		environment = setEnvironment(environment, key, value)
 	}
@@ -868,14 +772,10 @@ func (c *Controller) dataPath() string { return filepath.Dir(c.config.SpoolPath)
 func (c *Controller) statePath() string {
 	return filepath.Join(c.dataPath(), "registration_state.json")
 }
-func (c *Controller) lockPath() string     { return filepath.Join(c.dataPath(), "registration.lock") }
-func (c *Controller) logPath() string      { return filepath.Join(c.dataPath(), "registration.log") }
-func (c *Controller) accountsPath() string { return filepath.Join(c.dataPath(), "accounts_cli.txt") }
+func (c *Controller) lockPath() string { return filepath.Join(c.dataPath(), "registration.lock") }
+func (c *Controller) logPath() string  { return filepath.Join(c.dataPath(), "registration.log") }
 func (c *Controller) protocolStatePath() string {
 	return filepath.Join(c.dataPath(), "state.json")
-}
-func (c *Controller) browserStatePath() string {
-	return filepath.Join(c.dataPath(), "browser_state.json")
 }
 func (c *Controller) protocolLedgerPath() string {
 	return filepath.Join(c.dataPath(), "protocol_accounts.jsonl")
@@ -989,13 +889,18 @@ func readLogEntries(path string, limit int) ([]LogEntry, error) {
 }
 
 func settingsView(value map[string]any) WorkerSettings {
-	engine := strings.ToLower(strings.TrimSpace(stringValue(value["engine"], "browser")))
-	if engine != "protocol" {
-		engine = "browser"
+	solver := strings.ToLower(strings.TrimSpace(stringValue(value["captcha_solver"], "local")))
+	if solver != "yescaptcha" {
+		solver = "local"
+	}
+	endpoint := strings.TrimSpace(stringValue(value["captcha_endpoint"], ""))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(stringValue(value["local_captcha_endpoint"], ""))
 	}
 	return WorkerSettings{
-		Engine:                 engine,
-		EmailProvider:          stringValue(value["email_provider"], "tempmail_lol"),
+		Engine:                 "protocol",
+		EmailSources:           emailSourcesView(value),
+		EmailProvider:          stringValue(value["email_provider"], "yyds"),
 		EmailProviderFallbacks: stringSlice(value["email_provider_fallbacks"]),
 		TempmailLolAPIBase:     stringValue(value["tempmail_lol_api_base"], "https://api.tempmail.lol/v2"),
 		TempmailLolDomain:      stringValue(value["tempmail_lol_domain"], ""),
@@ -1003,20 +908,52 @@ func settingsView(value map[string]any) WorkerSettings {
 		Proxy:                  stringValue(value["proxy"], ""), CPABaseURL: stringValue(value["cpa_base_url"], "https://cli-chat-proxy.grok.com/v1"),
 		CPAProxy: stringValue(value["cpa_proxy"], ""), CPAHeadless: boolValue(value["cpa_headless"], false),
 		CPAProbeChat: boolValue(value["cpa_probe_chat"], true), CPACloseBrowserAfterAuth: boolValue(value["cpa_close_browser_after_auth"], true),
+		CaptchaSolver: solver, CaptchaEndpoint: endpoint,
+		YydsAPIKeyConfigured:    strings.TrimSpace(stringValue(value["yyds_api_key"], "")) != "",
+		YydsJWTConfigured:       strings.TrimSpace(stringValue(value["yyds_jwt"], "")) != "",
+		YesCaptchaKeyConfigured: strings.TrimSpace(stringValue(value["yescaptcha_api_key"], "")) != "",
 	}
 }
 
 func applySettingsPatch(value map[string]any, patch WorkerSettingsPatch) error {
 	if patch.Engine != nil {
 		engine := strings.ToLower(strings.TrimSpace(*patch.Engine))
-		if !slices.Contains([]string{"browser", "protocol"}, engine) {
+		if engine != "protocol" {
 			return fmt.Errorf("%w: 不支持的注册引擎", ErrInvalidInput)
 		}
-		value["engine"] = engine
+	}
+	value["engine"] = "protocol"
+	if patch.CaptchaSolver != nil {
+		solver := strings.ToLower(strings.TrimSpace(*patch.CaptchaSolver))
+		if !slices.Contains([]string{"local", "yescaptcha"}, solver) {
+			return fmt.Errorf("%w: 不支持的验证码方式", ErrInvalidInput)
+		}
+		value["captcha_solver"] = solver
+	}
+	if patch.CaptchaEndpoint != nil {
+		endpoint, err := validateCaptchaEndpoint(*patch.CaptchaEndpoint)
+		if err != nil {
+			return fmt.Errorf("%w: 验证码 endpoint 无效", ErrInvalidInput)
+		}
+		value["captcha_endpoint"] = endpoint
+	}
+	for key, secret := range map[string]*string{
+		"yyds_api_key":       patch.YydsAPIKey,
+		"yyds_jwt":           patch.YydsJWT,
+		"yescaptcha_api_key": patch.YesCaptchaAPIKey,
+	} {
+		if secret == nil || strings.TrimSpace(*secret) == "" {
+			continue
+		}
+		trimmed := strings.TrimSpace(*secret)
+		if len(trimmed) > 4096 {
+			return fmt.Errorf("%w: 密钥过长", ErrInvalidInput)
+		}
+		value[key] = trimmed
 	}
 	if patch.EmailProvider != nil {
 		provider := strings.TrimSpace(*patch.EmailProvider)
-		if !slices.Contains([]string{"tempmail_lol", "duckmail", "yyds", "cloudflare", "cloudmail"}, provider) {
+		if !isSupportedEmailProvider(provider) {
 			return fmt.Errorf("%w: 不支持的邮箱服务", ErrInvalidInput)
 		}
 		value["email_provider"] = provider
@@ -1025,7 +962,7 @@ func applySettingsPatch(value map[string]any, patch WorkerSettingsPatch) error {
 		fallbacks := make([]string, 0, len(*patch.EmailProviderFallbacks))
 		for _, provider := range *patch.EmailProviderFallbacks {
 			provider = strings.TrimSpace(provider)
-			if provider == "" || !slices.Contains([]string{"tempmail_lol", "duckmail", "yyds", "cloudflare", "cloudmail"}, provider) {
+			if !isSupportedEmailProvider(provider) {
 				return fmt.Errorf("%w: 邮箱回退服务无效", ErrInvalidInput)
 			}
 			fallbacks = append(fallbacks, provider)
@@ -1067,6 +1004,169 @@ func applySettingsPatch(value map[string]any, patch WorkerSettingsPatch) error {
 	if patch.CPACloseBrowserAfterAuth != nil {
 		value["cpa_close_browser_after_auth"] = *patch.CPACloseBrowserAfterAuth
 	}
+	if patch.EmailSources != nil {
+		if err := applyEmailSourcesPatch(value, *patch.EmailSources); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isSupportedEmailProvider(provider string) bool {
+	return slices.Contains([]string{"tempmail_lol", "yyds"}, strings.TrimSpace(provider))
+}
+
+func defaultEmailAPIBase(provider string) string {
+	if provider == "tempmail_lol" {
+		return "https://api.tempmail.lol"
+	}
+	return "https://maliapi.215.im/v1"
+}
+
+func readStoredEmailSources(value map[string]any) []storedEmailSource {
+	if raw, ok := value["email_sources"]; ok {
+		data, err := json.Marshal(raw)
+		if err == nil {
+			var sources []storedEmailSource
+			if json.Unmarshal(data, &sources) == nil && len(sources) > 0 {
+				return sources
+			}
+		}
+	}
+
+	providers := append([]string{stringValue(value["email_provider"], "yyds")}, stringSlice(value["email_provider_fallbacks"])...)
+	sources := make([]storedEmailSource, 0, len(providers))
+	for index, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if !isSupportedEmailProvider(provider) {
+			continue
+		}
+		source := storedEmailSource{ID: fmt.Sprintf("source-%d", index+1), Type: provider, Enabled: true, APIBase: defaultEmailAPIBase(provider)}
+		if provider == "tempmail_lol" {
+			source.APIKey = stringValue(value["tempmail_api_key"], "")
+			source.Domain = stringValue(value["tempmail_lol_domain"], "")
+			source.Prefix = stringValue(value["tempmail_lol_prefix"], "")
+			if configuredBase := strings.TrimSuffix(stringValue(value["tempmail_lol_api_base"], ""), "/v2"); configuredBase != "" {
+				source.APIBase = configuredBase
+			}
+		} else {
+			source.APIKey = stringValue(value["yyds_api_key"], "")
+			source.JWT = stringValue(value["yyds_jwt"], "")
+			if configuredBase := stringValue(value["yyds_api_base"], ""); configuredBase != "" {
+				source.APIBase = configuredBase
+			}
+		}
+		sources = append(sources, source)
+	}
+	if len(sources) == 0 {
+		sources = append(sources, storedEmailSource{ID: "source-1", Type: "yyds", Enabled: true, APIBase: defaultEmailAPIBase("yyds")})
+	}
+	return sources
+}
+
+func emailSourcesView(value map[string]any) []EmailSourceSettings {
+	stored := readStoredEmailSources(value)
+	sources := make([]EmailSourceSettings, 0, len(stored))
+	for _, source := range stored {
+		if !isSupportedEmailProvider(source.Type) {
+			continue
+		}
+		apiBase := strings.TrimSpace(source.APIBase)
+		if apiBase == "" {
+			apiBase = defaultEmailAPIBase(source.Type)
+		}
+		sources = append(sources, EmailSourceSettings{
+			ID: source.ID, Type: source.Type, Enabled: source.Enabled, APIBase: apiBase,
+			Domain: source.Domain, Prefix: source.Prefix,
+			APIKeyConfigured: strings.TrimSpace(source.APIKey) != "",
+			JWTConfigured:    strings.TrimSpace(source.JWT) != "",
+		})
+	}
+	return sources
+}
+
+func applyEmailSourcesPatch(value map[string]any, patch []EmailSourceSettings) error {
+	if len(patch) == 0 || len(patch) > 10 {
+		return fmt.Errorf("%w: email sources must contain 1 to 10 items", ErrInvalidInput)
+	}
+	existing := make(map[string]storedEmailSource)
+	for _, source := range readStoredEmailSources(value) {
+		existing[source.ID] = source
+	}
+
+	seenIDs := make(map[string]struct{}, len(patch))
+	seenTypes := make(map[string]struct{}, len(patch))
+	stored := make([]storedEmailSource, 0, len(patch))
+	enabledProviders := make([]string, 0, len(patch))
+	for _, source := range patch {
+		source.ID = strings.TrimSpace(source.ID)
+		source.Type = strings.TrimSpace(source.Type)
+		if source.ID == "" || len(source.ID) > 80 {
+			return fmt.Errorf("%w: email source id is invalid", ErrInvalidInput)
+		}
+		if _, exists := seenIDs[source.ID]; exists {
+			return fmt.Errorf("%w: duplicate email source id", ErrInvalidInput)
+		}
+		seenIDs[source.ID] = struct{}{}
+		if !isSupportedEmailProvider(source.Type) {
+			return fmt.Errorf("%w: unsupported email source type", ErrInvalidInput)
+		}
+		if _, exists := seenTypes[source.Type]; exists {
+			return fmt.Errorf("%w: duplicate email source type", ErrInvalidInput)
+		}
+		seenTypes[source.Type] = struct{}{}
+		apiBase := strings.TrimSpace(source.APIBase)
+		if apiBase == "" {
+			apiBase = defaultEmailAPIBase(source.Type)
+		}
+		normalizedBase, err := validateHTTPURL(apiBase)
+		if err != nil {
+			return fmt.Errorf("%w: email source API base is invalid", ErrInvalidInput)
+		}
+		if len(source.Domain) > 2048 || len(source.Prefix) > 128 {
+			return fmt.Errorf("%w: email source configuration is too long", ErrInvalidInput)
+		}
+		current := existing[source.ID]
+		secret := strings.TrimSpace(source.APIKey)
+		jwt := strings.TrimSpace(source.JWT)
+		if secret == "" && current.Type == source.Type {
+			secret = current.APIKey
+		}
+		if jwt == "" && current.Type == source.Type {
+			jwt = current.JWT
+		}
+		if len(secret) > 4096 || len(jwt) > 4096 {
+			return fmt.Errorf("%w: email source secret is too long", ErrInvalidInput)
+		}
+		item := storedEmailSource{
+			ID: source.ID, Type: source.Type, Enabled: source.Enabled, APIBase: normalizedBase,
+			APIKey: secret, JWT: jwt, Domain: strings.TrimSpace(source.Domain), Prefix: strings.TrimSpace(source.Prefix),
+		}
+		stored = append(stored, item)
+		if item.Enabled {
+			enabledProviders = append(enabledProviders, item.Type)
+		}
+	}
+	if len(enabledProviders) == 0 {
+		return fmt.Errorf("%w: at least one email source must be enabled", ErrInvalidInput)
+	}
+
+	value["email_sources"] = stored
+	value["email_provider"] = enabledProviders[0]
+	value["email_provider_fallbacks"] = enabledProviders[1:]
+	for _, source := range stored {
+		switch source.Type {
+		case "tempmail_lol":
+			value["tempmail_api_key"] = source.APIKey
+			value["tempmail_lol_api_base"] = strings.TrimRight(source.APIBase, "/") + "/v2"
+			value["tempmail_lol_domain"] = source.Domain
+			value["tempmail_lol_prefix"] = source.Prefix
+		case "yyds":
+			value["yyds_api_base"] = source.APIBase
+			value["yyds_api_key"] = source.APIKey
+			value["yyds_jwt"] = source.JWT
+		}
+	}
 	return nil
 }
 
@@ -1076,6 +1176,21 @@ func validateHTTPURL(raw string) (string, error) {
 		return "", errors.New("invalid HTTP URL")
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func validateCaptchaEndpoint(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(strings.ToLower(value), "docker://") {
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") {
+			return "", errors.New("invalid docker endpoint")
+		}
+		return strings.TrimRight(value, "/"), nil
+	}
+	return validateHTTPURL(value)
 }
 
 func validateCPABaseURL(raw string) (string, error) {

@@ -46,9 +46,10 @@ FROM python:3.13-slim-bookworm AS registration-builder
 
 ENV VIRTUAL_ENV=/opt/registration-venv \
     PATH="/opt/registration-venv/bin:$PATH"
+ENV UV_HTTP_TIMEOUT=300
 
 COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /uvx /bin/
-COPY registration/requirements.lock /tmp/registration-requirements.lock
+COPY registration/requirements.protocol.lock /tmp/registration-requirements.lock
 RUN uv venv "$VIRTUAL_ENV" && \
     uv pip install --python "$VIRTUAL_ENV/bin/python" --require-hashes -r /tmp/registration-requirements.lock && \
     find "$VIRTUAL_ENV" -type d -name __pycache__ -prune -exec rm -rf {} + && \
@@ -61,18 +62,13 @@ FROM python:3.13-slim-bookworm
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
-        chromium \
         curl \
-        fonts-liberation \
-        fonts-noto-cjk \
         gosu \
-        tzdata \
-        xauth \
-        xvfb && \
+        tzdata && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --gid 10001 grok2api && \
     useradd --uid 10001 --gid grok2api --no-create-home --shell /usr/sbin/nologin grok2api && \
-    mkdir -p /app/data/registration/home /app/data/registration/spool/incoming /app/data/registration/spool/processed /app/data/registration/spool/failed /run/grok2api && \
+    mkdir -p /app/data/registration/home /app/data/registration/spool/incoming /app/data/registration/spool/processing /app/data/registration/spool/processed /app/data/registration/spool/failed /run/grok2api && \
     chown -R grok2api:grok2api /app/data /run/grok2api
 
 ENV TZ=Asia/Shanghai \
@@ -84,10 +80,6 @@ ENV TZ=Asia/Shanghai \
     REGISTRATION_WORKDIR=/app/registration \
     REGISTRATION_DATA_DIR=/app/data/registration \
     REGISTRATION_CONFIG_FILE=/app/data/registration/config.json \
-    REGISTRATION_BROWSER_MODE=xvfb \
-    REGISTRATION_BROWSER_PATH=/usr/bin/chromium \
-    REGISTRATION_BROWSER_WINDOW=1280,900 \
-    REGISTRATION_XVFB_SCREEN=1280x900x24 \
     REGISTRATION_CPA_EXPORT_DIR=/app/data/registration/cpa_auths \
     REGISTRATION_CPA_HOTLOAD_DIR=/app/data/registration/spool/incoming \
     REGISTRATION_DISABLE_REMOTE_IMPORT=1
@@ -99,11 +91,11 @@ WORKDIR /app
 COPY --from=backend-builder --chmod=0755 /out/grok2api /app/grok2api
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
 COPY --from=registration-builder /opt/registration-venv /opt/registration-venv
-COPY registration/*.py registration/config.example.json /app/registration/
-COPY registration/cpa_xai /app/registration/cpa_xai
+COPY registration/protocol_register_cli.py registration/protocol_spool.py registration/yyds_mail.py registration/local_turnstile.py /app/registration/
+COPY registration/config.protocol.example.json /app/registration/config.example.json
+COPY registration/cpa_xai/__init__.py registration/cpa_xai/schema.py registration/cpa_xai/writer.py /app/registration/cpa_xai/
 COPY registration/protocol_auth/*.py /app/registration/protocol_auth/
 COPY registration/protocol_auth/xconsole_client /app/registration/protocol_auth/xconsole_client
-COPY registration/turnstilePatch /app/registration/turnstilePatch
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/grok2api-entrypoint
 COPY --chmod=0755 docker/registration-entrypoint.sh /usr/local/bin/grok2api-registration
 RUN sed -i 's/\r$//' /usr/local/bin/grok2api-entrypoint /usr/local/bin/grok2api-registration

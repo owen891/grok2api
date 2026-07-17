@@ -3,11 +3,14 @@ package registration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +23,24 @@ type importerStub struct {
 	err      error
 	calls    int
 	webCalls int
+}
+
+type blockingImporter struct {
+	calls   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingImporter) ImportCredentials(context.Context, []byte) (accountapp.ImportResult, error) {
+	if s.calls.Add(1) == 1 {
+		close(s.entered)
+	}
+	<-s.release
+	return accountapp.ImportResult{Created: 1, AccountIDs: []uint64{42}}, nil
+}
+
+func (s *blockingImporter) ImportWebCredentials(context.Context, []byte) (accountapp.ImportResult, error) {
+	return s.ImportCredentials(context.Background(), nil)
 }
 
 func (s *importerStub) ImportCredentials(context.Context, []byte) (accountapp.ImportResult, error) {
@@ -95,6 +116,54 @@ func TestProcessOnceMovesInitialSyncFailureToFailed(t *testing.T) {
 	}
 }
 
+func TestProcessOnceClaimsCredentialAcrossServiceInstances(t *testing.T) {
+	root := t.TempDir()
+	importer := &blockingImporter{entered: make(chan struct{}), release: make(chan struct{})}
+	syncer := &syncerStub{result: accountsyncapp.Result{Succeeded: 1}}
+	first := newTestService(root, importer, syncer)
+	second := newTestService(root, importer, syncer)
+	writeIncoming(t, root, "account.json", []byte(`{"refresh_token":"synthetic"}`))
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- first.processOnce(context.Background()) }()
+	<-importer.entered
+	if err := second.processOnce(context.Background()); err != nil {
+		t.Fatalf("second processOnce() error = %v", err)
+	}
+	close(importer.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first processOnce() error = %v", err)
+	}
+	if calls := importer.calls.Load(); calls != 1 {
+		t.Fatalf("import calls = %d, want 1", calls)
+	}
+	assertExists(t, filepath.Join(root, "processed", "account.json"))
+}
+
+func TestProcessOnceRecoversStaleClaim(t *testing.T) {
+	root := t.TempDir()
+	importer := &importerStub{result: accountapp.ImportResult{Created: 1, AccountIDs: []uint64{42}}}
+	syncer := &syncerStub{result: accountsyncapp.Result{Succeeded: 1}}
+	service := newTestService(root, importer, syncer)
+	directories, err := service.ensureDirectories()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedAt := time.Now().Add(-processingRecoveryAge - time.Minute)
+	claimName := "account.json" + processingMarker + strconv.FormatInt(claimedAt.UnixNano(), 10) + "-999999"
+	if err := os.WriteFile(filepath.Join(directories.processing, claimName), []byte(`{"refresh_token":"synthetic"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.processOnce(context.Background()); err != nil {
+		t.Fatalf("processOnce() error = %v", err)
+	}
+	if importer.calls != 1 {
+		t.Fatalf("import calls = %d, want 1", importer.calls)
+	}
+	assertExists(t, filepath.Join(root, "processed", "account.json"))
+}
+
 func TestProcessOnceRejectsOversizedCredential(t *testing.T) {
 	root := t.TempDir()
 	importer := &importerStub{}
@@ -122,11 +191,12 @@ func TestEnsureDirectoriesTightensExistingDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := newTestService(root, &importerStub{}, &syncerStub{})
-	if _, _, _, err := service.ensureDirectories(); err != nil {
+	if _, err := service.ensureDirectories(); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
 		incoming,
+		filepath.Join(root, "processing"),
 		filepath.Join(root, "processed"),
 		filepath.Join(root, "failed"),
 	} {
@@ -140,9 +210,51 @@ func TestEnsureDirectoriesTightensExistingDirectories(t *testing.T) {
 	}
 }
 
+func TestCleanupFailedRemovesOnlyExpiredJSONFiles(t *testing.T) {
+	root := t.TempDir()
+	service := newTestService(root, &importerStub{}, &syncerStub{})
+	service.config.FailedRetention = time.Hour
+	directories, err := service.ensureDirectories()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := directories.failed
+	oldCredential := filepath.Join(failed, "old.json")
+	oldResult := filepath.Join(failed, "old.result.json")
+	recentCredential := filepath.Join(failed, "recent.json")
+	ignored := filepath.Join(failed, "notes.txt")
+	for _, path := range []string{oldCredential, oldResult, recentCredential, ignored} {
+		if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	oldTime := now.Add(-2 * time.Hour)
+	for _, path := range []string{oldCredential, oldResult, ignored} {
+		if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := service.cleanupFailed(failed, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	for _, path := range []string{oldCredential, oldResult} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expired file %s still exists: %v", path, err)
+		}
+	}
+	for _, path := range []string{recentCredential, ignored} {
+		assertExists(t, path)
+	}
+}
+
 func newTestService(root string, importer credentialImporter, syncer accountSynchronizer) *Service {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewService(logger, importer, syncer, Config{SpoolPath: root, PollInterval: time.Second})
+	return NewService(logger, importer, syncer, Config{SpoolPath: root, PollInterval: time.Second, FailedRetention: 7 * 24 * time.Hour})
 }
 
 func writeIncoming(t *testing.T, root, name string, data []byte) {

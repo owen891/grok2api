@@ -1,0 +1,53 @@
+# Copy to config.docker.yaml on the server and replace every placeholder before first start.
+# Keep credentialEncryptionKey unchanged after credentials have been stored.
+server:
+  listen: "0.0.0.0:8000"
+  maxBodyBytes: 33554432
+  readTimeout: 15m
+  requestTimeout: 2h
+
+secrets:
+  jwtSecret: "replace-with-at-least-32-characters"
+  credentialEncryptionKey: "replace-with-base64-key"
+
+bootstrapAdmin:
+  username: "admin"
+  password: "replace-with-a-strong-password"
+
+frontend:
+  publicApiBaseURL: "https://api.example.com"
+  staticPath: "/app/frontend/dist"
+
+database:
+  driver: sqlite
+  sqlite:
+    path: "/app/data/backend.db"
+
+runtimeStore:
+  driver: memory
+
+auth:
+  accessTokenTTL: 15m
+  refreshTokenTTL: 720h
+  secureCookies: true
+
+registration:
+  enabled: true
+  spoolPath: "/app/data/registration/spool"
+  pollInterval: 2s
+  failedRetention: 168h
+  workDir: "/app/registration"
+  configPath: "/app/data/registration/config.json"
+  command: ["grok2api-registration"]
+
+provider:
+  web:
+    browserWorkerURL: "http://grok-web-browser:8192"
+
+media:
+  driver: local
+  local:
+    path: "/app/data/media"
+
+# docker-compose.runtime.yml enforces the deployment-specific registration endpoint and proxy.
+# Configure REGISTRATION_CAPTCHA_ENDPOINT and REGISTRATION_PROXY in deploy_artifact/.env.

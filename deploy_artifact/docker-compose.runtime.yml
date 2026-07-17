@@ -1,0 +1,101 @@
+name: grok2api
+services:
+  grok2api:
+    container_name: grok2api
+    image: grok2api:docker-runtime
+    build:
+      context: "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}"
+      dockerfile: Dockerfile.runtime
+    ports:
+      - "127.0.0.1:8001:8000"
+    environment:
+      TZ: "Asia/Shanghai"
+      HOME: "/app/data/registration/home"
+      REGISTRATION_WORKDIR: "/app/registration"
+      REGISTRATION_DATA_DIR: "/app/data/registration"
+      REGISTRATION_CONFIG_FILE: "/app/data/registration/config.json"
+      REGISTRATION_CPA_EXPORT_DIR: "/app/data/registration/cpa_auths"
+      REGISTRATION_CPA_HOTLOAD_DIR: "/app/data/registration/spool/incoming"
+      REGISTRATION_DISABLE_REMOTE_IMPORT: "1"
+      REGISTRATION_CAPTCHA_ENDPOINT: "${REGISTRATION_CAPTCHA_ENDPOINT:-http://grok-turnstile-solver:5072}"
+      REGISTRATION_PROXY: "${REGISTRATION_PROXY:-}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    working_dir: /app
+    volumes:
+      - "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/config.docker.yaml:/run/grok2api/config.yaml:ro"
+      - "${GROK2API_RELEASE_DIR:-/opt/grok2api-current}/grok2api:/app/grok2api:ro"
+      - "${GROK2API_RELEASE_DIR:-/opt/grok2api-current}/frontend/dist:/app/frontend/dist:ro"
+      - "${GROK2API_DATA_DIR:-/opt/grok2api-data}:/app/data"
+      - "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/registration:/app/registration:ro"
+    depends_on:
+      grok-web-browser:
+        condition: service_healthy
+      grok-turnstile-solver:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  grok-web-browser:
+    container_name: grok-web-browser
+    image: ghcr.io/flaresolverr/flaresolverr@sha256:139dfee1c6f89249c8d665d1333a42e8ec74ec0a86bc6bb1c8461e10d3a66a47
+    command:
+      - /usr/local/bin/python
+      - -u
+      - /opt/grok-worker/grok_web_browser_worker.py
+      - --listen
+      - 0.0.0.0:8192
+    environment:
+      TZ: "Asia/Shanghai"
+      HEADLESS: "true"
+      LOG_LEVEL: info
+      GROK_WORKER_LOOPBACK_PROXY_HOST: "host.docker.internal"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8192:8192"
+    volumes:
+      - "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/scripts/grok_web_browser_worker.py:/opt/grok-worker/grok_web_browser_worker.py:ro"
+    shm_size: "2gb"
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8192/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+  grok-turnstile-solver:
+    container_name: grok-turnstile-solver
+    image: grok-turnstile-solver:0d48ecf8b4ee
+    build:
+      context: "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/.deps/grokcli-2api/turnstile-solver"
+      dockerfile: Dockerfile
+    environment:
+      TZ: "Asia/Shanghai"
+      TURNSTILE_HOST: "0.0.0.0"
+      TURNSTILE_PORT: "5072"
+      TURNSTILE_THREAD: "1"
+      TURNSTILE_BROWSER_TYPE: "camoufox"
+      TURNSTILE_LAZY: "1"
+      TURNSTILE_IDLE_SEC: "180"
+      TURNSTILE_DEBUG: "0"
+    shm_size: "1gb"
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5072/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+    security_opt:
+      - seccomp:unconfined

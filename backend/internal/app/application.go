@@ -233,8 +233,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	var registrationSpool *registrationapp.Service
 	registrationConfig := registrationapp.Config{
 		Enabled: cfg.Registration.Enabled, SpoolPath: cfg.Registration.SpoolPath, PollInterval: cfg.Registration.PollInterval.Value(),
-		WorkDir: cfg.Registration.WorkDir, ConfigPath: cfg.Registration.ConfigPath,
-		Command: append([]string(nil), cfg.Registration.Command...), BrowserMode: cfg.Registration.BrowserMode, BrowserPath: cfg.Registration.BrowserPath,
+		FailedRetention: cfg.Registration.FailedRetention.Value(),
+		WorkDir:         cfg.Registration.WorkDir, ConfigPath: cfg.Registration.ConfigPath,
+		Command: append([]string(nil), cfg.Registration.Command...),
 	}
 	registrationController := registrationapp.NewController(logger, registrationConfig)
 	if cfg.Registration.Enabled {

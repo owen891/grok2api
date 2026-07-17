@@ -3,9 +3,6 @@
 Produce CLIProxyAPI-compatible ``xai-<email>.json`` credentials.
 """
 
-from .accounts import AccountLine, existing_cpa_emails, parse_accounts_file
-from .mint import mint_and_export
-from .probe import probe_mini_response, probe_models
 from .schema import (
     CLIENT_ID,
     DEFAULT_BASE_URL,
@@ -43,4 +40,20 @@ __all__ = [
     "write_cpa_xai_auth",
 ]
 
+
+def __getattr__(name: str):
+    """Load browser-oriented helpers only when legacy callers request them."""
+    if name in {"AccountLine", "existing_cpa_emails", "parse_accounts_file"}:
+        from . import accounts
+
+        return getattr(accounts, name)
+    if name in {"probe_mini_response", "probe_models"}:
+        from . import probe
+
+        return getattr(probe, name)
+    if name == "mint_and_export":
+        from .mint import mint_and_export
+
+        return mint_and_export
+    raise AttributeError(name)
 

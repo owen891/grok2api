@@ -17,6 +17,33 @@ from protocol_register_cli import (
 
 
 class ProtocolCheckpointTests(unittest.TestCase):
+    def test_resolve_sso_falls_back_to_password_session_with_fresh_token(self):
+        class FakeClient:
+            def fetch_sso_token(self, **_kwargs):
+                return ""
+
+            def obtain_session_via_password(self, **kwargs):
+                self.kwargs = kwargs
+                return "synthetic-sso"
+
+        client = FakeClient()
+        with patch.object(worker, "solve_turnstile_token", return_value="fresh-turnstile") as solve:
+            result = worker.resolve_sso(
+                client,
+                {},
+                email="user@example.invalid",
+                password="secret",
+                proxy="http://127.0.0.1:7897",
+                log_file=Path("registration.log"),
+                worker_id=1,
+                inspect_create_response=True,
+            )
+
+        self.assertEqual("synthetic-sso", result)
+        self.assertEqual("fresh-turnstile", client.kwargs["turnstile_token"])
+        self.assertEqual(worker.SIGNIN_URL, client.kwargs["referer"])
+        self.assertEqual(worker.SIGNIN_URL, solve.call_args.kwargs["website_url"])
+
     def test_only_recoverable_jobs_are_resumed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -40,6 +67,20 @@ class ProtocolCheckpointTests(unittest.TestCase):
 
             self.assertEqual([resumable], resumable_checkpoints(root))
             self.assertEqual("sso_ready", read_checkpoint(resumable)["stage"])
+
+    def test_exhausted_recoverable_job_is_not_resumed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exhausted = root / "jobs" / "exhausted.json"
+            write_checkpoint(
+                exhausted,
+                stage="account_created",
+                attempts=2,
+                email="exhausted@example.invalid",
+                password="secret",
+            )
+
+            self.assertEqual([], resumable_checkpoints(root, max_attempts=2))
 
     def test_resumable_jobs_are_isolated_by_account_type(self):
         with tempfile.TemporaryDirectory() as directory:

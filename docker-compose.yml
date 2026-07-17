@@ -16,11 +16,8 @@ services:
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       GROK_WEB_BROWSER_WORKER_URL: "http://grok-web-browser:8192"
-      REGISTRATION_BROWSER_MODE: "${REGISTRATION_BROWSER_MODE:-xvfb}"
-      REGISTRATION_BROWSER_PATH: "${REGISTRATION_BROWSER_PATH:-/usr/bin/chromium}"
-      REGISTRATION_BROWSER_WINDOW: "${REGISTRATION_BROWSER_WINDOW:-1280,900}"
-      REGISTRATION_XVFB_SCREEN: "${REGISTRATION_XVFB_SCREEN:-1280x900x24}"
-    shm_size: "1gb"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - "${GROK2API_CONFIG:-./config.yaml}:/run/grok2api/config.yaml:ro"
       - grok2api-data:/app/data

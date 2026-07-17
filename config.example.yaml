@@ -74,12 +74,11 @@ registration:
   # [通常不要修改] 相对路径以本配置文件所在目录为基准。
   spoolPath: "./data/registration/spool"
   pollInterval: 2s
+  # Failed credential and result files contain sensitive runtime data.
+  failedRetention: 168h
   workDir: "./registration"
   configPath: "./data/registration/config.json"
   command: ["grok2api-registration"]
-  # [按需修改] 容器默认从环境继承 xvfb；本机调试可设 headed 并指定 Chrome/Chromium 路径。
-  browserMode: "" # xvfb | headless | headed | background
-  browserPath: ""
 
 provider:
   web:

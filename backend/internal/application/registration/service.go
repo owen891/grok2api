@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +17,11 @@ import (
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 )
 
-const maxCredentialBytes = 1 << 20
+const (
+	maxCredentialBytes    = 1 << 20
+	processingMarker      = ".processing-"
+	processingRecoveryAge = time.Hour
+)
 
 type credentialImporter interface {
 	ImportCredentials(context.Context, []byte) (accountapp.ImportResult, error)
@@ -28,14 +33,13 @@ type accountSynchronizer interface {
 }
 
 type Config struct {
-	Enabled      bool
-	SpoolPath    string
-	PollInterval time.Duration
-	WorkDir      string
-	ConfigPath   string
-	Command      []string
-	BrowserMode  string
-	BrowserPath  string
+	Enabled         bool
+	SpoolPath       string
+	PollInterval    time.Duration
+	FailedRetention time.Duration
+	WorkDir         string
+	ConfigPath      string
+	Command         []string
 }
 
 type Service struct {
@@ -52,6 +56,13 @@ type fileResult struct {
 	Synced      int       `json:"synced"`
 	SyncFailed  int       `json:"syncFailed"`
 	ProcessedAt time.Time `json:"processedAt"`
+}
+
+type spoolDirectories struct {
+	incoming   string
+	processing string
+	processed  string
+	failed     string
 }
 
 func NewService(logger *slog.Logger, importer credentialImporter, syncer accountSynchronizer, config Config) *Service {
@@ -80,11 +91,22 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) processOnce(ctx context.Context) error {
-	incoming, processed, failed, err := s.ensureDirectories()
+	directories, err := s.ensureDirectories()
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(incoming)
+	now := time.Now()
+	removed, cleanupErr := s.cleanupFailed(directories.failed, now)
+	if cleanupErr != nil {
+		s.logger.Warn("registration_spool_failed_cleanup_partial", "error", cleanupErr)
+	}
+	if removed > 0 {
+		s.logger.Info("registration_spool_failed_cleanup_completed", "removed", removed)
+	}
+	if err := s.processStaleClaims(ctx, directories, now); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(directories.incoming)
 	if err != nil {
 		return fmt.Errorf("读取注册凭据目录: %w", err)
 	}
@@ -95,29 +117,132 @@ func (s *Service) processOnce(ctx context.Context) error {
 		if !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
 			continue
 		}
-		source := filepath.Join(incoming, entry.Name())
-		if err := s.processFile(ctx, source, processed, failed); err != nil {
+		source := filepath.Join(directories.incoming, entry.Name())
+		claimed, ok, claimErr := claimFile(source, directories.processing, entry.Name(), now)
+		if claimErr != nil {
+			s.logger.Error("registration_spool_file_claim_failed", "file", entry.Name(), "error", claimErr)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if err := s.processFile(ctx, claimed, entry.Name(), directories.processed, directories.failed); err != nil {
 			s.logger.Error("registration_spool_file_failed", "file", entry.Name(), "error", err)
 		}
 	}
 	return nil
 }
 
-func (s *Service) ensureDirectories() (string, string, string, error) {
-	paths := []string{
-		filepath.Join(s.config.SpoolPath, "incoming"),
-		filepath.Join(s.config.SpoolPath, "processed"),
-		filepath.Join(s.config.SpoolPath, "failed"),
+func (s *Service) ensureDirectories() (spoolDirectories, error) {
+	directories := spoolDirectories{
+		incoming:   filepath.Join(s.config.SpoolPath, "incoming"),
+		processing: filepath.Join(s.config.SpoolPath, "processing"),
+		processed:  filepath.Join(s.config.SpoolPath, "processed"),
+		failed:     filepath.Join(s.config.SpoolPath, "failed"),
 	}
-	for _, path := range paths {
+	for _, path := range []string{directories.incoming, directories.processing, directories.processed, directories.failed} {
 		if err := ensurePrivateDirectory(path); err != nil {
-			return "", "", "", fmt.Errorf("创建注册凭据目录 %s: %w", path, err)
+			return spoolDirectories{}, fmt.Errorf("创建注册凭据目录 %s: %w", path, err)
 		}
 	}
-	return paths[0], paths[1], paths[2], nil
+	return directories, nil
 }
 
-func (s *Service) processFile(ctx context.Context, source, processed, failed string) error {
+func (s *Service) processStaleClaims(ctx context.Context, directories spoolDirectories, now time.Time) error {
+	entries, err := os.ReadDir(directories.processing)
+	if err != nil {
+		return fmt.Errorf("read registration processing spool: %w", err)
+	}
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return nil
+		}
+		originalName, claimedAt, ok := parseClaimName(entry.Name())
+		if !ok || now.Sub(claimedAt) < processingRecoveryAge {
+			continue
+		}
+		source := filepath.Join(directories.processing, entry.Name())
+		claimed, reclaimed, claimErr := claimFile(source, directories.processing, originalName, now)
+		if claimErr != nil {
+			s.logger.Error("registration_spool_file_reclaim_failed", "file", originalName, "error", claimErr)
+			continue
+		}
+		if !reclaimed {
+			continue
+		}
+		s.logger.Warn("registration_spool_file_reclaimed", "file", originalName)
+		if err := s.processFile(ctx, claimed, originalName, directories.processed, directories.failed); err != nil {
+			s.logger.Error("registration_spool_file_failed", "file", originalName, "error", err)
+		}
+	}
+	return nil
+}
+
+func claimFile(source, processingDirectory, originalName string, now time.Time) (string, bool, error) {
+	claimed := filepath.Join(processingDirectory, fmt.Sprintf("%s%s%d-%d", originalName, processingMarker, now.UnixNano(), os.Getpid()))
+	if err := os.Rename(source, claimed); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("claim registration spool file: %w", err)
+	}
+	return claimed, true, nil
+}
+
+func parseClaimName(name string) (string, time.Time, bool) {
+	marker := strings.LastIndex(name, processingMarker)
+	if marker <= 0 {
+		return "", time.Time{}, false
+	}
+	originalName := name[:marker]
+	if !strings.EqualFold(filepath.Ext(originalName), ".json") {
+		return "", time.Time{}, false
+	}
+	tail := name[marker+len(processingMarker):]
+	separator := strings.IndexByte(tail, '-')
+	if separator <= 0 {
+		return "", time.Time{}, false
+	}
+	nanoseconds, err := strconv.ParseInt(tail[:separator], 10, 64)
+	if err != nil || nanoseconds <= 0 {
+		return "", time.Time{}, false
+	}
+	return originalName, time.Unix(0, nanoseconds), true
+}
+
+func (s *Service) cleanupFailed(directory string, now time.Time) (int, error) {
+	if s.config.FailedRetention <= 0 {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return 0, fmt.Errorf("read failed registration spool: %w", err)
+	}
+	cutoff := now.Add(-s.config.FailedRetention)
+	removed := 0
+	var cleanupErr error
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("inspect failed registration spool file %s: %w", entry.Name(), infoErr))
+			continue
+		}
+		if !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if removeErr := os.Remove(filepath.Join(directory, entry.Name())); removeErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove expired registration spool file %s: %w", entry.Name(), removeErr))
+			continue
+		}
+		removed++
+	}
+	return removed, cleanupErr
+}
+
+func (s *Service) processFile(ctx context.Context, source, originalName, processed, failed string) error {
 	info, err := os.Lstat(source)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -126,24 +251,24 @@ func (s *Service) processFile(ctx context.Context, source, processed, failed str
 		return fmt.Errorf("检查注册凭据文件: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return s.finish(source, failed, fileResult{Status: "rejected"})
+		return s.finish(source, originalName, failed, fileResult{Status: "rejected"})
 	}
 	if !info.Mode().IsRegular() {
 		return nil
 	}
 	if info.Size() == 0 || info.Size() > maxCredentialBytes {
-		return s.finish(source, failed, fileResult{Status: "rejected"})
+		return s.finish(source, originalName, failed, fileResult{Status: "rejected"})
 	}
 
 	data, err := readCredentialFile(source, info)
 	if err != nil {
-		return s.finish(source, failed, fileResult{Status: "rejected"})
+		return s.finish(source, originalName, failed, fileResult{Status: "rejected"})
 	}
 	imported, err := s.importCredential(ctx, data)
 	result := fileResult{Created: imported.Created, Updated: imported.Updated}
 	if err != nil {
 		result.Status = "import_failed"
-		return s.finish(source, failed, result)
+		return s.finish(source, originalName, failed, result)
 	}
 
 	synced := s.syncer.Sync(ctx, imported.AccountIDs...)
@@ -151,10 +276,10 @@ func (s *Service) processFile(ctx context.Context, source, processed, failed str
 	result.SyncFailed = synced.Failed
 	if synced.Failed > 0 {
 		result.Status = "sync_failed"
-		return s.finish(source, failed, result)
+		return s.finish(source, originalName, failed, result)
 	}
 	result.Status = "processed"
-	return s.finish(source, processed, result)
+	return s.finish(source, originalName, processed, result)
 }
 
 func (s *Service) importCredential(ctx context.Context, data []byte) (accountapp.ImportResult, error) {
@@ -187,8 +312,8 @@ func readCredentialFile(path string, expected os.FileInfo) ([]byte, error) {
 	return data, nil
 }
 
-func (s *Service) finish(source, destinationDir string, result fileResult) error {
-	destination := uniqueDestination(destinationDir, filepath.Base(source))
+func (s *Service) finish(source, originalName, destinationDir string, result fileResult) error {
+	destination := uniqueDestination(destinationDir, originalName)
 	if err := os.Rename(source, destination); err != nil {
 		return fmt.Errorf("移动注册凭据文件: %w", err)
 	}

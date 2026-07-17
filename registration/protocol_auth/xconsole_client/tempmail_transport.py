@@ -34,8 +34,9 @@ BASE_URL = "https://api.tempmail.lol"
 class TempmailInbox:
     """A Tempmail.lol inbox with polling for x.ai verification codes."""
 
-    api_key: str
+    api_key: str = ""
     prefix: str = ""
+    domain: str = ""
     base_url: str = BASE_URL
     timeout: float = 90.0
     interval: float = 3.0
@@ -47,6 +48,8 @@ class TempmailInbox:
     _created: bool = field(default=False, init=False)
 
     def _auth_headers(self) -> dict:
+        if not self.api_key:
+            return {}
         return {"Authorization": f"Bearer {self.api_key}"}
 
     def create(self) -> str:
@@ -57,7 +60,7 @@ class TempmailInbox:
         resp = requests.post(
             f"{self.base_url}/v2/inbox/create",
             headers=self._auth_headers(),
-            json={"prefix": self.prefix},
+            json={key: value for key, value in {"prefix": self.prefix, "domain": self.domain}.items() if value},
             timeout=15,
         )
         if resp.status_code != 201:

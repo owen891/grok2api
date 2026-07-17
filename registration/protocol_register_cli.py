@@ -37,6 +37,7 @@ from cpa_xai.schema import build_cpa_xai_auth, credential_file_name  # noqa: E40
 from cpa_xai.writer import write_cpa_xai_auth  # noqa: E402
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
+SIGNIN_URL = "https://accounts.x.ai/sign-in?redirect=grok-com"
 _log_lock = threading.Lock()
 _stop = threading.Event()
 _progress_lock = threading.Lock()
@@ -50,7 +51,6 @@ RESUMABLE_STAGES = {
     "account_created",
     "sso_ready",
     "oauth_failed",
-    "browser_oauth_failed",
     "credential_ready",
     "credential_written",
 }
@@ -100,7 +100,14 @@ def captcha_mode(cfg: dict[str, Any]) -> str:
     return "local"
 
 
-def solve_turnstile_token(cfg: dict[str, Any], *, proxy: str = "", log_file: Path | None = None, worker_id: int | str = "main") -> str:
+def solve_turnstile_token(
+    cfg: dict[str, Any],
+    *,
+    proxy: str = "",
+    website_url: str = SIGNUP_URL,
+    log_file: Path | None = None,
+    worker_id: int | str = "main",
+) -> str:
     mode = captcha_mode(cfg)
     if mode == "yescaptcha":
         from xconsole_client import YesCaptchaSolver, config as C
@@ -109,7 +116,7 @@ def solve_turnstile_token(cfg: dict[str, Any], *, proxy: str = "", log_file: Pat
             raise RuntimeError("captcha_solver=yescaptcha 但未配置 yescaptcha_api_key")
         solver = YesCaptchaSolver(key)
         token = solver.solve_turnstile(
-            website_url=SIGNUP_URL,
+            website_url=website_url,
             website_key=C.TURNSTILE_SITEKEY,
             premium=True,
         )
@@ -135,7 +142,7 @@ def solve_turnstile_token(cfg: dict[str, Any], *, proxy: str = "", log_file: Pat
         client_key = "local"
     log(worker_id, f"本地过盾请求中：{endpoint or '（未配置 endpoint）'}...", log_file)
     token = solve_turnstile_local(
-        website_url=SIGNUP_URL,
+        website_url=website_url,
         website_key=getattr(C, "TURNSTILE_SITEKEY", "0x4AAAAAAAhrPj9_JwTyl4nM"),
         timeout=float(cfg.get("turnstile_timeout") or 120),
         headless=True,
@@ -146,6 +153,39 @@ def solve_turnstile_token(cfg: dict[str, Any], *, proxy: str = "", log_file: Pat
     )
     log(worker_id, f"本地过盾成功（{len(token)} 字符）", log_file)
     return token
+
+
+def resolve_sso(
+    client: Any,
+    cfg: dict[str, Any],
+    *,
+    email: str,
+    password: str,
+    proxy: str,
+    log_file: Path,
+    worker_id: int,
+    inspect_create_response: bool,
+) -> str:
+    if inspect_create_response:
+        token = client.fetch_sso_token(email=email, password=password, save=False, retries=3) or ""
+        if token:
+            return token
+        log(worker_id, "创建响应未携带 SSO，切换协议登录恢复", log_file)
+
+    login_turnstile = solve_turnstile_token(
+        cfg,
+        proxy=proxy,
+        website_url=SIGNIN_URL,
+        log_file=log_file,
+        worker_id=worker_id,
+    )
+    return client.obtain_session_via_password(
+        email=email,
+        password=password,
+        turnstile_token=login_turnstile,
+        referer=SIGNIN_URL,
+        retries=3,
+    ) or ""
 
 
 class YydsCodeReceiver:
@@ -204,6 +244,9 @@ def make_email(cfg: dict[str, Any], backend: str):
                 "yyds_jwt": cfg.get("yyds_jwt") or "",
             }
         )
+        api_base = str(cfg.get("yyds_api_base") or "").strip().rstrip("/")
+        if api_base:
+            reg.YYDS_API_BASE = api_base
         address, token = reg.yyds_get_email_and_token(
             api_key=cfg.get("yyds_api_key") or None,
             jwt=cfg.get("yyds_jwt") or None,
@@ -212,11 +255,16 @@ def make_email(cfg: dict[str, Any], backend: str):
 
     if backend in {"tempmail", "tempmail_lol"}:
         api_key = str(cfg.get("tempmail_api_key") or os.environ.get("TEMPMAIL_API_KEY") or "").strip()
-        if not api_key:
-            raise RuntimeError("tempmail 需要 tempmail_api_key 或 TEMPMAIL_API_KEY")
         from xconsole_client.tempmail_transport import TempmailInbox
 
-        inbox = TempmailInbox(api_key=api_key, prefix="xai", debug=False)
+        api_base = str(cfg.get("tempmail_api_base") or cfg.get("tempmail_lol_api_base") or "https://api.tempmail.lol").strip().rstrip("/")
+        if api_base.endswith("/v2"):
+            api_base = api_base[:-3]
+        prefix = str(cfg.get("tempmail_lol_prefix") or "xai").strip()
+        configured_domains = str(cfg.get("tempmail_lol_domain") or "").replace(",", "\n").splitlines()
+        domains = [value.strip() for value in configured_domains if value.strip()]
+        domain = secrets.choice(domains) if domains else ""
+        inbox = TempmailInbox(api_key=api_key, prefix=prefix, domain=domain, base_url=api_base, debug=False)
         email = inbox.create()
         return email, inbox
 
@@ -274,7 +322,11 @@ def write_checkpoint(path: Path, **fields: Any) -> dict[str, Any]:
     return current
 
 
-def resumable_checkpoints(state_dir: Path, account_type: str = "build") -> list[Path]:
+def resumable_checkpoints(
+    state_dir: Path,
+    account_type: str = "build",
+    max_attempts: int | None = None,
+) -> list[Path]:
     jobs_dir = state_dir / "jobs"
     if not jobs_dir.is_dir():
         return []
@@ -284,6 +336,8 @@ def resumable_checkpoints(state_dir: Path, account_type: str = "build") -> list[
         if str(value.get("account_type") or "build") != account_type:
             continue
         if str(value.get("stage") or "") not in RESUMABLE_STAGES:
+            continue
+        if max_attempts is not None and int(value.get("attempts") or 0) >= max_attempts:
             continue
         if not value.get("email") or not value.get("password"):
             continue
@@ -298,47 +352,23 @@ def new_checkpoint_path(state_dir: Path, index: int) -> Path:
     return jobs_dir / f"protocol-{int(time.time())}-{index:05d}-{uuid.uuid4().hex[:8]}.json"
 
 
-def browser_oauth_fallback(
-    cfg: dict[str, Any],
-    *,
-    email: str,
-    password: str,
-    sso: str,
-    cookies: Any,
-    index: int,
-    log_file: Path,
-) -> dict[str, Any]:
-    import cpa_export
-
-    log(index, "协议 OAuth 失败，使用同一账号进入浏览器 OAuth 回退", log_file)
-    return cpa_export.export_cpa_xai_for_account(
-        email,
-        password,
-        page=None,
-        cookies=cookies,
-        sso=sso,
-        config=cfg,
-        log_callback=lambda message: log(index, message, log_file),
-    )
-
-
 def publish_protocol_credential(
     cfg: dict[str, Any],
     *,
     source: Path,
     spool_dir: Path,
 ) -> dict[str, Any]:
-    from cpa_export import _await_hotload_result, _stage_hotload_file
+    from protocol_spool import await_hotload_result, stage_hotload_file
 
     submitted_at = time.time()
-    destination = _stage_hotload_file(source, spool_dir)
+    destination = stage_hotload_file(source, spool_dir)
     await_result = bool(os.environ.get("REGISTRATION_CPA_HOTLOAD_DIR", "").strip()) or bool(
         cfg.get("cpa_hotload_await_result", False)
     )
     if not await_result:
         return {"ok": True, "status": "queued", "path": str(destination)}
     timeout = max(1.0, min(float(cfg.get("cpa_hotload_result_timeout_sec", 300) or 300), 600.0))
-    result = _await_hotload_result(
+    result = await_hotload_result(
         spool_dir,
         source.stem,
         submitted_at=submitted_at,
@@ -367,89 +397,7 @@ def preflight(cfg: dict[str, Any]) -> list[str]:
         from xconsole_client.oauth_protocol import login_with_protocol  # noqa: F401
     except Exception as exc:
         errors.append(f"protocol imports: {exc}")
-    if str(cfg.get("protocol_fallback_browser", False)).lower() not in {"0", "false", "no"}:
-        try:
-            import cpa_export  # noqa: F401
-            from DrissionPage import ChromiumOptions  # noqa: F401
-        except Exception as exc:
-            errors.append(f"browser OAuth fallback: {exc}")
-        browser_path = str(os.environ.get("REGISTRATION_BROWSER_PATH") or "").strip()
-        if browser_path and not Path(browser_path).is_file():
-            errors.append(f"browser executable missing: {browser_path}")
     return errors
-
-
-
-def browser_fallback_one(cfg: dict[str, Any], *, log_file: Path, index: int) -> dict[str, Any]:
-    """协议过盾失败时，回退到已验证可过盾的浏览器注册（有头）。"""
-    import subprocess
-
-    log(index, "协议过盾失败，开始浏览器回退注册", log_file)
-    config_path = Path(cfg.get("_config_path") or (ROOT.parent / "data" / "registration" / "config.json"))
-    data_dir = config_path.parent
-    auth_dir = Path(str(cfg.get("cpa_auth_dir") or (ROOT / "cpa_auths")))
-    before = {
-        path.resolve(): path.stat().st_mtime_ns
-        for path in auth_dir.glob("xai-*.json")
-        if path.is_file()
-    } if auth_dir.is_dir() else {}
-    cmd = [
-        sys.executable,
-        "-u",
-        str(ROOT / "register_cli.py"),
-        "--extra",
-        "1",
-        "--threads",
-        "1",
-        "--fast",
-        "--accounts-file",
-        str(data_dir / "accounts_cli.txt"),
-    ]
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUTF8"] = "1"
-    env["REGISTRATION_CONFIG_FILE"] = str(config_path)
-    env["REGISTRATION_DATA_DIR"] = str(data_dir)
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(ROOT),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=float(cfg.get("browser_fallback_timeout") or 600),
-        )
-    except Exception as exc:
-        return {"ok": False, "error": f"浏览器回退异常: {exc}", "engine": "browser_fallback"}
-
-    out = (proc.stdout or "") + '\n' + (proc.stderr or "")
-    for line in out.splitlines()[-30:]:
-        if line.strip():
-            log(index, f"[浏览器回退] {line[:220]}", log_file)
-
-    generated: list[Path] = []
-    if auth_dir.exists():
-        for path in auth_dir.glob("xai-*.json"):
-            resolved = path.resolve()
-            modified = path.stat().st_mtime_ns
-            if resolved not in before or modified > before[resolved]:
-                generated.append(path)
-
-    if proc.returncode == 0 and generated:
-        newest = max(generated, key=lambda path: path.stat().st_mtime_ns)
-        return {
-            "ok": True,
-            "engine": "browser_fallback",
-            "returncode": proc.returncode,
-            "spool": str(newest),
-            "email": newest.stem.removeprefix("xai-"),
-        }
-    return {
-        "ok": False,
-        "error": f"浏览器回退失败，退出码={proc.returncode}",
-        "engine": "browser_fallback",
-        "tail": out[-500:],
-    }
 
 
 def register_one(
@@ -538,16 +486,6 @@ def register_one(
                 turnstile = solve_turnstile_token(cfg, proxy=proxy, log_file=log_file, worker_id=index)
             except Exception as captcha_exc:
                 log(index, f"本地过盾失败: {captcha_exc}", log_file)
-                allow_fb = str(cfg.get("protocol_fallback_browser", False)).lower() not in {"0", "false", "no"}
-                if allow_fb:
-                    result = browser_fallback_one(cfg, log_file=log_file, index=index)
-                    write_checkpoint(
-                        checkpoint_path,
-                        stage="credential_written" if result.get("ok") else "failed",
-                        status="awaiting_ledger" if result.get("ok") else "failed",
-                        result=result,
-                    )
-                    return result
                 raise
 
             res = client.create_account(
@@ -564,7 +502,16 @@ def register_one(
                 raise RuntimeError(f"create_account HTTP {res.http_status}")
             write_checkpoint(checkpoint_path, stage="account_created", email=email, password=password)
 
-            sso = client.fetch_sso_token(email=email, password=password, save=False, retries=3) or ""
+            sso = resolve_sso(
+                client,
+                cfg,
+                email=email,
+                password=password,
+                proxy=proxy,
+                log_file=log_file,
+                worker_id=index,
+                inspect_create_response=True,
+            )
             if not sso:
                 raise RuntimeError("SSO 提取失败")
             cookies = extract_cookies_from_auth_client(client)
@@ -604,30 +551,23 @@ def register_one(
                 "engine": "protocol_web",
             }
 
-        allow_browser_fallback = str(cfg.get("protocol_fallback_browser", False)).lower() not in {"0", "false", "no"}
         if stage == "account_created" or not sso:
-            if not allow_browser_fallback:
-                raise RuntimeError("checkpoint 缺少 SSO，且浏览器 OAuth 回退未启用")
-            result = browser_oauth_fallback(
+            client = XConsoleAuthClient(debug=False, signup_url=SIGNUP_URL)
+            sso = resolve_sso(
+                client,
                 cfg,
                 email=email,
                 password=password,
-                sso=sso,
-                cookies=cookies,
-                index=index,
+                proxy=proxy,
                 log_file=log_file,
+                worker_id=index,
+                inspect_create_response=False,
             )
-            if not result.get("ok"):
-                write_checkpoint(checkpoint_path, stage="browser_oauth_failed", status="retryable", last_error=result.get("error"))
-                raise RuntimeError(f"浏览器 OAuth 回退失败: {result.get('error') or result}")
-            write_checkpoint(checkpoint_path, stage="credential_written", status="awaiting_ledger", result=result)
-            return {
-                "ok": True,
-                "email": email,
-                "password": password,
-                "spool": str(result.get("cpa_path") or result.get("path") or ""),
-                "engine": "browser_oauth_fallback",
-            }
+            if not sso:
+                raise RuntimeError("checkpoint 缺少 SSO，协议恢复失败")
+            cookies = extract_cookies_from_auth_client(client)
+            write_checkpoint(checkpoint_path, stage="sso_ready", sso=sso, cookies=cookies)
+            log(index, "SSO 协议恢复成功", log_file)
 
         try:
             oauth = login_with_protocol(
@@ -642,28 +582,7 @@ def register_one(
         except Exception as protocol_error:
             write_checkpoint(checkpoint_path, stage="oauth_failed", status="retryable", last_error=str(protocol_error))
             log(index, f"协议 OAuth 失败: {protocol_error}", log_file)
-            if not allow_browser_fallback:
-                raise
-            result = browser_oauth_fallback(
-                cfg,
-                email=email,
-                password=password,
-                sso=sso,
-                cookies=cookies,
-                index=index,
-                log_file=log_file,
-            )
-            if not result.get("ok"):
-                write_checkpoint(checkpoint_path, stage="browser_oauth_failed", status="retryable", last_error=result.get("error"))
-                raise RuntimeError(f"浏览器 OAuth 回退失败: {result.get('error') or result}") from protocol_error
-            write_checkpoint(checkpoint_path, stage="credential_written", status="awaiting_ledger", result=result)
-            return {
-                "ok": True,
-                "email": email,
-                "password": password,
-                "spool": str(result.get("cpa_path") or result.get("path") or ""),
-                "engine": "browser_oauth_fallback",
-            }
+            raise
 
         refresh = getattr(oauth, "refresh_token", None) or (oauth.get("refresh_token") if isinstance(oauth, dict) else None)
         access = getattr(oauth, "access_token", None) or (oauth.get("access_token") if isinstance(oauth, dict) else None)
@@ -815,8 +734,6 @@ def main() -> int:
 
     cfg = load_config(config_path)
     cfg["_config_path"] = str(config_path)
-    # 协议注册/OAuth 失败时使用已打包的 DrissionPage 浏览器链路。
-    cfg.setdefault("protocol_fallback_browser", False)
     # 让 reg.config 读到同一份配置
     reg.config.clear()
     reg.config.update(cfg)
@@ -827,7 +744,7 @@ def main() -> int:
             for error in errors:
                 print(f"[preflight] FAIL {error}", flush=True)
             return 1
-        print("[preflight] OK protocol and browser OAuth fallback dependencies", flush=True)
+        print("[preflight] OK protocol dependencies", flush=True)
         return 0
 
     mode = captcha_mode(cfg)
@@ -838,9 +755,11 @@ def main() -> int:
         return 2
     log("main", f"过盾方式={mode}", log_file)
 
-    email_backend = str(cfg.get("protocol_email_backend") or cfg.get("email_provider") or "yyds")
-    if email_backend in {"tempmail_lol"}:
-        email_backend = "tempmail"
+    configured_backends = [
+        str(cfg.get("protocol_email_backend") or cfg.get("email_provider") or "yyds"),
+        *[str(value) for value in (cfg.get("email_provider_fallbacks") or [])],
+    ]
+    email_backends = ["tempmail" if value == "tempmail_lol" else value for value in configured_backends if value]
     proxy = str(cfg.get("proxy") or cfg.get("browser_proxy") or "").strip()
     spool_dir = Path(str(cfg.get("spool_dir") or (ROOT / "cpa_auths" / "incoming")))
     spool_dir.mkdir(parents=True, exist_ok=True)
@@ -861,12 +780,12 @@ def main() -> int:
     except (TypeError, ValueError):
         stage_retry_limit = 2
     max_attempts = min(30_000, max(target, target * attempt_multiplier))
-    resume_queue = resumable_checkpoints(state_dir, args.account_type)
+    resume_queue = resumable_checkpoints(state_dir, args.account_type, stage_retry_limit)
 
     log(
         "main",
         f"引擎=协议注册 目标可用账号={target} 最大尝试={max_attempts} 线程={threads} "
-        f"待续跑={len(resume_queue)} 邮箱={email_backend} 导入目录={spool_dir}",
+        f"待续跑={len(resume_queue)} 邮箱={','.join(email_backends)} 导入目录={spool_dir}",
         log_file,
     )
     write_state(
@@ -888,6 +807,7 @@ def main() -> int:
     def _job(i: int, checkpoint_path: Path) -> dict[str, Any]:
         if _stop.is_set():
             return {"ok": False, "error": "stopped"}
+        email_backend = email_backends[(i - 1) % len(email_backends)]
         result = register_one(
             i,
             cfg,
@@ -927,7 +847,7 @@ def main() -> int:
                 ok=_ok,
                 failed=_failed,
                 target=target,
-                resumable=len(resumable_checkpoints(state_dir, args.account_type)),
+                resumable=len(resumable_checkpoints(state_dir, args.account_type, stage_retry_limit)),
             )
         if not args.fast:
             time.sleep(1.5)
@@ -989,7 +909,7 @@ def main() -> int:
         ok=_ok,
         failed=_failed,
         target=target,
-        resumable=len(resumable_checkpoints(state_dir, args.account_type)),
+        resumable=len(resumable_checkpoints(state_dir, args.account_type, stage_retry_limit)),
         finished_at=_now(),
     )
     log("main", f"任务结束 状态={status} 成功={_ok}/{target} 失败尝试={_failed} 总尝试={_attempted}", log_file)
