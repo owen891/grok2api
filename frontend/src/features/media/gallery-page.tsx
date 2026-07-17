@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { ImageLightbox, type LightboxImage } from "@/features/chat/image-lightbox";
@@ -22,6 +23,7 @@ export function GalleryPage() {
   const [pageSize, setPageSize] = useState(20);
   const [search, setSearch] = useState("");
   const [preview, setPreview] = useState<LightboxImage | null>(null);
+  const [clearOpen, setClearOpen] = useState(false);
   const debouncedSearch = useDebouncedValue(search);
   const normalizedSearch = debouncedSearch.trim();
 
@@ -53,7 +55,7 @@ export function GalleryPage() {
         actions={(
           <div className="flex gap-2">
             <Button variant="secondary" size="sm" onClick={refreshAll} disabled={refreshing}><RefreshCw className={refreshing ? "animate-spin" : undefined} />{t("common.refresh")}</Button>
-            <Button variant="destructive" size="sm" onClick={() => clearMutation.mutate()} disabled={clearMutation.isPending || (statsQuery.data?.totalImages ?? 0) === 0}>{t("media.images.clear")}</Button>
+            <Button variant="destructive" size="sm" onClick={() => setClearOpen(true)} disabled={clearMutation.isPending || (statsQuery.data?.totalImages ?? 0) === 0}>{t("media.images.clear")}</Button>
           </div>
         )}
       />
@@ -108,6 +110,18 @@ export function GalleryPage() {
       </section>
 
       <ImageLightbox key={preview ? `${preview.url}:${preview.index ?? 0}` : "closed"} image={preview} onClose={() => setPreview(null)} />
+      <AlertDialog open={clearOpen} onOpenChange={setClearOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("media.images.clearTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("media.images.clearDescription", { count: statsQuery.data?.totalImages ?? 0 })}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" disabled={clearMutation.isPending} onClick={(event) => { event.preventDefault(); clearMutation.mutate(undefined, { onSuccess: () => setClearOpen(false) }); }}>{t("media.images.clear")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
