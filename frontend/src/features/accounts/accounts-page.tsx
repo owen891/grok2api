@@ -469,6 +469,7 @@ export function AccountsPage() {
     setTypeFilter("");
     setStatusFilter("");
     setRenewalFilter("");
+    setNsfwFilter("");
     setQuickImportOpen(false);
     setQuickImportTokens("");
   }
@@ -649,6 +650,20 @@ export function AccountsPage() {
                     ))}
                   </TabsList>
                 </Tabs>
+                {provider === "grok_web" ? (
+                  <Tabs
+                    value={nsfwFilter || "all"}
+                    onValueChange={(value) => { setNsfwFilter(value === "all" ? "" : value); setPage(1); setSelected(new Set()); }}
+                    className="w-full sm:w-auto"
+                    aria-label={t("accounts.nsfw")}
+                  >
+                    <TabsList className="max-w-full overflow-x-auto">
+                      <TabsTrigger value="all">{t("common.all")}</TabsTrigger>
+                      <TabsTrigger value="enabled">{t("accounts.nsfwEnabled")}</TabsTrigger>
+                      <TabsTrigger value="disabled">{t("accounts.nsfwDisabled")}</TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                ) : null}
                 {(result?.total ?? 0) > 0 ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
