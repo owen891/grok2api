@@ -43,6 +43,7 @@ type AccountListFilter struct {
 	QuotaType   string
 	Status      string
 	Refreshable *bool
+	NSFW        string
 	Now         time.Time
 }
 

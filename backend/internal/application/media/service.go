@@ -157,6 +157,46 @@ func (s *Service) AdminListImages(ctx context.Context, page, pageSize int, searc
 	return s.assets.ListMediaAssets(ctx, repository.MediaAssetListQuery{Page: mediaPageQuery(page, pageSize, search, repository.SortQuery{})})
 }
 
+func (s *Service) DeleteImage(ctx context.Context, id string) error {
+	asset, err := s.assets.GetMediaAsset(ctx, strings.TrimSpace(id))
+	if errors.Is(err, repository.ErrNotFound) {
+		return ErrAssetNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if asset.Kind != "image" {
+		return ErrAssetNotFound
+	}
+	if err := s.objects.Delete(ctx, asset.StorageKey); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := s.assets.DeleteMediaAsset(ctx, asset.ID); err != nil {
+		return err
+	}
+	s.totalBytes.Add(-asset.SizeBytes)
+	return nil
+}
+
+func (s *Service) ClearImages(ctx context.Context) (int64, error) {
+	var deleted int64
+	for {
+		assets, _, err := s.AdminListImages(ctx, 1, 100, "")
+		if err != nil {
+			return deleted, err
+		}
+		if len(assets) == 0 {
+			return deleted, nil
+		}
+		for _, asset := range assets {
+			if err := s.DeleteImage(ctx, asset.ID); err != nil {
+				return deleted, err
+			}
+			deleted++
+		}
+	}
+}
+
 // AdminListVideoJobs 分页返回视频任务列表。
 func (s *Service) AdminListVideoJobs(ctx context.Context, page, pageSize int, search, status string, sort repository.SortQuery) ([]mediadomain.Job, int64, error) {
 	if s.jobs == nil {

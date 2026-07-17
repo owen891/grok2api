@@ -148,6 +148,7 @@ type ListFilter struct {
 	QuotaType string
 	Status    string
 	Renewal   string
+	NSFW      string
 	Sort      repository.SortQuery
 }
 
@@ -278,7 +279,7 @@ func (s *Service) ProviderDefinition(value accountdomain.Provider) (provider.Def
 
 func (s *Service) List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]View, int64, error) {
 	page, pageSize = normalizePage(page, pageSize)
-	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) || !oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") || !oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing") || !oneOf(filter.Renewal, "", "refreshable", "unrefreshable") || !repository.IsValidSort(filter.Sort, "name", "type", "status", "createdAt") {
+	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) || !oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") || !oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing") || !oneOf(filter.Renewal, "", "refreshable", "unrefreshable") || !oneOf(filter.NSFW, "", "enabled", "disabled") || !repository.IsValidSort(filter.Sort, "name", "type", "status", "createdAt") {
 		return nil, 0, ErrInvalidFilter
 	}
 	var refreshable *bool
@@ -288,7 +289,7 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 	}
 	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
 		Page:   repository.PageQuery{Offset: (page - 1) * pageSize, Limit: pageSize, Search: search, Sort: filter.Sort},
-		Filter: repository.AccountListFilter{Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status, Refreshable: refreshable, Now: time.Now().UTC()},
+		Filter: repository.AccountListFilter{Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status, Refreshable: refreshable, NSFW: filter.NSFW, Now: time.Now().UTC()},
 	})
 	if err != nil {
 		return nil, 0, err
@@ -364,6 +365,43 @@ func (s *Service) BatchUpdate(ctx context.Context, ids []uint64, input UpdateInp
 		}
 	}
 	return updated, nil
+}
+
+func (s *Service) SetNSFW(ctx context.Context, id uint64, enabled bool) (View, error) {
+	value, err := s.accounts.Get(ctx, id)
+	if err != nil {
+		return View{}, mapRepositoryError(err)
+	}
+	if value.Provider != accountdomain.ProviderWeb {
+		return View{}, ErrUnsupported
+	}
+	adapter, ok := s.providers.NSFW(value.Provider)
+	if !ok {
+		return View{}, ErrUnsupported
+	}
+	if err := adapter.SetNSFW(ctx, value, enabled); err != nil {
+		return View{}, err
+	}
+	if _, err := s.accounts.UpdateMany(ctx, []uint64{id}, repository.AccountUpdates{NSFWEnabled: &enabled}); err != nil {
+		return View{}, err
+	}
+	return s.Get(ctx, id)
+}
+
+func (s *Service) BatchSetNSFW(ctx context.Context, ids []uint64, enabled bool) (int, int, error) {
+	ids, err := normalizeBatchIDs(ids)
+	if err != nil {
+		return 0, 0, err
+	}
+	succeeded, failed := 0, 0
+	for _, id := range ids {
+		if _, err := s.SetNSFW(ctx, id, enabled); err != nil {
+			failed++
+			continue
+		}
+		succeeded++
+	}
+	return succeeded, failed, nil
 }
 
 // BatchDelete 原子删除一组账号及其额度状态。

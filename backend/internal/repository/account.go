@@ -10,6 +10,7 @@ import (
 // AccountUpdates 表示批量账号更新中允许持久化的字段。
 type AccountUpdates struct {
 	Enabled          *bool
+	NSFWEnabled      *bool
 	Priority         *int
 	MaxConcurrent    *int
 	MinimumRemaining *float64

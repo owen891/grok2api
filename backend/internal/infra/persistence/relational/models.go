@@ -44,6 +44,7 @@ type accountModel struct {
 	LastUsedAt       *time.Time
 	ObservedModel    string `gorm:"size:255;check:chk_accounts_observed_model,length(observed_model) <= 255"`
 	ObservedModelAt  *time.Time
+	NSFWEnabled      bool    `gorm:"not null;default:false"`
 	CreatedAt        time.Time               `gorm:"not null"`
 	UpdatedAt        time.Time               `gorm:"not null"`
 	Credential       *accountCredentialModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`

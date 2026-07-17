@@ -29,6 +29,10 @@ func (h *Handler) RegisterPublic(router *gin.Engine) {
 func (h *Handler) RegisterAdmin(router *gin.RouterGroup) {
 	router.GET("/media/images", h.listImages)
 	router.GET("/media/images/stats", h.imageStats)
+	router.GET("/media/cache/files", h.listImages)
+	router.GET("/media/cache/stats", h.imageStats)
+	router.DELETE("/media/cache/images/:assetId", h.deleteImage)
+	router.POST("/media/cache/images/clear", h.clearImages)
 	router.GET("/media/videos", h.listVideos)
 	router.GET("/media/videos/stats", h.videoStats)
 }
@@ -88,6 +92,27 @@ func (h *Handler) imageStats(c *gin.Context) {
 		return
 	}
 	response.Success(c, http.StatusOK, imageStatsDTO{TotalImages: stats.TotalImages, TotalBytes: stats.TotalBytes})
+}
+
+func (h *Handler) deleteImage(c *gin.Context) {
+	if err := h.service.DeleteImage(c.Request.Context(), c.Param("assetId")); err != nil {
+		if errors.Is(err, mediaapp.ErrAssetNotFound) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		response.Error(c, http.StatusInternalServerError, "mediaDeleteImageFailed", "删除图片失败")
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"deleted": true})
+}
+
+func (h *Handler) clearImages(c *gin.Context) {
+	deleted, err := h.service.ClearImages(c.Request.Context())
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, "mediaClearImagesFailed", "清空图片失败")
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"deleted": deleted})
 }
 
 func (h *Handler) listVideos(c *gin.Context) {

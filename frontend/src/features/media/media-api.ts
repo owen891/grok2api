@@ -73,6 +73,14 @@ export function getImageStats(): Promise<ImageStatsDTO> {
   return apiRequest("/api/admin/v1/media/images/stats", {}, decodeImageStats);
 }
 
+export function deleteImage(id: string): Promise<{ deleted: boolean }> {
+  return apiRequest(`/api/admin/v1/media/cache/images/${encodeURIComponent(id)}`, { method: "DELETE" }, createObjectDecoder("image delete", { deleted: (value: unknown) => value === true }));
+}
+
+export function clearImages(): Promise<{ deleted: number }> {
+  return apiRequest("/api/admin/v1/media/cache/images/clear", { method: "POST" }, createObjectDecoder("image clear", { deleted: isNumber }));
+}
+
 export function listVideos(input: ListVideosInput): Promise<PaginatedDTO<MediaJobDTO>> {
   const query = new URLSearchParams({ page: String(input.page), pageSize: String(input.pageSize) });
   if (input.status) query.set("status", input.status);

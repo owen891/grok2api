@@ -65,6 +65,12 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	case "probing":
 		query = query.Where("enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing')", true, account.AuthStatusActive)
 	}
+	if input.Filter.NSFW == "enabled" {
+		query = query.Where("nsfw_enabled = ?", true)
+	}
+	if input.Filter.NSFW == "disabled" {
+		query = query.Where("nsfw_enabled = ?", false)
+	}
 	if input.Filter.Refreshable != nil {
 		if *input.Filter.Refreshable {
 			query = query.Where("EXISTS (SELECT 1 FROM account_credentials credential WHERE credential.account_id = provider_accounts.id AND credential.encrypted_refresh <> '')")
@@ -509,6 +515,9 @@ func (r *AccountRepository) UpdateMany(ctx context.Context, ids []uint64, update
 	values := make(map[string]any, 4)
 	if updates.Enabled != nil {
 		values["enabled"] = *updates.Enabled
+	}
+	if updates.NSFWEnabled != nil {
+		values["nsfw_enabled"] = *updates.NSFWEnabled
 	}
 	if updates.Priority != nil {
 		values["priority"] = *updates.Priority

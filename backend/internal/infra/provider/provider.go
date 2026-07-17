@@ -246,6 +246,11 @@ type QuotaAdapter interface {
 	SyncQuotaMode(ctx context.Context, credential account.Credential, mode string) (account.QuotaWindow, error)
 }
 
+type NSFWAdapter interface {
+	Adapter
+	SetNSFW(ctx context.Context, credential account.Credential, enabled bool) error
+}
+
 type ImageAdapter interface {
 	Adapter
 	GenerateImage(ctx context.Context, request ImageGenerationRequest) (*Response, error)
@@ -553,6 +558,15 @@ func (r *Registry) Quota(value account.Provider) (QuotaAdapter, bool) {
 		return nil, false
 	}
 	result, ok := adapter.(QuotaAdapter)
+	return result, ok
+}
+
+func (r *Registry) NSFW(value account.Provider) (NSFWAdapter, bool) {
+	adapter, ok := r.Get(value)
+	if !ok {
+		return nil, false
+	}
+	result, ok := adapter.(NSFWAdapter)
 	return result, ok
 }
 

@@ -61,6 +61,7 @@ export type AccountDTO = {
   authType: "oauth" | "sso";
   webTier?: "auto" | "basic" | "super" | "heavy";
   webTierSyncedAt?: string;
+  nsfwEnabled: boolean;
   name: string;
   email?: string;
   userId?: string;
@@ -148,7 +149,7 @@ const quotaWindowValidator = hasShape({
 });
 const accountValidator = hasShape({
   id: isString, provider: isOneOf("grok_build", "grok_web", "grok_console"), authType: isOneOf("oauth", "sso"), webTier: isOptional(isOneOf("auto", "basic", "super", "heavy")),
-  webTierSyncedAt: isOptional(isString), name: isString, email: isOptional(isString), userId: isOptional(isString), teamId: isOptional(isString),
+  webTierSyncedAt: isOptional(isString), nsfwEnabled: isBoolean, name: isString, email: isOptional(isString), userId: isOptional(isString), teamId: isOptional(isString),
   enabled: isBoolean, authStatus: isOneOf("active", "reauthRequired"), expiresAt: isOptional(isString), refreshable: isBoolean,
   refreshDueAt: isOptional(isString), lastRefreshAt: isOptional(isString), refreshFailureCount: isNumber,
   lastRefreshErrorCode: isOptional(isString), priority: isNumber, maxConcurrent: isNumber, minimumRemaining: isNumber,
@@ -180,6 +181,7 @@ export type ListAccountsInput = {
   type?: string;
   status?: string;
   renewal?: string;
+  nsfw?: string;
   provider: AccountProvider;
   sortBy?: string;
   sortOrder?: SortOrder;
@@ -191,6 +193,7 @@ export function listAccounts(input: ListAccountsInput): Promise<PaginatedDTO<Acc
   if (input.type) query.set("type", input.type);
   if (input.status) query.set("status", input.status);
   if (input.renewal) query.set("renewal", input.renewal);
+  if (input.nsfw) query.set("nsfw", input.nsfw);
   if (input.sortBy && input.sortOrder) {
     query.set("sortBy", input.sortBy);
     query.set("sortOrder", input.sortOrder);
@@ -374,10 +377,10 @@ export function importAccounts(files: readonly File[], onProgress?: (value: Acco
   return runAccountTask("/api/admin/v1/accounts/import", body, ["created", "updated", "synced", "syncFailed"], onProgress, signal);
 }
 
-export function importWebAccounts(files: readonly File[], onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountImportResultDTO> {
+export function importWebAccounts(files: readonly File[], onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal, autoNSFW = false): Promise<AccountImportResultDTO> {
   const body = new FormData();
   files.forEach((file) => body.append("files", file, file.name));
-  return runAccountTask("/api/admin/v1/accounts/web/import", body, ["created", "updated", "synced", "syncFailed"], onProgress, signal);
+  return runAccountTask(`/api/admin/v1/accounts/web/import${autoNSFW ? "?auto_nsfw=true" : ""}`, body, ["created", "updated", "synced", "syncFailed"], onProgress, signal);
 }
 
 export function importConsoleAccounts(files: readonly File[], onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountImportResultDTO> {
@@ -396,6 +399,14 @@ export function exportAccounts(): Promise<Blob> {
 
 export function updateAccountsEnabled(ids: string[], enabled: boolean, provider: AccountProvider): Promise<{ updated: number }> {
   return apiRequest("/api/admin/v1/accounts/batch", { method: "PATCH", body: { ids, enabled, provider } }, decodeCountResult<{ updated: number }>("updated"));
+}
+
+export function setAccountNSFW(id: string, enabled: boolean): Promise<AccountDTO> {
+  return apiRequest(`/api/admin/v1/accounts/${id}/nsfw`, { method: "POST", body: { enabled } }, decodeAccount);
+}
+
+export function setAccountsNSFW(ids: string[], enabled: boolean, provider: AccountProvider): Promise<{ succeeded: number; failed: number }> {
+  return apiRequest("/api/admin/v1/accounts/batch/nsfw", { method: "POST", body: { ids, enabled, provider } }, createObjectDecoder("account nsfw batch", { succeeded: isNumber, failed: isNumber }));
 }
 
 export function refreshAccountsBilling(ids: string[], provider: AccountProvider): Promise<{ succeeded: number; failed: number }> {

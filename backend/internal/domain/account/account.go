@@ -108,6 +108,7 @@ type Credential struct {
 	ObservedModelAt       *time.Time
 	WebTier               WebTier
 	WebTierSyncedAt       *time.Time
+	NSFWEnabled           bool
 	LinkedAccountID       uint64
 	LinkedAccountName     string
 	LinkedProvider        Provider

@@ -142,6 +142,8 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/refresh-billing", h.refreshAllBilling)
 	router.POST("/accounts/refresh-tokens", h.refreshAllTokens)
 	router.POST("/accounts/batch/refresh-billing", h.batchRefreshBilling)
+	router.POST("/accounts/:id/nsfw", h.setNSFW)
+	router.POST("/accounts/batch/nsfw", h.batchNSFW)
 	router.PATCH("/accounts/batch", h.batchUpdate)
 	router.DELETE("/accounts", h.batchDelete)
 	router.PATCH("/accounts/:id", h.update)
@@ -171,6 +173,10 @@ type batchUpdateRequest struct {
 type batchDeleteRequest struct {
 	IDs      []string `json:"ids" binding:"required"`
 	Provider string   `json:"provider" binding:"required"`
+}
+
+type nsfwRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 type accountSelectionRequest struct {
@@ -217,6 +223,7 @@ type accountResponse struct {
 	AuthType         string                `json:"authType"`
 	WebTier          string                `json:"webTier,omitempty"`
 	WebTierSyncedAt  *time.Time            `json:"webTierSyncedAt,omitempty"`
+	NSFWEnabled      bool                  `json:"nsfwEnabled"`
 	Name             string                `json:"name"`
 	Email            string                `json:"email,omitempty"`
 	UserID           string                `json:"userId,omitempty"`
@@ -316,7 +323,7 @@ type quotaResponse struct {
 
 func (h *Handler) list(c *gin.Context) {
 	page, pageSize := pagination(c)
-	values, total, err := h.service.List(c.Request.Context(), page, pageSize, c.Query("search"), accountapp.ListFilter{Provider: c.Query("provider"), QuotaType: c.Query("type"), Status: c.Query("status"), Renewal: c.Query("renewal"), Sort: repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))}})
+	values, total, err := h.service.List(c.Request.Context(), page, pageSize, c.Query("search"), accountapp.ListFilter{Provider: c.Query("provider"), QuotaType: c.Query("type"), Status: c.Query("status"), Renewal: c.Query("renewal"), NSFW: c.Query("nsfw"), Sort: repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))}})
 	if errors.Is(err, accountapp.ErrInvalidFilter) {
 		response.Error(c, http.StatusBadRequest, "invalidFilter", err.Error())
 		return
@@ -417,6 +424,50 @@ func (h *Handler) batchRefreshBilling(c *gin.Context) {
 	succeeded, failed, err := h.service.BatchRefreshBilling(c.Request.Context(), ids)
 	if err != nil {
 		h.writeServiceError(c, "billingBatchRefreshFailed", err, http.StatusBadGateway, "批量同步账号额度失败")
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"succeeded": succeeded, "failed": failed})
+}
+
+func (h *Handler) setNSFW(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	var request nsfwRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	value, err := h.service.SetNSFW(c.Request.Context(), id, request.Enabled)
+	if err != nil {
+		h.writeServiceError(c, "accountNSFWFailed", err, http.StatusBadGateway, "NSFW 设置失败")
+		return
+	}
+	response.Success(c, http.StatusOK, newAccountResponse(value))
+}
+
+func (h *Handler) batchNSFW(c *gin.Context) {
+	var request struct {
+		IDs      []string `json:"ids" binding:"required"`
+		Provider string   `json:"provider" binding:"required"`
+		Enabled  bool     `json:"enabled"`
+	}
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	ids, err := parseIDs(request.IDs)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
+		return
+	}
+	if request.Provider != string(accountdomain.ProviderWeb) || !h.validateProviderIDs(c, ids, request.Provider) {
+		return
+	}
+	succeeded, failed, err := h.service.BatchSetNSFW(c.Request.Context(), ids, request.Enabled)
+	if err != nil {
+		h.writeServiceError(c, "accountNSFWBatchFailed", err, http.StatusBadGateway, "批量 NSFW 设置失败")
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"succeeded": succeeded, "failed": failed})
@@ -730,6 +781,13 @@ func (h *Handler) importFile(c *gin.Context, providerValue accountdomain.Provide
 		stream.WriteError("authImportFailed", "导入账号失败")
 		return
 	}
+	if providerValue == accountdomain.ProviderWeb && c.Query("auto_nsfw") == "true" && len(result.AccountIDs) > 0 {
+		_, failed, nsfwErr := h.service.BatchSetNSFW(c.Request.Context(), result.AccountIDs, true)
+		if nsfwErr != nil || failed > 0 {
+			stream.WriteError("accountNSFWBatchFailed", "导入完成，但自动开启 NSFW 失败")
+			return
+		}
+	}
 	_ = stream.Write("complete", accountImportResponse{Created: result.Created, Updated: result.Updated, Synced: syncResult.Succeeded, SyncFailed: syncResult.Failed})
 }
 
@@ -945,7 +1003,7 @@ func newAccountResponse(value accountapp.View) accountResponse {
 	c := value.Credential
 	result := accountResponse{
 		ID: c.ID, Provider: string(c.Provider), AuthType: string(c.AuthType), WebTier: string(c.WebTier),
-		WebTierSyncedAt: c.WebTierSyncedAt, Name: c.Name, Email: c.Email, UserID: c.UserID, TeamID: c.TeamID,
+		WebTierSyncedAt: c.WebTierSyncedAt, NSFWEnabled: c.NSFWEnabled, Name: c.Name, Email: c.Email, UserID: c.UserID, TeamID: c.TeamID,
 		Enabled: c.Enabled, AuthStatus: string(c.AuthStatus), Refreshable: c.EncryptedRefreshToken != "",
 		RefreshDueAt: c.RefreshDueAt, LastRefreshAt: c.LastRefreshAt,
 		RefreshFailures: c.RefreshFailureCount, LastRefreshError: c.LastRefreshErrorCode,

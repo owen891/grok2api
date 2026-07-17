@@ -52,6 +52,8 @@ import {
   refreshAllAccountTokens,
   refreshAllConsoleAccountQuotas,
   refreshAllWebAccountQuotas,
+  setAccountNSFW,
+  setAccountsNSFW,
   startDeviceAuthorization,
   syncWebAccountsToConsole,
   updateAccount,
@@ -93,6 +95,7 @@ export function AccountsPage() {
   const [typeFilter, setTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [renewalFilter, setRenewalFilter] = useState("");
+  const [nsfwFilter, setNsfwFilter] = useState("");
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
@@ -112,6 +115,7 @@ export function AccountsPage() {
   const [deviceStatus, setDeviceStatus] = useState<"starting" | "pending" | "failed">("starting");
   const [quickImportOpen, setQuickImportOpen] = useState(false);
   const [quickImportTokens, setQuickImportTokens] = useState("");
+  const [autoNSFWImport, setAutoNSFWImport] = useState(false);
   const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => () => {
@@ -138,8 +142,8 @@ export function AccountsPage() {
   const accountEnabled = useWatch({ control: form.control, name: "enabled" });
 
   const accountsQuery = useQuery({
-    queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, renewalFilter, sort.field, sort.order],
-    queryFn: () => listAccounts({ provider, page, pageSize, search: debouncedSearch, type: typeFilter, status: statusFilter, renewal: provider === "grok_build" ? renewalFilter : undefined, sortBy: sort.field, sortOrder: sort.order }),
+    queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, renewalFilter, nsfwFilter, sort.field, sort.order],
+    queryFn: () => listAccounts({ provider, page, pageSize, search: debouncedSearch, type: typeFilter, status: statusFilter, renewal: provider === "grok_build" ? renewalFilter : undefined, nsfw: provider === "grok_web" ? nsfwFilter : undefined, sortBy: sort.field, sortOrder: sort.order }),
   });
 
   const summaryQuery = useQuery({
@@ -316,7 +320,7 @@ export function AccountsPage() {
       const onProgress = (progress: AccountTaskProgressDTO) => {
         toast.loading(t(progress.phase === "syncing" ? "common.syncingProgress" : "common.importingProgress", progress), { id: toastID });
       };
-      if (provider === "grok_web") return importWebAccounts(files, onProgress, controller.signal);
+      if (provider === "grok_web") return importWebAccounts(files, onProgress, controller.signal, autoNSFWImport);
       if (provider === "grok_console") return importConsoleAccounts(files, onProgress, controller.signal);
       return importAccounts(files, onProgress, controller.signal);
     },
@@ -382,6 +386,12 @@ export function AccountsPage() {
       invalidateAccountData();
       toast.success(t("accounts.deleted"));
     },
+    onError: showError,
+  });
+
+  const batchNSFWMutation = useMutation({
+    mutationFn: (enabled: boolean) => setAccountsNSFW([...selected], enabled, provider),
+    onSuccess: (result) => { setSelected(new Set()); invalidateAccountData(); toast.success(t("accounts.nsfwBatchUpdated", result)); },
     onError: showError,
   });
 
@@ -625,6 +635,7 @@ export function AccountsPage() {
                     { value: "refreshable", label: t("accountCredential.autoRefresh") },
                     { value: "unrefreshable", label: t("accountCredential.noAutoRefresh") },
                   ] }] : []),
+                  ...(provider === "grok_web" ? [{ id: "nsfw", label: t("accounts.nsfw"), value: nsfwFilter, onChange: (value: string) => { setNsfwFilter(value); setPage(1); setSelected(new Set()); }, options: [{ value: "enabled", label: t("accounts.nsfwEnabled") }, { value: "disabled", label: t("accounts.nsfwDisabled") }] }] : []),
                 ]} />
                 <Tabs
                   value={statusFilter || "all"}
@@ -664,6 +675,7 @@ export function AccountsPage() {
                     {provider === "grok_build" ? <DropdownMenuItem onClick={() => void startDeviceLogin()}><ExternalLink />{t("accounts.deviceLogin")}</DropdownMenuItem> : null}
                     {provider !== "grok_build" ? <DropdownMenuItem disabled={importMutation.isPending} onClick={() => setQuickImportOpen(true)}><ClipboardPaste />{t("accounts.quickImportSSO")}</DropdownMenuItem> : null}
                     <DropdownMenuItem disabled={importMutation.isPending} onClick={() => fileInputRef.current?.click()}><FileUp />{provider === "grok_build" ? t("accounts.importAuth") : provider === "grok_console" ? t("console.importFile") : t("accounts.importWebFile")}</DropdownMenuItem>
+                    {provider === "grok_web" ? <DropdownMenuItem onClick={() => setAutoNSFWImport((value) => !value)}><Checkbox checked={autoNSFWImport} />{t("accounts.autoNSFWImport")}</DropdownMenuItem> : null}
                     {hasProviderAccounts && provider === "grok_build" ? (
                       <>
                         <DropdownMenuSeparator />
@@ -691,6 +703,7 @@ export function AccountsPage() {
                 <div className="flex flex-wrap items-center justify-end gap-1.5">
                   <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(true)}>{t("common.enable")}</Button>
                   <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(false)}>{t("common.disable")}</Button>
+                  {provider === "grok_web" ? <><Button variant="secondary" size="sm" onClick={() => batchNSFWMutation.mutate(true)}>{t("accounts.enableNSFW")}</Button><Button variant="secondary" size="sm" onClick={() => batchNSFWMutation.mutate(false)}>{t("accounts.disableNSFW")}</Button></> : null}
                   {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets([...selected])}>{t("accounts.convertToBuild")}</Button> : null}
                   {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets([...selected])}>{t("webConsoleSync.action")}</Button> : null}
                   {provider === "grok_build" ? <Button variant="secondary" size="sm" onClick={() => batchBillingMutation.mutate()}>{t("accounts.refreshBilling")}</Button> : null}
@@ -740,6 +753,7 @@ export function AccountsPage() {
                     <TableCell className="px-2"><Checkbox checked={selected.has(account.id)} onCheckedChange={(checked) => toggleAccount(account.id, checked === true)} aria-label={t("common.selectItem", { name: account.name })} /></TableCell>
                     <TableCell className="min-w-0">
                       <div className="truncate text-xs font-medium" title={account.name}>{account.name}</div>
+                      {provider === "grok_web" ? <Badge variant={account.nsfwEnabled ? "default" : "outline"} className="mt-1 text-[10px]">{account.nsfwEnabled ? t("accounts.nsfwEnabled") : t("accounts.nsfwDisabled")}</Badge> : null}
                       {showAccountDetail || account.linkedAccountId ? (
                         <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                           {showAccountDetail ? <span className="truncate" title={accountDetail}>{accountDetail}</span> : null}
@@ -777,6 +791,7 @@ export function AccountsPage() {
                           <DropdownMenuItem onClick={() => beginEdit(account)}><Pencil />{t("common.edit")}</DropdownMenuItem>
                           {provider === "grok_web" && !account.linkedAccountId ? <DropdownMenuItem onClick={() => setConversionTargets([account.id])}><ArrowRight />{t("accounts.convertToBuild")}</DropdownMenuItem> : null}
                           {provider === "grok_web" ? <DropdownMenuItem onClick={() => setWebConsoleSyncTargets([account.id])}><ArrowRight />{t("webConsoleSync.action")}</DropdownMenuItem> : null}
+                          {provider === "grok_web" ? <DropdownMenuItem onClick={() => setAccountNSFW(account.id, !account.nsfwEnabled).then(() => invalidateAccountData()).catch(showError)}>{account.nsfwEnabled ? t("accounts.disableNSFW") : t("accounts.enableNSFW")}</DropdownMenuItem> : null}
                           {provider === "grok_build" ? <DropdownMenuItem onClick={() => tokenMutation.mutate(account.id)}><RotateCw />{t("accounts.refreshToken")}</DropdownMenuItem> : null}
                           <DropdownMenuItem onClick={() => provider === "grok_build" ? billingMutation.mutate(account.id) : quotaMutation.mutate(account.id)}><RefreshCw />{provider === "grok_build" ? t("accounts.refreshBilling") : t("accounts.refreshModeQuota")}</DropdownMenuItem>
                           <DropdownMenuSeparator />

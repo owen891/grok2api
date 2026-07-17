@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Database, Image as ImageIcon, RefreshCw, Search, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { ImageLightbox, type LightboxImage } from "@/features/chat/image-lightbox";
-import { getImageStats, listImages } from "@/features/media/media-api";
+import { clearImages, deleteImage, getImageStats, listImages } from "@/features/media/media-api";
 import type { MediaAssetDTO } from "@/features/media/types";
 import { EmptyState, ErrorState, LoadingState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
@@ -17,6 +17,7 @@ import { formatDateTime, formatNumber } from "@/shared/lib/format";
 
 export function GalleryPage() {
   const { t, i18n } = useTranslation();
+  const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [search, setSearch] = useState("");
@@ -33,6 +34,8 @@ export function GalleryPage() {
     queryFn: getImageStats,
     staleTime: 30_000,
   });
+  const deleteMutation = useMutation({ mutationFn: deleteImage, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["media", "images"] }); } });
+  const clearMutation = useMutation({ mutationFn: clearImages, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["media", "images"] }); } });
 
   const result = imagesQuery.data;
   const refreshing = imagesQuery.isFetching || statsQuery.isFetching;
@@ -48,10 +51,10 @@ export function GalleryPage() {
         title={t("media.images.title")}
         description={t("media.images.description")}
         actions={(
-          <Button variant="secondary" size="sm" onClick={refreshAll} disabled={refreshing}>
-            <RefreshCw className={refreshing ? "animate-spin" : undefined} />
-            {t("common.refresh")}
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" onClick={refreshAll} disabled={refreshing}><RefreshCw className={refreshing ? "animate-spin" : undefined} />{t("common.refresh")}</Button>
+            <Button variant="destructive" size="sm" onClick={() => clearMutation.mutate()} disabled={clearMutation.isPending || (statsQuery.data?.totalImages ?? 0) === 0}>{t("media.images.clear")}</Button>
+          </div>
         )}
       />
 
@@ -87,6 +90,7 @@ export function GalleryPage() {
                 image={image}
                 locale={i18n.language}
                 onOpen={() => setPreview({ url: image.url, name: image.id })}
+                onDelete={() => deleteMutation.mutate(image.id)}
               />
             ))}
           </div>
@@ -112,16 +116,20 @@ function ImageCard({
   image,
   locale,
   onOpen,
+  onDelete,
 }: {
   image: MediaAssetDTO;
   locale: string;
   onOpen: () => void;
+  onDelete: () => void;
 }) {
   const { t } = useTranslation();
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onOpen}
+      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(); } }}
       className="group w-full overflow-hidden rounded-lg bg-card text-left transition-colors hover:bg-secondary/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
     >
       <div className="aspect-square overflow-hidden bg-muted">
@@ -137,8 +145,9 @@ function ImageCard({
           <span className="shrink-0 whitespace-nowrap">{formatDateTime(image.createdAt, locale)}</span>
         </div>
         <div className="truncate font-mono text-[10px] text-muted-foreground/75" title={image.sha256}>{t("media.images.sha256")}: {image.sha256}</div>
+        <Button type="button" variant="ghost" size="sm" className="h-7 w-full text-destructive" onClick={(event) => { event.stopPropagation(); onDelete(); }}>{t("common.delete")}</Button>
       </div>
-    </button>
+    </div>
   );
 }
 
