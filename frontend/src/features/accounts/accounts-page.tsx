@@ -638,8 +638,18 @@ export function AccountsPage() {
                   ] }] : []),
                 ]} />
                 <Tabs
-                  value={statusFilter || "all"}
-                  onValueChange={(value) => { setStatusFilter(value === "all" ? "" : value); setPage(1); setSelected(new Set()); }}
+                  value={nsfwFilter === "enabled" ? "nsfw" : statusFilter || "all"}
+                  onValueChange={(value) => {
+                    if (value === "nsfw") {
+                      setNsfwFilter("enabled");
+                      setStatusFilter("");
+                    } else {
+                      setNsfwFilter("");
+                      setStatusFilter(value === "all" ? "" : value);
+                    }
+                    setPage(1);
+                    setSelected(new Set());
+                  }}
                   className="w-full sm:w-auto"
                   aria-label={t("accounts.status")}
                 >
@@ -647,20 +657,9 @@ export function AccountsPage() {
                     {quickStatusFilters.map((filter) => (
                       <TabsTrigger key={filter.value} value={filter.value}>{filter.label}</TabsTrigger>
                     ))}
+                    {provider === "grok_web" ? <TabsTrigger value="nsfw">{t("accounts.nsfw")}</TabsTrigger> : null}
                   </TabsList>
                 </Tabs>
-                {provider === "grok_web" ? (
-                  <div className="flex h-8 items-center rounded-md bg-muted/55 p-0.5">
-                    <Button
-                      variant={nsfwFilter === "enabled" ? "secondary" : "ghost"}
-                      size="sm"
-                      className="h-7 px-3 text-xs shadow-none"
-                      onClick={() => { setNsfwFilter((value) => value === "enabled" ? "" : "enabled"); setPage(1); setSelected(new Set()); }}
-                    >
-                      {t("accounts.nsfw")}
-                    </Button>
-                  </div>
-                ) : null}
               </div>
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets("all")}>{t("accountBulk.convertAllToBuild")}</Button> : null}
