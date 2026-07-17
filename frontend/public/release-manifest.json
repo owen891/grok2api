@@ -1,7 +1,38 @@
 {
-  "latest": "v3.0.3",
+  "latest": "v3.0.4",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.0.4",
+      "date": "2026-07-18",
+      "entries": [
+        {
+          "type": "feature",
+          "zh": "账号管理新增 Grok Web 账号级 NSFW 开启/关闭、批量操作、状态标签和快速筛选。",
+          "en": "Added account-level NSFW controls for Grok Web accounts, including bulk actions, status labels, and quick filtering."
+        },
+        {
+          "type": "feature",
+          "zh": "新增导入账号后自动开启 NSFW 的能力。",
+          "en": "Added automatic NSFW enablement after account import."
+        },
+        {
+          "type": "feature",
+          "zh": "媒体管理新增本地图片缓存统计、文件列表、单文件删除和全部清空。",
+          "en": "Added local image cache statistics, file listing, individual deletion, and full clearing to media management."
+        },
+        {
+          "type": "fix",
+          "zh": "修复 NSFW gRPC-Web 空成功响应被误判为失败的问题。",
+          "en": "Fixed empty successful NSFW gRPC-Web responses being incorrectly treated as failures."
+        },
+        {
+          "type": "style",
+          "zh": "优化账号状态筛选条和 NSFW 快速筛选布局。",
+          "en": "Improved the account status filter bar and NSFW quick-filter layout."
+        }
+      ]
+    },
     {
       "version": "v3.0.3",
       "date": "2026-07-17",
