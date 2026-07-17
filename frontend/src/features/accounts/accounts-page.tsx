@@ -636,7 +636,6 @@ export function AccountsPage() {
                     { value: "refreshable", label: t("accountCredential.autoRefresh") },
                     { value: "unrefreshable", label: t("accountCredential.noAutoRefresh") },
                   ] }] : []),
-                  ...(provider === "grok_web" ? [{ id: "nsfw", label: t("accounts.nsfw"), value: nsfwFilter, onChange: (value: string) => { setNsfwFilter(value); setPage(1); setSelected(new Set()); }, options: [{ value: "enabled", label: t("accounts.nsfwEnabled") }, { value: "disabled", label: t("accounts.nsfwDisabled") }] }] : []),
                 ]} />
                 <Tabs
                   value={statusFilter || "all"}
@@ -650,20 +649,7 @@ export function AccountsPage() {
                     ))}
                   </TabsList>
                 </Tabs>
-                {provider === "grok_web" ? (
-                  <Tabs
-                    value={nsfwFilter || "all"}
-                    onValueChange={(value) => { setNsfwFilter(value === "all" ? "" : value); setPage(1); setSelected(new Set()); }}
-                    className="w-full sm:w-auto"
-                    aria-label={t("accounts.nsfw")}
-                  >
-                    <TabsList className="max-w-full overflow-x-auto">
-                      <TabsTrigger value="all">{t("common.all")}</TabsTrigger>
-                      <TabsTrigger value="enabled">{t("accounts.nsfwEnabled")}</TabsTrigger>
-                      <TabsTrigger value="disabled">{t("accounts.nsfwDisabled")}</TabsTrigger>
-                    </TabsList>
-                  </Tabs>
-                ) : null}
+                {provider === "grok_web" ? <Button variant={nsfwFilter === "enabled" ? "secondary" : "ghost"} size="sm" onClick={() => { setNsfwFilter((value) => value === "enabled" ? "" : "enabled"); setPage(1); setSelected(new Set()); }}>{t("accounts.nsfw")}</Button> : null}
                 {(result?.total ?? 0) > 0 ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
