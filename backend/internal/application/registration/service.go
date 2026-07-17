@@ -32,6 +32,10 @@ type accountSynchronizer interface {
 	Sync(context.Context, ...uint64) accountsyncapp.Result
 }
 
+type nsfwSetter interface {
+	BatchSetNSFW(context.Context, []uint64, bool) (int, int, error)
+}
+
 type Config struct {
 	Enabled         bool
 	SpoolPath       string
@@ -48,16 +52,20 @@ type Service struct {
 	logger   *slog.Logger
 	importer credentialImporter
 	syncer   accountSynchronizer
+	nsfw     nsfwSetter
 	config   Config
 }
 
 type fileResult struct {
-	Status      string    `json:"status"`
-	Created     int       `json:"created"`
-	Updated     int       `json:"updated"`
-	Synced      int       `json:"synced"`
-	SyncFailed  int       `json:"syncFailed"`
-	ProcessedAt time.Time `json:"processedAt"`
+	Status        string    `json:"status"`
+	Created       int       `json:"created"`
+	Updated       int       `json:"updated"`
+	Synced        int       `json:"synced"`
+	SyncFailed    int       `json:"syncFailed"`
+	NSFWRequested bool      `json:"nsfwRequested,omitempty"`
+	NSFWEnabled   int       `json:"nsfwEnabled,omitempty"`
+	NSFWFailed    int       `json:"nsfwFailed,omitempty"`
+	ProcessedAt   time.Time `json:"processedAt"`
 }
 
 type spoolDirectories struct {
@@ -67,11 +75,15 @@ type spoolDirectories struct {
 	failed     string
 }
 
-func NewService(logger *slog.Logger, importer credentialImporter, syncer accountSynchronizer, config Config) *Service {
+func NewService(logger *slog.Logger, importer credentialImporter, syncer accountSynchronizer, config Config, nsfw ...nsfwSetter) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{logger: logger, importer: importer, syncer: syncer, config: config}
+	var setter nsfwSetter
+	if len(nsfw) > 0 {
+		setter = nsfw[0]
+	}
+	return &Service{logger: logger, importer: importer, syncer: syncer, nsfw: setter, config: config}
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -266,8 +278,12 @@ func (s *Service) processFile(ctx context.Context, source, originalName, process
 	if err != nil {
 		return s.finish(source, originalName, failed, fileResult{Status: "rejected"})
 	}
+	var envelope struct {
+		AutoNSFW bool `json:"auto_nsfw"`
+	}
+	_ = json.Unmarshal(data, &envelope)
 	imported, err := s.importCredential(ctx, data)
-	result := fileResult{Created: imported.Created, Updated: imported.Updated}
+	result := fileResult{Created: imported.Created, Updated: imported.Updated, NSFWRequested: envelope.AutoNSFW}
 	if err != nil {
 		result.Status = "import_failed"
 		return s.finish(source, originalName, failed, result)
@@ -279,6 +295,20 @@ func (s *Service) processFile(ctx context.Context, source, originalName, process
 	if synced.Failed > 0 {
 		result.Status = "sync_failed"
 		return s.finish(source, originalName, failed, result)
+	}
+	if envelope.AutoNSFW && len(imported.AccountIDs) > 0 {
+		if s.nsfw == nil {
+			result.NSFWFailed = len(imported.AccountIDs)
+			result.Status = "nsfw_failed"
+			return s.finish(source, originalName, failed, result)
+		}
+		succeeded, failedCount, nsfwErr := s.nsfw.BatchSetNSFW(ctx, imported.AccountIDs, true)
+		result.NSFWEnabled = succeeded
+		result.NSFWFailed = failedCount
+		if nsfwErr != nil || failedCount > 0 {
+			result.Status = "nsfw_failed"
+			return s.finish(source, originalName, failed, result)
+		}
 	}
 	result.Status = "processed"
 	return s.finish(source, originalName, processed, result)

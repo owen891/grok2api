@@ -36,7 +36,7 @@ export function RegistrationPage() {
   const [draft, setDraft] = useState<RegistrationSettingsDTO | null>(null);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
-  const [startInput, setStartInput] = useState<RegistrationStartInput>({ count: 0, extra: 1, threads: 1, fast: true, accountType: "build" });
+  const [startInput, setStartInput] = useState<RegistrationStartInput>({ count: 0, extra: 1, threads: 1, fast: true, accountType: "build", autoNSFW: false });
 
   const statusQuery = useQuery({
     queryKey: ["registration", "status"],
@@ -268,6 +268,7 @@ export function RegistrationPage() {
               />
               <NumberField label={t("registration.threads")} value={startInput.threads} min={1} max={10} disabled={busy} onChange={(value) => updateStart("threads", value)} />
               <ToggleField label={t("registration.fast")} description={t("registration.fastDescription")} checked={startInput.fast} disabled={busy} onCheckedChange={(value) => updateStart("fast", value)} />
+              {startInput.accountType === "web" ? <ToggleField label={t("registration.autoNSFW")} description={t("registration.autoNSFWDescription")} checked={startInput.autoNSFW} disabled={busy} onCheckedChange={(value) => updateStart("autoNSFW", value)} /> : null}
             </div>
           </section>
 

@@ -378,12 +378,13 @@ def publish_protocol_credential(
     return result
 
 
-def write_web_credential(directory: Path, *, email: str, sso: str) -> Path:
+def write_web_credential(directory: Path, *, email: str, sso: str, auto_nsfw: bool = False) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     filename = "web-sso-" + credential_file_name(email).removeprefix("xai-")
     path = directory / filename
     payload = {
         "provider": "grok_web",
+        "auto_nsfw": auto_nsfw,
         "accounts": [{"name": email, "sso_token": sso, "tier": "auto"}],
     }
     _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
@@ -411,6 +412,7 @@ def register_one(
     proxy: str,
     checkpoint_path: Path,
     account_type: str,
+    auto_nsfw: bool,
 ) -> dict[str, Any]:
     from xconsole_client import XConsoleAuthClient
     from xconsole_client.oauth_protocol import extract_cookies_from_auth_client
@@ -524,7 +526,7 @@ def register_one(
             if not sso:
                 raise RuntimeError("checkpoint 缺少 Web SSO，无法导入 Web 账号")
             auth_dir = Path(str(cfg.get("cpa_auth_dir") or (checkpoint_path.parent.parent / "web_auths")))
-            local_path = write_web_credential(auth_dir, email=email, sso=sso)
+            local_path = write_web_credential(auth_dir, email=email, sso=sso, auto_nsfw=auto_nsfw)
             write_checkpoint(
                 checkpoint_path,
                 stage="credential_ready",
@@ -723,6 +725,7 @@ def main() -> int:
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--account-type", choices=("build", "web"), default="build")
     parser.add_argument("--fast", action="store_true")
+    parser.add_argument("--auto-nsfw", action="store_true")
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--proxy")
     args = parser.parse_args()
@@ -821,6 +824,7 @@ def main() -> int:
             proxy=proxy,
             checkpoint_path=checkpoint_path,
             account_type=args.account_type,
+            auto_nsfw=bool(args.auto_nsfw and args.account_type == "web"),
         )
         with _progress_lock:
             global _done, _attempted, _ok, _failed

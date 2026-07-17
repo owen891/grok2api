@@ -95,6 +95,7 @@ export type RegistrationStartInput = {
   threads: number;
   fast: boolean;
   accountType: "build" | "web";
+  autoNSFW: boolean;
 };
 
 const isNullable = (validator: ValueValidator): ValueValidator => (value) => value === null || validator(value);

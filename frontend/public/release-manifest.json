@@ -1,7 +1,23 @@
 {
-  "latest": "v3.0.4",
+  "latest": "v3.0.5",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.0.5",
+      "date": "2026-07-18",
+      "entries": [
+        {
+          "type": "feature",
+          "zh": "Web 注册任务新增“注册完成后开启 NSFW”开关，开启后会在账号导入并首次同步成功后自动设置。",
+          "en": "Added an 'Enable NSFW after registration' option for Web registration tasks, applied after account import and initial sync succeed."
+        },
+        {
+          "type": "fix",
+          "zh": "自动开启 NSFW 失败时，注册结果会明确标记为失败并记录成功、失败数量。",
+          "en": "Registration results now explicitly report NSFW setup failures with succeeded and failed counts."
+        }
+      ]
+    },
     {
       "version": "v3.0.4",
       "date": "2026-07-18",

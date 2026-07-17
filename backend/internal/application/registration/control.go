@@ -47,6 +47,7 @@ type StartInput struct {
 	Threads     int    `json:"threads"`
 	Fast        bool   `json:"fast"`
 	AccountType string `json:"accountType"`
+	AutoNSFW    bool   `json:"autoNSFW"`
 }
 
 type Failure struct {
@@ -293,6 +294,9 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 	}
 	if input.Fast {
 		arguments = append(arguments, "--fast")
+	}
+	if accountType == "web" && input.AutoNSFW {
+		arguments = append(arguments, "--auto-nsfw")
 	}
 	command := exec.Command(c.config.Command[0], arguments...)
 	c.appendLogLocked(fmt.Sprintf("[website] 启动协议注册任务: 类型=%s 数量=%d 追加=%d 线程=%d", accountType, input.Count, input.Extra, input.Threads))

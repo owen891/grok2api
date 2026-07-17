@@ -58,6 +58,20 @@ type syncerStub struct {
 	ids    []uint64
 }
 
+type nsfwStub struct {
+	ids     []uint64
+	enabled bool
+	succeed int
+	failed  int
+	err     error
+}
+
+func (s *nsfwStub) BatchSetNSFW(_ context.Context, ids []uint64, enabled bool) (int, int, error) {
+	s.ids = append([]uint64(nil), ids...)
+	s.enabled = enabled
+	return s.succeed, s.failed, s.err
+}
+
 func (s *syncerStub) Sync(_ context.Context, ids ...uint64) accountsyncapp.Result {
 	s.ids = append([]uint64(nil), ids...)
 	return s.result
@@ -97,6 +111,26 @@ func TestProcessOnceRoutesWebCredentialToWebImporter(t *testing.T) {
 		t.Fatalf("web calls = %d, build calls = %d", importer.webCalls, importer.calls)
 	}
 	assertExists(t, filepath.Join(root, "processed", "web.json"))
+}
+
+func TestProcessOnceEnablesNSFWAfterWebImportAndSync(t *testing.T) {
+	root := t.TempDir()
+	importer := &importerStub{result: accountapp.ImportResult{Created: 1, AccountIDs: []uint64{43}}}
+	syncer := &syncerStub{result: accountsyncapp.Result{Succeeded: 1}}
+	nsfw := &nsfwStub{succeed: 1}
+	service := NewService(slog.Default(), importer, syncer, Config{SpoolPath: root, PollInterval: time.Second, FailedRetention: time.Hour}, nsfw)
+	writeIncoming(t, root, "web.json", []byte(`{"provider":"grok_web","auto_nsfw":true,"accounts":[{"sso_token":"synthetic"}]}`))
+
+	if err := service.processOnce(context.Background()); err != nil {
+		t.Fatalf("processOnce() error = %v", err)
+	}
+	result := readResult(t, filepath.Join(root, "processed", "web.result.json"))
+	if result.Status != "processed" || !result.NSFWRequested || result.NSFWEnabled != 1 || result.NSFWFailed != 0 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(nsfw.ids) != 1 || nsfw.ids[0] != 43 || !nsfw.enabled {
+		t.Fatalf("NSFW call = ids=%v enabled=%v", nsfw.ids, nsfw.enabled)
+	}
 }
 
 func TestProcessOnceMovesInitialSyncFailureToFailed(t *testing.T) {

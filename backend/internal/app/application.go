@@ -239,7 +239,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	}
 	registrationController := registrationapp.NewController(logger, registrationConfig)
 	if cfg.Registration.Enabled {
-		registrationSpool = registrationapp.NewService(logger, accountService, accountSyncService, registrationConfig)
+		registrationSpool = registrationapp.NewService(logger, accountService, accountSyncService, registrationConfig, accountService)
 	}
 	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, cfg.Provider.Console.UserAgent)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
