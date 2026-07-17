@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,7 @@ import (
 )
 
 const browserWorkerResponseLimit = 24 << 20
+const browserWorkerRetryDelay = 250 * time.Millisecond
 
 var browserWorkerClient = &http.Client{
 	Transport: &http.Transport{
@@ -51,12 +53,21 @@ type browserWorkerResponse struct {
 	Headers    map[string]string `json:"headers"`
 	BodyBase64 string            `json:"bodyBase64"`
 	Error      string            `json:"error"`
+	Code       string            `json:"code"`
 }
 
 type browserWorkerWarmResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
+	Code  string `json:"code"`
 }
+
+type browserWorkerFailure struct {
+	Code    string
+	Message string
+}
+
+func (e *browserWorkerFailure) Error() string { return e.Message }
 
 func (a *Adapter) openLiteImageUpstream(ctx context.Context, credential account.Credential, spec ModelSpec, prompt string) (*http.Response, *infraegress.Lease, string, error) {
 	cfg := a.config()
@@ -72,28 +83,49 @@ func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, cred
 	if err != nil {
 		return nil, nil, "", err
 	}
-	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, fmt.Sprintf("%d", credential.ID))
-	if err != nil {
-		return nil, nil, "", err
-	}
 	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/rest/app-chat/conversations/new"
-	value := browserWorkerRequest{
-		BaseURL: cfg.BaseURL, Endpoint: endpoint, ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent,
-		CloudflareCookie: lease.CFCookies, SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL,
-		RequestID: newRequestUUID(), TimeoutSeconds: cfg.ImageTimeoutSeconds,
-		Payload: buildWebChatPayload("Drawing: "+prompt, spec.Mode, nil),
-	}
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.ImageTimeoutSeconds+30)*time.Second)
-	result, err := callBrowserWorker(requestCtx, cfg.BrowserWorkerURL, value)
-	if err != nil {
+	var lease *infraegress.Lease
+	var result browserWorkerResponse
+	for egressAttempt := 0; egressAttempt < 2; egressAttempt++ {
+		lease, err = a.egress.Acquire(ctx, domainegress.ScopeWeb, fmt.Sprintf("%d", credential.ID))
+		if err != nil {
+			return nil, nil, endpoint, err
+		}
+		value := browserWorkerRequest{
+			BaseURL: cfg.BaseURL, Endpoint: endpoint, ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent,
+			CloudflareCookie: lease.CFCookies, SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL,
+			RequestID: newRequestUUID(), TimeoutSeconds: cfg.ImageTimeoutSeconds,
+			Payload: buildWebChatPayload("Drawing: "+prompt, spec.Mode, nil),
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.ImageTimeoutSeconds+30)*time.Second)
+		result, err = callBrowserWorker(requestCtx, cfg.BrowserWorkerURL, value)
 		cancel()
+		if err == nil {
+			break
+		}
+		var workerFailure *browserWorkerFailure
+		if errors.As(err, &workerFailure) && workerFailure.Code == "proxy_unavailable" {
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+			lease.Release()
+			if egressAttempt == 0 {
+				continue
+			}
+			return nil, nil, endpoint, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb}
+		}
+		if errors.As(err, &workerFailure) && (workerFailure.Code == "browser_unavailable" || workerFailure.Code == "worker_unavailable") {
+			lease.Release()
+			return nil, nil, endpoint, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb}
+		}
 		lease.Release()
 		if looksLikeAntiBot([]byte(err.Error())) {
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusForbidden, err)
+			if egressAttempt == 0 {
+				continue
+			}
 			return nil, nil, endpoint, fmt.Errorf("%w: %v", errWebAntiBot, err)
 		}
 		return nil, nil, endpoint, fmt.Errorf("Grok Web browser worker: %w", err)
 	}
-	cancel()
 	if result.Error != "" {
 		lease.Release()
 		message := strings.TrimSpace(result.Error)
@@ -136,7 +168,31 @@ func callBrowserWorkerQuota(ctx context.Context, workerURL string, value browser
 func callBrowserWorkerAt(ctx context.Context, workerURL, path string, value browserWorkerRequest) (browserWorkerResponse, error) {
 	var result browserWorkerResponse
 	err := callBrowserWorkerJSON(ctx, workerURL, path, value, &result)
+	if isTransientBrowserWorkerFailure(err) {
+		timer := time.NewTimer(browserWorkerRetryDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		case <-timer.C:
+		}
+		result = browserWorkerResponse{}
+		err = callBrowserWorkerJSON(ctx, workerURL, path, value, &result)
+	}
 	return result, err
+}
+
+func isTransientBrowserWorkerFailure(err error) bool {
+	var failure *browserWorkerFailure
+	if !errors.As(err, &failure) {
+		return false
+	}
+	switch failure.Code {
+	case "proxy_unavailable", "browser_unavailable", "worker_unavailable":
+		return true
+	default:
+		return false
+	}
 }
 
 func callBrowserWorkerWarm(ctx context.Context, workerURL string, value browserWorkerRequest) error {
@@ -162,7 +218,7 @@ func callBrowserWorkerJSON(ctx context.Context, workerURL, path string, value br
 	request.Header.Set("Content-Type", "application/json")
 	response, err := browserWorkerClient.Do(request)
 	if err != nil {
-		return err
+		return &browserWorkerFailure{Code: "worker_unavailable", Message: "browser worker unavailable"}
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, browserWorkerResponseLimit+1))
@@ -178,7 +234,7 @@ func callBrowserWorkerJSON(ctx context.Context, workerURL, path string, value br
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var failure browserWorkerWarmResponse
 		if json.Unmarshal(body, &failure) == nil && strings.TrimSpace(failure.Error) != "" {
-			return fmt.Errorf("%s", strings.TrimSpace(failure.Error))
+			return &browserWorkerFailure{Code: strings.TrimSpace(failure.Code), Message: strings.TrimSpace(failure.Error)}
 		}
 		return fmt.Errorf("HTTP %d", response.StatusCode)
 	}

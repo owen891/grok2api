@@ -1,10 +1,27 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.grok_web_browser_worker import BrowserSession, parse_cookie_header, translated_proxy_url, validate_request
+from scripts.grok_web_browser_worker import (
+    BrowserSession,
+    classify_worker_error,
+    parse_cookie_header,
+    translated_proxy_url,
+    validate_request,
+)
 
 
 class BrowserWorkerValidationTests(unittest.TestCase):
+    def test_worker_error_classification(self):
+        self.assertEqual(
+            classify_worker_error(RuntimeError("unknown error: net::ERR_PROXY_CONNECTION_FAILED")),
+            "proxy_unavailable",
+        )
+        self.assertEqual(
+            classify_worker_error(RuntimeError("Cloudflare challenge did not clear in Chromium")),
+            "anti_bot",
+        )
+        self.assertEqual(classify_worker_error(RuntimeError("Chrome crashed")), "browser_unavailable")
+
     def test_cookie_filter_keeps_only_cloudflare_state(self):
         self.assertEqual(
             parse_cookie_header("cf_clearance=ok; sso=secret; __cf_bm=bm; x-userid=user"),

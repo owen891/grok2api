@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 
+import { classifyGatewayError } from "../src/features/chat/chat-error.ts";
 import { ChatSseUpstreamError, consumeChatSse } from "../src/features/chat/chat-sse.ts";
 import {
+  formatGenerationMeta,
   imageSettingsForModel,
   imageSettingsForAvailableModels,
+  isUsageLimitError,
   normalizeImageSettings,
   QUALITY_IMAGE_MODEL,
+  sanitizeGenerationMeta,
+  sanitizePersistedMessageTask,
   SPEED_IMAGE_MODEL,
   type ImageSettings,
 } from "../src/features/chat/chat-types.ts";
@@ -68,7 +73,74 @@ function testImageSettingsModelCompatibility(): void {
   );
 }
 
+function testGenerationMetadataKeepsActualRouteContext(): void {
+  const meta = sanitizeGenerationMeta({
+    mode: "chat",
+    model: "grok-4.5",
+    clientKeyId: "1",
+    clientKeyName: "chat-ui",
+    clientKeyPrefix: "184fd9b0c80e",
+  });
+  assert.deepEqual(meta, {
+    mode: "chat",
+    model: "grok-4.5",
+    clientKeyId: "1",
+    clientKeyName: "chat-ui",
+    clientKeyPrefix: "184fd9b0c80e",
+    n: undefined,
+    aspectRatio: undefined,
+    resolution: undefined,
+    quality: undefined,
+  });
+  assert.equal(formatGenerationMeta(meta), "对话 · Grok 4.5 · 密钥 · chat-ui (184fd9b0c80e...)");
+}
+
+function testGatewayErrorClassificationUsesStableCodes(): void {
+  assert.deepEqual(
+    classifyGatewayError(403, {
+      error: {
+        code: "upstream_account_permission_denied",
+        message: "上游账号无权访问当前接口",
+        request_id: "req-account",
+      },
+    }, "failed"),
+    {
+      class: "account",
+      message: "上游账号权限或凭据异常，相关账号已进入健康检查流程。",
+      code: "upstream_account_permission_denied",
+      status: 403,
+      requestId: "req-account",
+    },
+  );
+  assert.equal(classifyGatewayError(403, { error: { code: "model_not_allowed" } }, "failed").class, "model");
+  assert.equal(classifyGatewayError(429, { error: { code: "upstream_quota_exhausted" } }, "failed").class, "quota");
+  assert.equal(classifyGatewayError(429, { error: { code: "usage_limit_reached" } }, "failed").class, "quota");
+  assert.equal(classifyGatewayError(503, { error: { code: "egress_unavailable" } }, "failed").class, "egress");
+  assert.equal(classifyGatewayError(401, { error: { code: "invalid_api_key" } }, "failed").class, "auth");
+  assert.equal(classifyGatewayError(403, { error: { code: "upstream_forbidden" } }, "failed").class, "upstream");
+}
+
+function testPersistedTaskRecoveryRules(): void {
+  assert.deepEqual(sanitizePersistedMessageTask({
+    kind: "image",
+    status: "running",
+    requestId: " image_job_1 ",
+    progress: 41.6,
+  }), {
+    kind: "image",
+    status: "running",
+    requestId: "image_job_1",
+    progress: 42,
+  });
+  assert.equal(sanitizePersistedMessageTask({ kind: "chat", status: "running" })?.status, "cancelled");
+  assert.equal(sanitizePersistedMessageTask({ kind: "image", status: "queued" })?.status, "cancelled");
+}
+
 await testFinalFrameAndUtf8ChunkBoundaries();
 await testReaderIsReleasedOnUpstreamError();
 testImageSettingsModelCompatibility();
+testGenerationMetadataKeepsActualRouteContext();
+testGatewayErrorClassificationUsesStableCodes();
+testPersistedTaskRecoveryRules();
+assert.equal(isUsageLimitError("usage_limit_reached", "请求过于频繁"), true);
 console.log("chat SSE regression tests passed");

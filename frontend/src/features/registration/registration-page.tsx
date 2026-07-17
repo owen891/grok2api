@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, CheckCircle2, CircleAlert, Clock3, Play, RefreshCw, RotateCcw, Save, Square, Terminal, XCircle } from "lucide-react";
+import { Activity, CheckCircle2, CircleAlert, Clock3, Mail, Play, Plus, RefreshCw, RotateCcw, Save, Square, Terminal, Trash2, XCircle } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -7,10 +7,13 @@ import { toast } from "sonner";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { ErrorState } from "@/shared/components/data-state";
 import { formatDateTime, formatNumber } from "@/shared/lib/format";
 import {
@@ -21,11 +24,10 @@ import {
   startRegistration,
   stopRegistration,
   updateRegistrationSettings,
+  type EmailSourceDTO,
   type RegistrationSettingsDTO,
   type RegistrationStartInput,
 } from "@/features/registration/registration-api";
-
-const providers = ["tempmail_lol", "duckmail", "yyds", "cloudflare", "cloudmail"] as const;
 
 export function RegistrationPage() {
   const { t, i18n } = useTranslation();
@@ -99,12 +101,44 @@ export function RegistrationPage() {
     setSettingsDirty(true);
   }
 
+  function updateEmailSource(id: string, patch: Partial<EmailSourceDTO>): void {
+    if (!settings) return;
+    updateDraft("emailSources", settings.emailSources.map((source) => source.id === id ? { ...source, ...patch } : source));
+  }
+
+  function addEmailSource(): void {
+    if (!settings || settings.emailSources.length >= 2) return;
+    const type: EmailSourceDTO["type"] = settings.emailSources.some((source) => source.type === "tempmail_lol") ? "yyds" : "tempmail_lol";
+    const nextID = Array.from({ length: 10 }, (_, index) => `source-new-${index + 1}`).find((id) => !settings.emailSources.some((source) => source.id === id)) ?? "source-new";
+    const source: EmailSourceDTO = {
+      id: nextID,
+      type,
+      enabled: true,
+      apiBase: type === "tempmail_lol" ? "https://api.tempmail.lol" : "https://maliapi.215.im/v1",
+      apiKey: "",
+      jwt: "",
+      domain: "",
+      prefix: type === "tempmail_lol" ? "xai" : "",
+      apiKeyConfigured: false,
+      jwtConfigured: false,
+    };
+    updateDraft("emailSources", [...settings.emailSources, source]);
+  }
+
+  function removeEmailSource(id: string): void {
+    if (!settings || settings.emailSources.length <= 1) return;
+    const next = settings.emailSources.filter((source) => source.id !== id);
+    if (!next.some((source) => source.enabled)) next[0] = { ...next[0], enabled: true };
+    updateDraft("emailSources", next);
+  }
+
   function updateStart<K extends keyof RegistrationStartInput>(key: K, value: RegistrationStartInput[K]): void {
     setStartInput((current) => ({ ...current, [key]: value }));
   }
 
   const status = statusQuery.data;
   const settings = draft ?? settingsQuery.data ?? null;
+  const enabledEmailSourceCount = settings?.emailSources.filter((source) => source.enabled).length ?? 0;
   const progress = status?.progress;
   const progressPercent = progress?.percent ?? 0;
   const attempted = progress?.attempted ?? 0;
@@ -257,39 +291,58 @@ export function RegistrationPage() {
               </div>
             </div>
             {settings ? (
-              <div className="grid gap-4 sm:grid-cols-2">
-                <SelectField label={t("registration.engine")} value={settings.engine} disabled={busy} options={[
-                  { value: "browser", label: t("registration.engineBrowser") },
-                  { value: "protocol", label: t("registration.engineProtocol") },
-                ]} onChange={(value) => updateDraft("engine", value)} />
-                <SelectField label={t("registration.emailProvider")} value={settings.emailProvider} disabled={busy} options={providers.map((value) => ({ value, label: value }))} onChange={(value) => updateDraft("emailProvider", value)} />
-                <TextField label={t("registration.fallbacks")} value={settings.emailProviderFallbacks.join(", ")} disabled={busy} placeholder="yyds, cloudmail" onChange={(value) => updateDraft("emailProviderFallbacks", value.split(",").map((item) => item.trim()).filter(Boolean))} />
-                <TextField label={t("registration.tempmailAPI")} value={settings.tempmailLolApiBase} disabled={busy} onChange={(value) => updateDraft("tempmailLolApiBase", value)} />
-                <TextField label={t("registration.tempmailDomain")} value={settings.tempmailLolDomain} disabled={busy} placeholder={t("registration.optional")} onChange={(value) => updateDraft("tempmailLolDomain", value)} />
-                <TextField label={t("registration.tempmailPrefix")} value={settings.tempmailLolPrefix} disabled={busy} placeholder={t("registration.optional")} onChange={(value) => updateDraft("tempmailLolPrefix", value)} />
-                <TextField label={t("registration.proxy")} value={settings.proxy} disabled={busy} placeholder={t("registration.direct")} onChange={(value) => updateDraft("proxy", value)} />
+              <div className="space-y-6">
+                <div className="rounded-md border p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Mail className="size-4 text-muted-foreground" />
+                      <h3 className="text-sm font-medium">{t("registration.emailSources")}</h3>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline">{t("registration.emailSourcesEnabled", { enabled: enabledEmailSourceCount, total: settings.emailSources.length })}</Badge>
+                      <Button variant="outline" size="sm" disabled={busy || settings.emailSources.length >= 2} onClick={addEmailSource}>
+                        <Plus />{t("registration.addEmailSource")}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                    {settings.emailSources.map((source, index) => (
+                      <EmailSourceCard
+                        key={source.id}
+                        source={source}
+                        index={index}
+                        disabled={busy}
+                        canDisable={!source.enabled || enabledEmailSourceCount > 1}
+                        canDelete={settings.emailSources.length > 1}
+                        usedTypes={settings.emailSources.filter((item) => item.id !== source.id).map((item) => item.type)}
+                        onChange={(patch) => updateEmailSource(source.id, patch)}
+                        onDelete={() => removeEmailSource(source.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid gap-4 border-t pt-5 sm:grid-cols-2">
+                  <SelectField label={t("registration.captchaSolver")} value={settings.captchaSolver} disabled={busy} options={[
+                    { value: "local", label: t("registration.captchaLocal") },
+                    { value: "yescaptcha", label: t("registration.captchaYes") },
+                  ]} onChange={(value) => updateDraft("captchaSolver", value)} />
+                  {settings.captchaSolver === "local" ? (
+                    <TextField label={t("registration.captchaEndpoint")} value={settings.captchaEndpoint} disabled={busy} placeholder="docker://grokcli-2api:5072" onChange={(value) => updateDraft("captchaEndpoint", value)} />
+                  ) : (
+                    <SecretField label={t("registration.yescaptchaApiKey")} value={settings.yescaptchaApiKey} configured={settings.yescaptchaApiKeyConfigured} disabled={busy} onChange={(value) => updateDraft("yescaptchaApiKey", value)} />
+                  )}
+                  <TextField className="sm:col-span-2" label={t("registration.proxy")} value={settings.proxy} disabled={busy} placeholder={t("registration.direct")} onChange={(value) => updateDraft("proxy", value)} />
+                </div>
               </div>
             ) : <Spinner />}
           </section>
 
-          {startInput.accountType === "build" ? <section className="space-y-5 border-t pt-8">
-            <SectionHeading title={t("registration.cpaTitle")} description={t("registration.cpaDescription")} />
-            {settings ? (
-              <div className="grid gap-4 sm:grid-cols-2">
-                <TextField className="sm:col-span-2" label={t("registration.cpaBaseURL")} value={settings.cpaBaseURL} disabled={busy} onChange={(value) => updateDraft("cpaBaseURL", value)} />
-                <TextField label={t("registration.cpaProxy")} value={settings.cpaProxy} disabled={busy} placeholder={t("registration.sameProxy")} onChange={(value) => updateDraft("cpaProxy", value)} />
-                <div className="sm:col-span-2 grid gap-3 border-t pt-4 sm:grid-cols-3">
-                  <ToggleField label={t("registration.cpaProbeChat")} checked={settings.cpaProbeChat} disabled={busy} onCheckedChange={(value) => updateDraft("cpaProbeChat", value)} />
-                  <ToggleField label={t("registration.cpaCloseBrowser")} checked={settings.cpaCloseBrowserAfterAuth} disabled={busy} onCheckedChange={(value) => updateDraft("cpaCloseBrowserAfterAuth", value)} />
-                  <ToggleField label={t("registration.cpaHeadless")} checked={settings.cpaHeadless} disabled={busy} onCheckedChange={(value) => updateDraft("cpaHeadless", value)} />
-                </div>
-              </div>
-            ) : <Spinner />}
-          </section> : (
+          {startInput.accountType === "web" ? (
             <section className="space-y-2 border-t pt-8">
               <SectionHeading title={t("registration.webOutputTitle")} description={t("registration.webOutputDescription")} />
             </section>
-          )}
+          ) : null}
 
           {checkResult ? (
             <section className="space-y-4 border-t pt-8">
@@ -337,6 +390,92 @@ export function RegistrationPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  );
+}
+
+function EmailSourceCard({ source, index, disabled, canDisable, canDelete, usedTypes, onChange, onDelete }: {
+  source: EmailSourceDTO;
+  index: number;
+  disabled: boolean;
+  canDisable: boolean;
+  canDelete: boolean;
+  usedTypes: EmailSourceDTO["type"][];
+  onChange: (patch: Partial<EmailSourceDTO>) => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const providerName = source.type === "tempmail_lol" ? "TempMail.lol" : "YYDS Mail";
+  const available = source.type === "tempmail_lol" || Boolean(source.apiKey.trim() || source.apiKeyConfigured || source.jwt.trim() || source.jwtConfigured);
+
+  function changeType(type: EmailSourceDTO["type"]): void {
+    onChange({
+      type,
+      apiBase: type === "tempmail_lol" ? "https://api.tempmail.lol" : "https://maliapi.215.im/v1",
+      apiKey: "",
+      jwt: "",
+      domain: "",
+      prefix: type === "tempmail_lol" ? "xai" : "",
+      apiKeyConfigured: false,
+      jwtConfigured: false,
+    });
+  }
+
+  return (
+    <div className="rounded-md border bg-muted/20 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h4 className="text-sm font-semibold">{t("registration.emailSourceNumber", { number: index + 1 })}</h4>
+          <Badge variant="outline" className="font-normal">{providerName}</Badge>
+          <Badge variant={available ? "secondary" : "outline"} className={available ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300" : "text-muted-foreground"}>
+            {t(available ? "registration.emailSourceAvailable" : "registration.emailSourceNeedsConfig")}
+          </Badge>
+        </div>
+        <div className="flex items-center gap-3">
+          <Label className="flex items-center gap-2 text-xs font-normal">
+            <Checkbox
+              checked={source.enabled}
+              disabled={disabled || !canDisable}
+              onCheckedChange={(checked) => onChange({ enabled: checked === true })}
+            />
+            {t("common.enable")}
+          </Label>
+          <Button variant="ghost" size="icon" disabled={disabled || !canDelete} onClick={onDelete} aria-label={t("registration.deleteEmailSource")} title={t("registration.deleteEmailSource")}>
+            <Trash2 />
+          </Button>
+        </div>
+      </div>
+
+      <div className="my-4 flex items-center gap-3">
+        <span className="text-[11px] text-muted-foreground">{t("registration.emailSourceBasic")}</span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label className="text-xs">{t("registration.emailSourceType")}</Label>
+          <Select value={source.type} disabled={disabled} onValueChange={(value) => changeType(value as EmailSourceDTO["type"])}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="tempmail_lol" disabled={usedTypes.includes("tempmail_lol")}>TempMail.lol</SelectItem>
+              <SelectItem value="yyds" disabled={usedTypes.includes("yyds")}>YYDS Mail</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <TextField label={t("registration.emailSourceAPIBase")} value={source.apiBase} disabled={disabled} onChange={(value) => onChange({ apiBase: value })} />
+        <SecretField label={t("registration.emailSourceAPIKey")} value={source.apiKey} configured={source.apiKeyConfigured} disabled={disabled} onChange={(value) => onChange({ apiKey: value })} />
+        {source.type === "yyds" ? (
+          <SecretField label={t("registration.yydsJwt")} value={source.jwt} configured={source.jwtConfigured} disabled={disabled} onChange={(value) => onChange({ jwt: value })} />
+        ) : (
+          <TextField label={t("registration.tempmailPrefix")} value={source.prefix} disabled={disabled} placeholder="xai" onChange={(value) => onChange({ prefix: value })} />
+        )}
+        {source.type === "tempmail_lol" ? (
+          <div className="space-y-2 sm:col-span-2">
+            <Label className="text-xs">{t("registration.emailSourceDomains")}</Label>
+            <Textarea value={source.domain} disabled={disabled} placeholder={t("registration.emailSourceDomainsPlaceholder")} onChange={(event) => onChange({ domain: event.target.value })} />
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -397,6 +536,11 @@ function NumberField({ label, value, min, max, disabled, onChange }: { label: st
 
 function TextField({ label, value, disabled, placeholder, className, onChange }: { label: string; value: string; disabled: boolean; placeholder?: string; className?: string; onChange: (value: string) => void }) {
   return <div className={`space-y-2 ${className ?? ""}`}><Label className="text-xs">{label}</Label><Input value={value} disabled={disabled} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} /></div>;
+}
+
+function SecretField({ label, value, configured, disabled, onChange }: { label: string; value: string; configured: boolean; disabled: boolean; onChange: (value: string) => void }) {
+  const { t } = useTranslation();
+  return <div className="space-y-2"><Label className="text-xs">{label}</Label><Input type="password" autoComplete="off" value={value} disabled={disabled} placeholder={configured ? t("registration.secretConfigured") : t("registration.secretMissing")} onChange={(event) => onChange(event.target.value)} /></div>;
 }
 
 function SelectField({ label, value, disabled, options, onChange }: { label: string; value: string; disabled: boolean; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {

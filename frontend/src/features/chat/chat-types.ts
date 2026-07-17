@@ -2,7 +2,16 @@ export type ChatMode = "chat" | "image";
 
 export type ImageQuality = "speed" | "quality";
 
-export type ChatErrorClass = "auth" | "upstream" | "timeout" | "rate" | "unknown";
+export type ChatErrorClass =
+  | "auth"
+  | "account"
+  | "model"
+  | "quota"
+  | "egress"
+  | "upstream"
+  | "timeout"
+  | "rate"
+  | "unknown";
 
 export type ImageSettings = {
   quality: ImageQuality;
@@ -20,10 +29,20 @@ export type ChatImageRef = {
 export type MessageGenerationMeta = {
   mode: ChatMode;
   model: string;
+  clientKeyId?: string;
+  clientKeyName?: string;
+  clientKeyPrefix?: string;
   n?: number;
   aspectRatio?: string;
   resolution?: string;
   quality?: ImageQuality;
+};
+
+export type MessageTask = {
+  kind: "chat" | "image";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  requestId?: string;
+  progress?: number;
 };
 
 export type ChatMessage = {
@@ -33,13 +52,62 @@ export type ChatMessage = {
   images?: ChatImageRef[];
   createdAt: number;
   streaming?: boolean;
+  task?: MessageTask;
   generation?: MessageGenerationMeta;
   error?: {
     class: ChatErrorClass;
     message: string;
     code?: string;
+    requestId?: string;
   };
 };
+
+export function isUsageLimitError(code?: string, message?: string): boolean {
+  return /usage[_ -]?limit|图片额度.*用完/i.test(`${code ?? ""} ${message ?? ""}`);
+}
+
+export function sanitizePersistedMessageTask(raw: unknown): MessageTask | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  if (value.kind !== "chat" && value.kind !== "image") return undefined;
+  const statuses: MessageTask["status"][] = ["queued", "running", "completed", "failed", "cancelled"];
+  if (!statuses.includes(value.status as MessageTask["status"])) return undefined;
+  const requestId = typeof value.requestId === "string" && value.requestId.trim()
+    ? value.requestId.trim()
+    : undefined;
+  const progress = typeof value.progress === "number" && Number.isFinite(value.progress)
+    ? Math.min(100, Math.max(0, Math.round(value.progress)))
+    : undefined;
+  const interrupted =
+    (value.status === "queued" || value.status === "running") &&
+    (value.kind === "chat" || !requestId);
+  return {
+    kind: value.kind,
+    status: interrupted ? "cancelled" : value.status as MessageTask["status"],
+    requestId,
+    progress,
+  };
+}
+
+export function sanitizeGenerationMeta(raw: unknown): MessageGenerationMeta | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  if (value.mode !== "chat" && value.mode !== "image") return undefined;
+  const count = typeof value.n === "number" && Number.isFinite(value.n)
+    ? Math.min(4, Math.max(1, Math.round(value.n)))
+    : undefined;
+  return {
+    mode: value.mode,
+    model: typeof value.model === "string" ? value.model.trim() : "",
+    clientKeyId: typeof value.clientKeyId === "string" ? value.clientKeyId : undefined,
+    clientKeyName: typeof value.clientKeyName === "string" ? value.clientKeyName.trim() : undefined,
+    clientKeyPrefix: typeof value.clientKeyPrefix === "string" ? value.clientKeyPrefix.trim() : undefined,
+    n: count,
+    aspectRatio: typeof value.aspectRatio === "string" ? value.aspectRatio : undefined,
+    resolution: typeof value.resolution === "string" ? value.resolution : undefined,
+    quality: value.quality === "quality" || value.quality === "speed" ? value.quality : undefined,
+  };
+}
 
 export type ChatSession = {
   id: string;
@@ -154,6 +222,9 @@ export function displayModelName(modelId: string): string {
 
 export function formatGenerationMeta(meta?: MessageGenerationMeta): string {
   if (!meta) return "";
+  const key = meta.clientKeyName
+    ? `${meta.clientKeyName}${meta.clientKeyPrefix ? ` (${meta.clientKeyPrefix}...)` : ""}`
+    : "";
   if (meta.mode === "image") {
     const parts = [
       displayModelName(meta.model),
@@ -162,9 +233,10 @@ export function formatGenerationMeta(meta?: MessageGenerationMeta): string {
       typeof meta.n === "number" ? `${meta.n}张` : undefined,
       meta.quality === "quality" ? "高质量" : meta.quality === "speed" ? "快速" : undefined,
     ].filter(Boolean);
+    if (key) parts.push(`密钥 · ${key}`);
     return parts.join(" · ");
   }
-  return displayModelName(meta.model);
+  return [displayModelName(meta.model), key ? `密钥 · ${key}` : ""].filter(Boolean).join(" · ");
 }
 
 export function deriveSessionTitle(prompt: string, fallback = "新会话"): string {

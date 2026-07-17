@@ -88,6 +88,17 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.QuotaExhausted = failure.FreeQuotaExhausted || isPaidQuotaExhaustion(metadataText)
 		failure.CredentialRejected = !failure.QuotaExhausted && containsAny(metadataText, "authentication", "unauthorized", "invalid token", "token expired")
 		failure.AccountScoped = failure.PermanentAccountDenial || failure.QuotaExhausted || failure.CredentialRejected || isAccountScopedForbidden(metadataText)
+		switch {
+		case failure.PermanentAccountDenial:
+			failure.Code = "upstream_account_permission_denied"
+			failure.PublicMessage = "上游账号无权访问当前接口"
+		case failure.CredentialRejected:
+			failure.Code = "upstream_credential_rejected"
+			failure.PublicMessage = "上游账号凭据被拒绝"
+		case failure.QuotaExhausted:
+			failure.Code = "upstream_quota_exhausted"
+			failure.PublicMessage = "上游账号额度不足或等待恢复"
+		}
 	case http.StatusTooManyRequests:
 		failure.Code = "upstream_rate_limited"
 		failure.PublicMessage = "上游请求频率受限"
@@ -95,6 +106,10 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.ModelQuotaExhausted = isModelQuotaExhaustion(metadataText)
 		failure.FreeQuotaExhausted = failure.ModelQuotaExhausted || isFreeQuotaExhaustion(metadataText)
 		failure.QuotaExhausted = failure.FreeQuotaExhausted || isPaidQuotaExhaustion(metadataText)
+		if failure.QuotaExhausted {
+			failure.Code = "upstream_quota_exhausted"
+			failure.PublicMessage = "上游账号额度不足或等待恢复"
+		}
 	default:
 		failure.Code = "upstream_server_error"
 		failure.PublicMessage = "上游服务暂时异常"
@@ -152,6 +167,9 @@ func isAccountScopedForbidden(text string) bool {
 }
 
 func isPermanentAccountDenial(text string) bool {
+	if strings.Contains(text, "permission_denied") {
+		return true
+	}
 	if strings.Contains(text, "access to the chat endpoint is denied") {
 		return true
 	}
@@ -163,7 +181,15 @@ func isPaidQuotaExhaustion(text string) bool {
 }
 
 func isFreeQuotaExhaustion(text string) bool {
-	return containsAny(text, "subscription:free-usage-exhausted", "used all the included free usage for model")
+	return containsAny(
+		text,
+		"subscription:free-usage-exhausted",
+		"used all the included free usage for model",
+		"usage_limit_reached",
+		"usage limit reached",
+		"reached your usage limit",
+		"图片额度已用完",
+	)
 }
 
 func isModelQuotaExhaustion(text string) bool {

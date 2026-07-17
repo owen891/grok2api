@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, ArrowDown, ArrowUp, Box, BrainCircuit, CircleCheck, CircleDollarSign, CornerDownRight, Database, Info, RefreshCw, Search, type LucideIcon } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,9 +26,10 @@ import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/tabl
 
 export function RequestAuditsPage() {
   const { t, i18n } = useTranslation();
+  const [searchParams] = useSearchParams();
   const [cursors, setCursors] = useState<string[]>([""]);
   const [pageSize, setPageSize] = useState(50);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(() => searchParams.get("search")?.trim() ?? "");
   const [modelFilter, setModelFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [modeFilter, setModeFilter] = useState("");

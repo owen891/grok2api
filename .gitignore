@@ -62,5 +62,11 @@ __pycache__/
 /*.err
 /*.out.bak.*
 
+# Local release/build artifacts
+/build/
+/deploy_artifact/app/
+/deploy_artifact/*.tar.gz
+/.planning/
+
 # Local debugging captures
 /scripts/flaresolverr_grok_solution.json

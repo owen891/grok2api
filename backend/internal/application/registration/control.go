@@ -762,6 +762,12 @@ func (c *Controller) workerEnvironment() []string {
 		"REGISTRATION_CPA_HOTLOAD_DIR":       filepath.Join(c.config.SpoolPath, "incoming"),
 		"REGISTRATION_DISABLE_REMOTE_IMPORT": "1",
 	}
+	if mode := strings.TrimSpace(c.config.BrowserMode); mode != "" {
+		values["REGISTRATION_BROWSER_MODE"] = mode
+	}
+	if path := strings.TrimSpace(c.config.BrowserPath); path != "" {
+		values["REGISTRATION_BROWSER_PATH"] = path
+	}
 	for key, value := range values {
 		environment = setEnvironment(environment, key, value)
 	}

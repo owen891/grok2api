@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +23,8 @@ import (
 
 const DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 const nodeSnapshotTTL = time.Second
+const coolingRecoveryProbeInterval = 5 * time.Second
+const coolingRecoveryDialTimeout = 500 * time.Millisecond
 
 type Lease struct {
 	NodeID    uint64
@@ -72,6 +76,7 @@ type Manager struct {
 	clients    map[uint64]cachedClient
 	inflight   map[uint64]int
 	nodes      map[domain.Scope]cachedNodeSnapshot
+	recovery   map[uint64]time.Time
 	nodeLoads  singleflight.Group
 }
 
@@ -87,7 +92,7 @@ type cachedNodeSnapshot struct {
 }
 
 func NewManager(repository repository.EgressRepository, cipher *security.Cipher) *Manager {
-	return &Manager{repository: repository, cipher: cipher, clients: make(map[uint64]cachedClient), inflight: make(map[uint64]int), nodes: make(map[domain.Scope]cachedNodeSnapshot)}
+	return &Manager{repository: repository, cipher: cipher, clients: make(map[uint64]cachedClient), inflight: make(map[uint64]int), nodes: make(map[domain.Scope]cachedNodeSnapshot), recovery: make(map[uint64]time.Time)}
 }
 
 func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
@@ -114,9 +119,13 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 				continue
 			}
 			configured = true
-			if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) {
-				candidateAvailable = append(candidateAvailable, node)
+			if node.CooldownUntil != nil && now.Before(*node.CooldownUntil) {
+				if recovered, ok := m.tryRecoverCoolingNode(ctx, node, now); ok {
+					candidateAvailable = append(candidateAvailable, recovered)
+				}
+				continue
 			}
+			candidateAvailable = append(candidateAvailable, node)
 		}
 		if len(candidateAvailable) > 0 {
 			available = candidateAvailable
@@ -177,6 +186,79 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 			m.mu.Unlock()
 		})
 	}}, true, nil
+}
+
+// tryRecoverCoolingNode lets a restarted proxy rejoin before its exponential
+// cooldown expires. Probes are throttled and only test the configured proxy's
+// TCP listener; no upstream request or credential is sent.
+func (m *Manager) tryRecoverCoolingNode(ctx context.Context, node domain.Node, now time.Time) (domain.Node, bool) {
+	if node.ID == 0 || node.EncryptedProxyURL == "" || m.cipher == nil || !m.claimRecoveryProbe(node.ID, now) {
+		return domain.Node{}, false
+	}
+	proxyURL, err := m.cipher.Decrypt(node.EncryptedProxyURL)
+	if err != nil {
+		return domain.Node{}, false
+	}
+	proxyURL, err = application.NormalizeProxyURL(proxyURL)
+	if err != nil {
+		return domain.Node{}, false
+	}
+	address, err := proxyDialAddress(proxyURL)
+	if err != nil {
+		return domain.Node{}, false
+	}
+	connection, err := (&net.Dialer{Timeout: coolingRecoveryDialTimeout}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		return domain.Node{}, false
+	}
+	_ = connection.Close()
+	node.Health = max(0.5, node.Health)
+	node.FailureCount = 0
+	node.CooldownUntil = nil
+	node.LastError = ""
+	node.UpdatedAt = now
+	updated, err := m.repository.UpdateEgressNode(ctx, node)
+	if err != nil {
+		return domain.Node{}, false
+	}
+	m.mu.Lock()
+	delete(m.recovery, node.ID)
+	m.invalidateClientLocked(node.ID)
+	m.mu.Unlock()
+	m.invalidateNodes(node.Scope)
+	return updated, true
+}
+
+func (m *Manager) claimRecoveryProbe(nodeID uint64, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.recovery == nil {
+		m.recovery = make(map[uint64]time.Time)
+	}
+	if previous := m.recovery[nodeID]; !previous.IsZero() && now.Sub(previous) < coolingRecoveryProbeInterval {
+		return false
+	}
+	m.recovery[nodeID] = now
+	return true
+}
+
+func proxyDialAddress(proxyURL string) (string, error) {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil || parsed.Hostname() == "" {
+		return "", errors.New("代理地址格式无效")
+	}
+	port := parsed.Port()
+	if port == "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			port = "1080"
+		}
+	}
+	return net.JoinHostPort(parsed.Hostname(), port), nil
 }
 
 func (m *Manager) listNodes(ctx context.Context, scope domain.Scope, now time.Time) ([]domain.Node, error) {

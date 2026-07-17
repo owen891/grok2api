@@ -186,6 +186,47 @@ func TestSelectorClaimsPaidBillingProbeAfterPeriodEnd(t *testing.T) {
 	}
 }
 
+func TestSelectorPinnedInferenceRejectsRecoveryAccount(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "pinned-recovery.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "recovering", SourceKey: "recovering", EncryptedAccessToken: "encrypted",
+		AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	due := now.Add(-time.Minute)
+	if err := accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{
+		AccountID: value.ID, Kind: account.QuotaRecoveryKindPaid, Status: account.QuotaRecoveryStatusExhausted,
+		NextProbeAt: &due, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	_, err = selector.AcquirePinned(ctx, account.ProviderBuild, value.ID, "grok-test", "", true)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionQuotaExhausted {
+		t.Fatalf("error = %v, want quota exhausted", err)
+	}
+	recovery, err := accounts.GetQuotaRecovery(ctx, value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.Status != account.QuotaRecoveryStatusExhausted {
+		t.Fatalf("recovery status = %s, want exhausted", recovery.Status)
+	}
+}
+
 func TestSelectorOnlyUsesAccountsSupportingRequestedModel(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "selector-model.db"))
@@ -415,6 +456,57 @@ func TestSelectorUsesModelScopedRecentPerformance(t *testing.T) {
 	}
 	if values[0].Credential.ID != 1 {
 		t.Fatalf("performance leaked across models: %#v", values)
+	}
+}
+
+func TestSelectorRoundRobinsOnlyHealthyAccountsInIDOrder(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "round-robin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	create := func(name string, authStatus account.AuthStatus, priority int) account.Credential {
+		t.Helper()
+		value, _, createErr := accounts.UpsertByIdentity(ctx, account.Credential{
+			Provider: account.ProviderBuild, Name: name, SourceKey: name, EncryptedAccessToken: "encrypted",
+			Enabled: true, AuthStatus: authStatus, Priority: priority, MaxConcurrent: 2,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		return value
+	}
+	first := create("first", account.AuthStatusActive, 1)
+	second := create("second", account.AuthStatusActive, 1000)
+	third := create("third", account.AuthStatusActive, 10)
+	disabled := create("disabled", account.AuthStatusActive, 2000)
+	disabled.Enabled = false
+	if _, err := accounts.Update(ctx, disabled); err != nil {
+		t.Fatal(err)
+	}
+	create("reauth", account.AuthStatusReauthRequired, 2000)
+	cooling := create("cooling", account.AuthStatusActive, 2000)
+	until := time.Now().UTC().Add(time.Hour)
+	if err := accounts.UpdateHealth(ctx, cooling.ID, 1, &until, "cooling", false); err != nil {
+		t.Fatal(err)
+	}
+
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	want := []uint64{first.ID, second.ID, third.ID, first.ID, second.ID, third.ID}
+	for index, expected := range want {
+		lease, acquireErr := selector.Acquire(ctx, account.ProviderBuild, "grok-test", "", "", nil, false)
+		if acquireErr != nil {
+			t.Fatalf("acquire %d: %v", index, acquireErr)
+		}
+		if lease.Credential.ID != expected {
+			t.Fatalf("acquire %d selected account %d, want %d", index, lease.Credential.ID, expected)
+		}
+		lease.Release()
 	}
 }
 

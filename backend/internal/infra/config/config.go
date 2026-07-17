@@ -111,6 +111,8 @@ type RegistrationConfig struct {
 	WorkDir         string   `yaml:"workDir"`
 	ConfigPath      string   `yaml:"configPath"`
 	Command         []string `yaml:"command"`
+	BrowserMode     string   `yaml:"browserMode"`
+	BrowserPath     string   `yaml:"browserPath"`
 }
 
 type ProviderConfig struct {
@@ -402,6 +404,9 @@ func (c Config) Validate() error {
 		}
 		if strings.TrimSpace(c.Registration.WorkDir) == "" || strings.TrimSpace(c.Registration.ConfigPath) == "" || len(c.Registration.Command) == 0 || strings.TrimSpace(c.Registration.Command[0]) == "" {
 			return errors.New("registration worker 工作目录、配置路径和命令不能为空")
+		}
+		if mode := strings.TrimSpace(c.Registration.BrowserMode); mode != "" && mode != "xvfb" && mode != "headless" && mode != "headed" && mode != "background" {
+			return errors.New("registration.browserMode 必须是 xvfb、headless、headed 或 background")
 		}
 	}
 	providerURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Build.BaseURL))

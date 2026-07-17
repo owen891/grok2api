@@ -703,6 +703,20 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	retryResult.Finalize(Usage{}, "", "")
 	_ = retryResult.Body.Close()
 	adapter.SetResponseStatuses()
+	adapter.SetResponseStatuses(http.StatusTooManyRequests, http.StatusTooManyRequests)
+	_, err = service.GenerateImage(ctx, ImageGenerationInput{
+		RequestID: "req-image-rate-limited", ClientKey: key, PublicModel: "grok-imagine-image-quality",
+		Prompt: "test", Count: 1, Resolution: "1k", ResponseFormat: "url",
+	})
+	var rateFailure *UpstreamFailure
+	if !errors.As(err, &rateFailure) || rateFailure.Code != "upstream_rate_limited" {
+		t.Fatalf("image rate failure = %#v, err=%v", rateFailure, err)
+	}
+	logs, total, err = auditRepo.List(ctx, 0, 10)
+	if err != nil || total != 7 || logs[0].RequestID != "req-image-rate-limited" || logs[0].ErrorCode != "upstream_rate_limited" {
+		t.Fatalf("image rate audit = %#v, total=%d, err=%v", logs, total, err)
+	}
+	adapter.SetResponseStatuses()
 	billingBeforeFailure, err = keyRepo.Get(ctx, key.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -719,7 +733,7 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 		t.Fatalf("image failure switched accounts after generation started: %#v", attempts)
 	}
 	logs, total, err = auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 7 || len(logs) != 7 {
+	if err != nil || total != 8 || len(logs) != 8 {
 		t.Fatalf("failure audit logs=%#v total=%d err=%v", logs, total, err)
 	}
 	failureAudit := logs[0]

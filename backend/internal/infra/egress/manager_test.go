@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -54,6 +55,36 @@ func TestConfiguredCoolingAppNodesNeverFallBackToDirect(t *testing.T) {
 		if !errors.As(err, &unavailable) || unavailable.Scope != domain.ScopeWeb {
 			t.Fatalf("error = %T %v", err, err)
 		}
+	}
+}
+
+func TestCoolingProxyRecoversAsSoonAsListenerReturns(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	encryptedProxy, err := cipher.Encrypt("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Minute)
+	repository := &mutableEgressRepository{node: domain.Node{
+		ID: 1, Name: "recovering-proxy", Scope: domain.ScopeBuild, Enabled: true, Health: 0.2,
+		FailureCount: 3, CooldownUntil: &until, LastError: "transport error", EncryptedProxyURL: encryptedProxy,
+	}}
+	manager := NewManager(repository, cipher)
+	lease, err := manager.Acquire(context.Background(), domain.ScopeBuild, "account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Release()
+	if repository.updates != 1 || repository.node.CooldownUntil != nil || repository.node.FailureCount != 0 || repository.node.LastError != "" || repository.node.Health < 0.5 {
+		t.Fatalf("recovered node = %#v, updates=%d", repository.node, repository.updates)
 	}
 }
 

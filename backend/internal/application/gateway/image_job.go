@@ -157,7 +157,12 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 			s.deferVideoJob(ctx, job)
 			return
 		}
-		s.failImageJob(ctx, job, "generation_failed", err)
+		code, message := "generation_failed", err.Error()
+		var failure *UpstreamFailure
+		if errors.As(err, &failure) {
+			code, message = failure.Code, failure.PublicMessage
+		}
+		s.failImageJob(ctx, job, code, errors.New(message))
 		return
 	}
 	body, readErr := io.ReadAll(io.LimitReader(result.Body, maxImageJobOutputBytes+1))

@@ -99,6 +99,8 @@ func clientErrorMessage(err error) string {
 }
 
 func writeOpenAIError(c *gin.Context, status int, code, message string) {
+	requestID, _ := c.Get(RequestIDKey)
+	requestIDValue, _ := requestID.(string)
 	if c.Request.URL.Path == "/v1/messages" {
 		errorType := "authentication_error"
 		if status == http.StatusTooManyRequests {
@@ -106,8 +108,16 @@ func writeOpenAIError(c *gin.Context, status int, code, message string) {
 		} else if status >= 500 {
 			errorType = "api_error"
 		}
-		c.AbortWithStatusJSON(status, gin.H{"type": "error", "error": gin.H{"type": errorType, "message": message}})
+		body := gin.H{"type": "error", "error": gin.H{"type": errorType, "message": message}}
+		if requestIDValue != "" {
+			body["request_id"] = requestIDValue
+		}
+		c.AbortWithStatusJSON(status, body)
 		return
 	}
-	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": "invalid_request_error", "code": code, "param": nil}})
+	errorBody := gin.H{"message": message, "type": "invalid_request_error", "code": code, "param": nil}
+	if requestIDValue != "" {
+		errorBody["request_id"] = requestIDValue
+	}
+	c.AbortWithStatusJSON(status, gin.H{"error": errorBody})
 }

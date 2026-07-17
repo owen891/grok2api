@@ -107,6 +107,7 @@ func TestGatewayErrorPreservesSanitizedUpstreamClassification(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	openAIRouter := gin.New()
 	openAIRouter.GET("/", func(c *gin.Context) {
+		c.Set("requestId", "req-classified-403")
 		writeGatewayError(c, &gateway.UpstreamFailure{
 			HTTPStatus: http.StatusForbidden, Code: "upstream_forbidden", PublicMessage: "上游拒绝了该请求",
 			Cause: errors.New("secret upstream response"),
@@ -114,7 +115,7 @@ func TestGatewayErrorPreservesSanitizedUpstreamClassification(t *testing.T) {
 	})
 	openAIRecorder := httptest.NewRecorder()
 	openAIRouter.ServeHTTP(openAIRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
-	if openAIRecorder.Code != http.StatusForbidden || !strings.Contains(openAIRecorder.Body.String(), `"code":"upstream_forbidden"`) || strings.Contains(openAIRecorder.Body.String(), "secret") {
+	if openAIRecorder.Code != http.StatusForbidden || !strings.Contains(openAIRecorder.Body.String(), `"code":"upstream_forbidden"`) || !strings.Contains(openAIRecorder.Body.String(), `"request_id":"req-classified-403"`) || strings.Contains(openAIRecorder.Body.String(), "secret") {
 		t.Fatalf("OpenAI status=%d body=%s", openAIRecorder.Code, openAIRecorder.Body.String())
 	}
 
@@ -146,6 +147,12 @@ func TestGatewayErrorExplainsUnavailableEgress(t *testing.T) {
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"egress_unavailable"`) || !strings.Contains(recorder.Body.String(), "Cloudflare Cookie") || strings.Contains(recorder.Body.String(), "proxy credentials") {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestImageJobErrorCodePreservesQuotaClassification(t *testing.T) {
+	if got := officialVideoErrorCode("upstream_quota_exhausted"); got != "upstream_quota_exhausted" {
+		t.Fatalf("quota code = %q", got)
 	}
 }
 

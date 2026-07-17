@@ -345,7 +345,6 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	failureFingerprints := make(map[string]int)
 	authRecoveryAttempted := make(map[uint64]bool)
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
-	quotaProbeAttempted := false
 	var lastErr error
 	var lastFailure *UpstreamFailure
 	forwardResponse := func(credential accountdomain.Credential) (*provider.Response, error) {
@@ -370,7 +369,9 @@ attemptLoop:
 		if ownership != nil {
 			lease, err = s.selector.AcquirePinned(ctx, route.Provider, ownership.AccountID, route.UpstreamModel, quotaMode, true)
 		} else {
-			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, input.PromptCacheKey, excluded, !quotaProbeAttempted)
+			// Client traffic only uses the healthy pool. Quota recovery probes are
+			// handled explicitly and must not consume a normal inference request.
+			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, input.PromptCacheKey, excluded, false)
 		}
 		timing.markSelection(time.Since(selectionStarted))
 		if err != nil {
@@ -379,22 +380,7 @@ attemptLoop:
 			}
 			break
 		}
-		if lease.QuotaProbe {
-			quotaProbeAttempted = true
-		}
 		excluded[lease.Credential.ID] = true
-		if lease.QuotaProbeKind == accountdomain.QuotaRecoveryKindPaid {
-			recovered, probeErr := s.accounts.ProbePaidQuota(ctx, lease.Credential)
-			s.selector.MarkQuotaStateChanged(lease.Credential.Provider)
-			if probeErr != nil || !recovered {
-				lease.Release()
-				lastErr = firstError(probeErr, fmt.Errorf("付费额度尚未恢复"))
-				continue
-			}
-			lease.QuotaProbe = false
-			lease.QuotaProbeKind = ""
-			lease.Billing = nil
-		}
 		credential, err := ensureCredential(lease.Credential, false)
 		if err != nil {
 			lease.Release()
@@ -535,7 +521,7 @@ attemptLoop:
 			continue
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			s.selector.markSuccess(ctx, credential, lease.QuotaProbe)
+			s.selector.markSuccess(ctx, credential, false)
 		}
 		accountID := credential.ID
 		var once sync.Once
@@ -812,7 +798,12 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 		lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
 		if err != nil {
 			if lastCredentialFailure != nil {
-				writeFailureAudit(http.StatusBadGateway, "upstream_unavailable", lastCredentialFailure)
+				var failure *UpstreamFailure
+				if errors.As(lastErr, &failure) {
+					writeFailureAudit(failure.HTTPStatus, failure.AuditCode(), lastCredentialFailure)
+				} else {
+					writeFailureAudit(http.StatusBadGateway, "upstream_unavailable", lastCredentialFailure)
+				}
 				return nil, firstError(lastErr, err)
 			}
 			writeFailureAudit(http.StatusServiceUnavailable, "upstream_unavailable", lastCredentialFailure)
@@ -841,7 +832,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 				return nil, &UpstreamFailure{
 					HTTPStatus:    http.StatusServiceUnavailable,
 					Code:          "egress_unavailable",
-					PublicMessage: "Grok Web 出口节点暂不可用，请检查代理与 Cloudflare Cookie，或停用故障节点后重试",
+					PublicMessage: "Grok Web 出口节点或浏览器 worker 暂不可用，请检查代理、worker 与 Cloudflare Cookie",
 					Cause:         err,
 				}
 			}
@@ -871,9 +862,14 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			}
 			continue
 		}
-		if isRetryableMediaStatus(response.StatusCode) && attempt+1 < attempts {
+		if isRetryableMediaStatus(response.StatusCode) {
 			status := response.StatusCode
-			lastErr = fmt.Errorf("image provider returned status %d", status)
+			body, bodyErr := readRetryableBody(response.Body)
+			failure := newHTTPUpstreamFailure(status, body, credential.ID, credential.Name)
+			if bodyErr != nil {
+				failure.Cause = bodyErr
+			}
+			lastErr = failure
 			failedCredential := credential
 			lastCredentialFailure = &failedCredential
 			if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && status == http.StatusTooManyRequests && lease.QuotaMode != "" {
@@ -884,12 +880,15 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 					s.selector.MarkFailure(ctx, credential, status, retryAfter)
 				}
 			}
-			_, _ = readRetryableBody(response.Body)
 			lease.Release()
 			if status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(credential.Provider) {
 				delete(excluded, credential.ID)
 			}
-			continue
+			if attempt+1 < attempts {
+				continue
+			}
+			writeFailureAudit(failure.HTTPStatus, failure.AuditCode(), &credential)
+			return nil, failure
 		}
 		break
 	}

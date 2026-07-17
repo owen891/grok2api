@@ -40,8 +40,22 @@ export type RegistrationLogsDTO = {
   nextLogId: number;
 };
 
+export type EmailSourceDTO = {
+  id: string;
+  type: "tempmail_lol" | "yyds";
+  enabled: boolean;
+  apiBase: string;
+  apiKey: string;
+  jwt: string;
+  domain: string;
+  prefix: string;
+  apiKeyConfigured: boolean;
+  jwtConfigured: boolean;
+};
+
 export type RegistrationSettingsDTO = {
   engine: string;
+  emailSources: EmailSourceDTO[];
   emailProvider: string;
   emailProviderFallbacks: string[];
   tempmailLolApiBase: string;
@@ -53,6 +67,14 @@ export type RegistrationSettingsDTO = {
   cpaHeadless: boolean;
   cpaProbeChat: boolean;
   cpaCloseBrowserAfterAuth: boolean;
+  captchaSolver: string;
+  captchaEndpoint: string;
+  yydsApiKey: string;
+  yydsJwt: string;
+  yescaptchaApiKey: string;
+  yydsApiKeyConfigured: boolean;
+  yydsJwtConfigured: boolean;
+  yescaptchaApiKeyConfigured: boolean;
 };
 
 export type RegistrationPreflightCheckDTO = {
@@ -104,8 +126,21 @@ const logsDecoder = createObjectDecoder<RegistrationLogsDTO>("registration logs"
   items: isArrayOf(logEntryValidator),
   nextLogId: isNumber,
 });
+const emailSourceValidator = hasShape({
+  id: isString,
+  type: isOneOf("tempmail_lol", "yyds"),
+  enabled: isBoolean,
+  apiBase: isString,
+  apiKey: isString,
+  jwt: isString,
+  domain: isString,
+  prefix: isString,
+  apiKeyConfigured: isBoolean,
+  jwtConfigured: isBoolean,
+});
 const settingsShape = {
   engine: isString,
+  emailSources: isArrayOf(emailSourceValidator),
   emailProvider: isString,
   emailProviderFallbacks: isArrayOf(isString),
   tempmailLolApiBase: isString,
@@ -117,6 +152,14 @@ const settingsShape = {
   cpaHeadless: isBoolean,
   cpaProbeChat: isBoolean,
   cpaCloseBrowserAfterAuth: isBoolean,
+  captchaSolver: isString,
+  captchaEndpoint: isString,
+  yydsApiKey: isString,
+  yydsJwt: isString,
+  yescaptchaApiKey: isString,
+  yydsApiKeyConfigured: isBoolean,
+  yydsJwtConfigured: isBoolean,
+  yescaptchaApiKeyConfigured: isBoolean,
 } as const;
 const settingsDecoder = createObjectDecoder<RegistrationSettingsDTO>("registration settings", settingsShape);
 const preflightCheckValidator = hasShape({ name: isString, ok: isBoolean, detail: isString });

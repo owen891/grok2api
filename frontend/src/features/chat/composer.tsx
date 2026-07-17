@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Image as ImageIcon,
+  ImagePlus,
   Loader2,
   MessageSquareText,
   SendHorizontal,
   Settings2,
   Square,
+  X,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -16,7 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { ChatMode, ImageSettings } from "./chat-types";
+import type { ChatImageRef, ChatMode, ImageSettings } from "./chat-types";
 import {
   ASPECT_RATIO_OPTIONS,
   QUALITY_IMAGE_MODEL,
@@ -30,6 +33,21 @@ import {
 
 const FALLBACK_IMAGE_MODELS = [SPEED_IMAGE_MODEL];
 export const OPEN_IMAGE_SETTINGS_EVENT = "studio:open-image-settings";
+const MAX_CHAT_ATTACHMENTS = 4;
+const MAX_CHAT_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+function readImageFile(file: File): Promise<ChatImageRef> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = typeof reader.result === "string" ? reader.result : "";
+      if (!url) reject(new Error("图片读取失败"));
+      else resolve({ url, previewUrl: url, mimeType: file.type || undefined });
+    };
+    reader.onerror = () => reject(reader.error || new Error("图片读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
 
 type ImagePreset = {
   id: string;
@@ -117,12 +135,14 @@ export function Composer({
   imageModels,
   model,
   imageSettings,
+  attachments,
   onChange,
   onSend,
   onStop,
   onModeChange,
   onModelChange,
   onImageSettingsChange,
+  onAttachmentsChange,
 }: {
   mode: ChatMode;
   value: string;
@@ -132,16 +152,19 @@ export function Composer({
   imageModels: string[];
   model: string;
   imageSettings: ImageSettings;
+  attachments: ChatImageRef[];
   onChange: (value: string) => void;
   onSend: () => void;
   onStop: () => void;
   onModeChange: (mode: ChatMode) => void;
   onModelChange: (model: string) => void;
   onImageSettingsChange: (settings: ImageSettings) => void;
+  onAttachmentsChange: (attachments: ChatImageRef[]) => void;
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState<ImageSettings>(imageSettings);
   const [draftModel, setDraftModel] = useState(model);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const isImage = mode === "image";
   const modelsForImage = useMemo(
@@ -163,6 +186,26 @@ export function Composer({
     setDraftModel(imageModelValue);
     setDialogOpen(true);
   }, [compatibleImageSettings, imageModelValue]);
+
+  const addImageFiles = useCallback((files: File[]) => {
+    const remaining = MAX_CHAT_ATTACHMENTS - attachments.length;
+    if (remaining <= 0) {
+      toast.error(`最多添加 ${MAX_CHAT_ATTACHMENTS} 张图片`);
+      return;
+    }
+    const accepted = files.filter((file) => {
+      if (!file.type.startsWith("image/")) return false;
+      if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+        toast.error(`${file.name || "剪贴板图片"} 超过 5 MB`);
+        return false;
+      }
+      return true;
+    }).slice(0, remaining);
+    if (accepted.length === 0) return;
+    void Promise.all(accepted.map(readImageFile))
+      .then((images) => onAttachmentsChange([...attachments, ...images]))
+      .catch((error) => toast.error(error instanceof Error ? error.message : "图片读取失败"));
+  }, [attachments, onAttachmentsChange]);
 
   useEffect(() => {
     const onOpen = () => {
@@ -213,23 +256,51 @@ export function Composer({
       <textarea
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        onPaste={(event) => {
+          if (isImage) return;
+          const files = Array.from(event.clipboardData.items)
+            .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+            .map((item) => item.getAsFile())
+            .filter((file): file is File => Boolean(file));
+          if (files.length === 0) return;
+          event.preventDefault();
+          addImageFiles(files);
+        }}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
-            if (!sending && !disabled && value.trim()) onSend();
+            if (!sending && !disabled && (value.trim() || (!isImage && attachments.length > 0))) onSend();
           }
         }}
         rows={3}
-        disabled={disabled && !sending}
+        disabled={disabled}
         placeholder={isImage ? "描述你想生成的图片…" : "输入消息，Enter 发送，Shift+Enter 换行"}
         className="w-full resize-none rounded-xl border border-border/50 bg-background px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
       />
+
+      {!isImage && attachments.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {attachments.map((attachment, index) => (
+            <div key={`${attachment.url.slice(0, 48)}_${index}`} className="group relative size-16 overflow-hidden rounded-lg border border-border/60 bg-muted">
+              <img src={attachment.previewUrl || attachment.url} alt={`待发送图片 ${index + 1}`} className="size-full object-cover" />
+              <button
+                type="button"
+                onClick={() => onAttachmentsChange(attachments.filter((_, itemIndex) => itemIndex !== index))}
+                className="absolute right-1 top-1 inline-flex size-5 items-center justify-center rounded-full bg-black/65 text-white opacity-80 transition hover:opacity-100"
+                title="移除图片"
+                aria-label={`移除图片 ${index + 1}`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <div className="inline-flex shrink-0 rounded-full border border-border/60 bg-background p-0.5">
           <button
             type="button"
-            disabled={sending}
             onClick={() => onModeChange("chat")}
             className={`inline-flex h-8 items-center gap-1 rounded-full px-2.5 text-xs transition ${
               !isImage ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"
@@ -240,7 +311,6 @@ export function Composer({
           </button>
           <button
             type="button"
-            disabled={sending}
             onClick={() => onModeChange("image")}
             className={`inline-flex h-8 items-center gap-1 rounded-full px-2.5 text-xs transition ${
               isImage ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"
@@ -255,7 +325,7 @@ export function Composer({
           <>
             <select
               value={imageModelValue}
-              disabled={sending || modelsForImage.length === 0}
+              disabled={modelsForImage.length === 0}
               onChange={(event) => {
                 const nextModel = event.target.value;
                 onModelChange(nextModel);
@@ -270,7 +340,6 @@ export function Composer({
             </select>
             <button
               type="button"
-              disabled={sending}
               onClick={openSettings}
               className="inline-flex h-8 max-w-full items-center gap-1.5 rounded-lg border border-border/60 bg-background px-2.5 text-xs text-foreground hover:bg-muted"
               title={`生图参数：${summary}`}
@@ -282,7 +351,7 @@ export function Composer({
         ) : (
           <select
             value={chatModelValue}
-            disabled={sending || chatModels.length === 0}
+            disabled={chatModels.length === 0}
             onChange={(event) => onModelChange(event.target.value)}
             className="h-8 min-w-[9rem] max-w-full flex-1 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-[16rem]"
           >
@@ -305,7 +374,7 @@ export function Composer({
                 <button
                   key={preset.id}
                   type="button"
-                  disabled={sending || unavailable}
+                  disabled={unavailable}
                   title={unavailable ? `${preset.description} · 需要可用的高质量生图模型` : preset.description}
                   onClick={() => applyPreset(preset, true)}
                   className={`inline-flex h-7 items-center rounded-full border px-2.5 text-[11px] transition ${
@@ -321,6 +390,32 @@ export function Composer({
           </div>
         ) : null}
 
+        {!isImage ? (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                const files = Array.from(event.target.files || []);
+                event.target.value = "";
+                addImageFiles(files);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-background text-muted-foreground transition hover:bg-muted hover:text-foreground"
+              title="添加图片"
+              aria-label="添加图片"
+            >
+              <ImagePlus className="h-3.5 w-3.5" />
+            </button>
+          </>
+        ) : null}
+
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {sending ? (
             <Button type="button" variant="outline" size="sm" className="rounded-full" onClick={onStop}>
@@ -328,7 +423,7 @@ export function Composer({
               停止
             </Button>
           ) : (
-            <Button type="button" size="sm" className="rounded-full px-4" onClick={onSend} disabled={disabled || !value.trim()}>
+            <Button type="button" size="sm" className="rounded-full px-4" onClick={onSend} disabled={disabled || (!value.trim() && (isImage || attachments.length === 0))}>
               {disabled ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <SendHorizontal className="mr-1.5 h-3.5 w-3.5" />}
               {isImage ? "生成" : "发送"}
             </Button>
@@ -354,7 +449,7 @@ export function Composer({
                     <button
                       key={preset.id}
                       type="button"
-                      disabled={sending || unavailable}
+                      disabled={unavailable}
                       title={unavailable ? "需要可用的高质量生图模型" : undefined}
                       onClick={() => applyPreset(preset, false)}
                       className={`rounded-lg border px-2.5 py-1.5 text-left transition ${
@@ -374,7 +469,6 @@ export function Composer({
             <FieldSelect
               label="生图模型"
               value={modelsForImage.includes(draftModel) ? draftModel : modelsForImage[0]}
-              disabled={sending}
               onChange={(next) => {
                 setDraftModel(next);
                 setDraftSettings((prev) => imageSettingsForModel(prev, next));
@@ -391,7 +485,6 @@ export function Composer({
               <FieldSelect
                 label="数量"
                 value={String(draftSettings.n)}
-                disabled={sending}
                 onChange={(next) => setDraftSettings((prev) => ({ ...prev, n: Number(next) }))}
               >
                 {[1, 2, 3, 4].map((n) => (
@@ -404,7 +497,7 @@ export function Composer({
               <FieldSelect
                 label="比例"
                 value={/quality/i.test(draftModel) ? draftSettings.aspectRatio : "1:1"}
-                disabled={sending || !/quality/i.test(draftModel)}
+                disabled={!/quality/i.test(draftModel)}
                 onChange={(next) => {
                   const settings = normalizeImageSettings({ ...draftSettings, aspectRatio: next });
                   setDraftSettings(settings);
@@ -425,7 +518,7 @@ export function Composer({
               <FieldSelect
                 label="分辨率"
                 value={/quality/i.test(draftModel) ? draftSettings.resolution : "1k"}
-                disabled={sending || !/quality/i.test(draftModel)}
+                disabled={!/quality/i.test(draftModel)}
                 onChange={(next) => {
                   const settings = normalizeImageSettings({ ...draftSettings, resolution: next });
                   setDraftSettings(settings);

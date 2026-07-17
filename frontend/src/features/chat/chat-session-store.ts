@@ -2,12 +2,15 @@ import {
   CHAT_STORE_KEY,
   createEmptySession,
   isSupportedImageUrl,
+  isUsageLimitError,
   type ChatMessage,
   type ChatPrefs,
   type ChatSession,
   type ImageSettings,
   DEFAULT_IMAGE_SETTINGS,
   normalizeImageSettings,
+  sanitizeGenerationMeta,
+  sanitizePersistedMessageTask,
 } from "./chat-types";
 
 const maxPersistedSessions = 20;
@@ -59,22 +62,36 @@ function sanitizeSession(raw: unknown): ChatSession | null {
           const errorClass =
             isRecord(message.error) &&
             (message.error.class === "auth" ||
+              message.error.class === "account" ||
+              message.error.class === "model" ||
+              message.error.class === "quota" ||
+              message.error.class === "egress" ||
               message.error.class === "upstream" ||
               message.error.class === "timeout" ||
               message.error.class === "rate")
               ? message.error.class
               : "unknown";
+          const errorCode = isRecord(message.error) && typeof message.error.code === "string"
+            ? message.error.code
+            : undefined;
+          const errorMessage = isRecord(message.error) && typeof message.error.message === "string"
+            ? message.error.message
+            : "Unknown error";
+          const usageLimitReached = isUsageLimitError(errorCode, errorMessage);
           const result: ChatMessage = {
             id: typeof message.id === "string" ? message.id : `msg_${Date.now()}`,
             role,
             content: typeof message.content === "string" ? message.content : "",
             images,
             createdAt: typeof message.createdAt === "number" ? message.createdAt : Date.now(),
+            task: sanitizePersistedMessageTask(message.task),
+            generation: sanitizeGenerationMeta(message.generation),
             error: isRecord(message.error)
               ? {
-                  class: errorClass,
-                  message: typeof message.error.message === "string" ? message.error.message : "Unknown error",
-                  code: typeof message.error.code === "string" ? message.error.code : undefined,
+                  class: usageLimitReached ? "quota" : errorClass,
+                  message: usageLimitReached ? "上游账号额度不足或正在等待恢复，请稍后重试。" : errorMessage,
+                  code: errorCode,
+                  requestId: typeof message.error.requestId === "string" ? message.error.requestId : undefined,
                 }
               : undefined,
           };

@@ -34,6 +34,15 @@ CHALLENGE_MARKERS = (
 )
 
 
+def classify_worker_error(error: Exception) -> str:
+    message = str(error).lower()
+    if "err_proxy_connection_failed" in message or "proxy connection" in message:
+        return "proxy_unavailable"
+    if "cloudflare challenge" in message or any(marker in message for marker in CHALLENGE_MARKERS):
+        return "anti_bot"
+    return "browser_unavailable"
+
+
 def parse_cookie_header(value: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for part in value.split(";"):
@@ -429,9 +438,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._json(HTTPStatus.OK, result)
         except ValueError as exc:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": "invalid_request"})
         except Exception as exc:
-            self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)[:500]})
+            self._json(
+                HTTPStatus.BAD_GATEWAY,
+                {"error": str(exc)[:500], "code": classify_worker_error(exc)},
+            )
 
 
 def main() -> None:

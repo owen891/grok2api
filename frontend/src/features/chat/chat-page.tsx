@@ -23,11 +23,13 @@ import {
 import { listModels } from "@/entities/model/model-api";
 import type { ModelRouteDTO } from "@/entities/model/types";
 import {
-  generateImages,
+  createImageJob,
   listGatewayModels,
   streamChatCompletion,
   toClassifiedError,
+  waitForImageJob,
   type ClassifiedError,
+  type ChatCompletionMessage,
 } from "./chat-api";
 import { Composer, OPEN_IMAGE_SETTINGS_EVENT } from "./composer";
 import { MessageList } from "./message-list";
@@ -42,12 +44,19 @@ import {
   SPEED_IMAGE_MODEL,
   titleWithPrompt,
   type ChatMessage,
+  type ChatImageRef,
   type ChatMode,
   type ChatPrefs,
   type ChatSession,
   type ImageSettings,
   type MessageGenerationMeta,
 } from "./chat-types";
+
+type ActiveTaskController = {
+  controller: AbortController;
+  sessionId: string;
+  kind: "chat" | "image";
+};
 
 const emptyClientKeys: ClientKeyDTO[] = [];
 const emptyAdminModels: ModelRouteDTO[] = [];
@@ -99,17 +108,33 @@ function pickImageModel(imageModels: string[], quality: "speed" | "quality"): st
   return imageModels.find((id) => /imagine|image/i.test(id) && !/quality|edit/i.test(id)) || imageModels.find((id) => !/edit/i.test(id)) || imageModelForQuality("speed");
 }
 
+function toChatCompletionMessage(message: ChatMessage): ChatCompletionMessage {
+  if (message.role === "user" && message.images?.length) {
+    return {
+      role: "user",
+      content: [
+        ...(message.content ? [{ type: "text" as const, text: message.content }] : []),
+        ...message.images.map((image) => ({
+          type: "image_url" as const,
+          image_url: { url: image.url },
+        })),
+      ],
+    };
+  }
+  return { role: message.role, content: message.content };
+}
+
 export function ChatPage() {
   const { t, i18n } = useTranslation();
   const locale = i18n.language.toLowerCase().startsWith("zh") ? "zh" : "en";
   const [prefs, setPrefs] = useState<ChatPrefs>(() => ensureActiveSession(loadChatPrefs()));
   const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
+  const [draftImages, setDraftImages] = useState<ChatImageRef[]>([]);
   const [pendingDelete, setPendingDelete] = useState<
     null | { type: "message"; messageId: string } | { type: "session"; sessionId: string }
   >(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const taskControllersRef = useRef(new Map<string, ActiveTaskController>());
   const threadRef = useRef<HTMLDivElement | null>(null);
 
   const activeSession = useMemo(() => {
@@ -125,16 +150,21 @@ export function ChatPage() {
   });
   const clientKeys = metadataQuery.data?.clientKeys ?? emptyClientKeys;
   const adminModels = metadataQuery.data?.adminModels ?? emptyAdminModels;
+  const selectedClientKey = useMemo(
+    () => clientKeys.find((key) => key.id === prefs.clientKeyId) ?? null,
+    [clientKeys, prefs.clientKeyId],
+  );
+  const effectiveClientKeyId = selectedClientKey?.id ?? null;
 
   const clientSecretQuery = useQuery({
-    queryKey: ["chat", "client-secret", prefs.clientKeyId],
-    queryFn: () => getClientKeySecret(prefs.clientKeyId as string),
-    enabled: Boolean(prefs.clientKeyId),
+    queryKey: ["chat", "client-secret", effectiveClientKeyId],
+    queryFn: () => getClientKeySecret(effectiveClientKeyId as string),
+    enabled: Boolean(selectedClientKey),
   });
   const clientSecret = clientSecretQuery.data?.secret ?? null;
 
   const gatewayModelsQuery = useQuery({
-    queryKey: ["chat", "gateway-models", prefs.clientKeyId],
+    queryKey: ["chat", "gateway-models", effectiveClientKeyId],
     queryFn: ({ signal }) => listGatewayModels(clientSecret as string, signal),
     enabled: Boolean(clientSecret),
   });
@@ -174,6 +204,17 @@ export function ChatPage() {
   }, [activeImageSettings.quality, activeSession, chatModels, imageModels]);
 
   useEffect(() => {
+    const hasResumableImageTask = prefs.sessions.some((session) =>
+      session.messages.some((message) =>
+        message.task?.kind === "image" &&
+        (message.task.status === "queued" || message.task.status === "running") &&
+        Boolean(message.task.requestId),
+      ),
+    );
+    if (hasResumableImageTask) {
+      saveChatPrefs(prefs);
+      return;
+    }
     const timer = window.setTimeout(() => saveChatPrefs(prefs), 400);
     return () => window.clearTimeout(timer);
   }, [prefs]);
@@ -182,7 +223,7 @@ export function ChatPage() {
     const node = threadRef.current;
     if (!node) return;
     node.scrollTop = node.scrollHeight;
-  }, [activeSession?.messages, sending]);
+  }, [activeSession?.messages]);
 
   const updateSession = useCallback((sessionId: string, updater: (session: ChatSession) => ChatSession) => {
     setPrefs((prev) => ({
@@ -209,9 +250,13 @@ export function ChatPage() {
       activeSessionId: session.id,
     }));
     setDraft("");
+    setDraftImages([]);
   };
 
   const onDeleteSession = (sessionId: string) => {
+    for (const task of taskControllersRef.current.values()) {
+      if (task.sessionId === sessionId) task.controller.abort();
+    }
     setPrefs((prev) => {
       const remaining = prev.sessions.filter((session) => session.id !== sessionId);
       if (remaining.length === 0) {
@@ -226,25 +271,25 @@ export function ChatPage() {
     });
   };
 
-  const appendMessages = (sessionId: string, messages: ChatMessage[]) => {
+  const appendMessages = useCallback((sessionId: string, messages: ChatMessage[]) => {
     updateSession(sessionId, (session) => ({
       ...session,
       messages: [...session.messages, ...messages],
       updatedAt: Date.now(),
     }));
-  };
+  }, [updateSession]);
 
-  const patchMessage = (sessionId: string, messageId: string, patch: Partial<ChatMessage>) => {
+  const patchMessage = useCallback((sessionId: string, messageId: string, patch: Partial<ChatMessage>) => {
     updateSession(sessionId, (session) => ({
       ...session,
       messages: session.messages.map((message) => (message.id === messageId ? { ...message, ...patch } : message)),
       updatedAt: Date.now(),
     }));
-  };
+  }, [updateSession]);
 
-  const stop = () => {
-    abortRef.current?.abort();
-  };
+  const stopTask = useCallback((messageId: string) => {
+    taskControllersRef.current.get(messageId)?.controller.abort();
+  }, []);
 
   const requestDeleteMessage = (messageId: string) => {
     setPendingDelete({ type: "message", messageId });
@@ -262,6 +307,7 @@ export function ChatPage() {
         return;
       }
       const messageId = pendingDelete.messageId;
+      stopTask(messageId);
       updateSession(activeSession.id, (session) => ({
         ...session,
         messages: session.messages.filter((message) => message.id !== messageId),
@@ -292,11 +338,96 @@ export function ChatPage() {
     }, 0);
   };
 
-  const send = async (promptOverride?: string) => {
-    if (!activeSession || sending) return;
+  const pollImageTask = useCallback(async (options: {
+    sessionId: string;
+    messageId: string;
+    requestId: string;
+    secret: string;
+    controller: AbortController;
+  }) => {
+    const { sessionId, messageId, requestId, secret, controller } = options;
+    try {
+      const images = await waitForImageJob({
+        clientKey: secret,
+        requestId,
+        signal: controller.signal,
+        onProgress: (progress) => patchMessage(sessionId, messageId, {
+          task: { kind: "image", status: "running", requestId, progress },
+        }),
+      });
+      if (images.length === 0) {
+        throw { class: "upstream", message: t("chat.image.empty"), requestId } satisfies ClassifiedError;
+      }
+      patchMessage(sessionId, messageId, {
+        content: t("chat.image.done", { count: images.length }),
+        images: images.map((image) => ({ url: image.url, mimeType: image.mimeType })),
+        streaming: false,
+        task: { kind: "image", status: "completed", requestId, progress: 100 },
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        patchMessage(sessionId, messageId, {
+          streaming: false,
+          content: t("chat.image.cancelled"),
+          task: { kind: "image", status: "cancelled", requestId },
+        });
+      } else {
+        const classified = toClassifiedError(error, t("chat.error.unknown"));
+        toast.error(classified.message || t("chat.error.unknown"));
+        patchMessage(sessionId, messageId, {
+          streaming: false,
+          content: classified.message || t("chat.error.unknown"),
+          task: { kind: "image", status: "failed", requestId },
+          error: {
+            class: classified.class,
+            message: classified.message,
+            code: classified.code,
+            requestId: classified.requestId || requestId,
+          },
+        });
+      }
+    } finally {
+      const active = taskControllersRef.current.get(messageId);
+      if (active?.controller === controller) taskControllersRef.current.delete(messageId);
+    }
+  }, [patchMessage, t]);
+
+  useEffect(() => {
+    if (!clientSecret || !selectedClientKey) return;
+    for (const session of prefs.sessions) {
+      for (const message of session.messages) {
+        const task = message.task;
+        if (
+          task?.kind !== "image" ||
+          (task.status !== "queued" && task.status !== "running") ||
+          !task.requestId ||
+          taskControllersRef.current.has(message.id)
+        ) {
+          continue;
+        }
+        if (message.generation?.clientKeyId && message.generation.clientKeyId !== selectedClientKey.id) continue;
+        const controller = new AbortController();
+        taskControllersRef.current.set(message.id, { controller, sessionId: session.id, kind: "image" });
+        queueMicrotask(() => {
+          void pollImageTask({
+            sessionId: session.id,
+            messageId: message.id,
+            requestId: task.requestId as string,
+            secret: clientSecret,
+            controller,
+          });
+        });
+      }
+    }
+  }, [clientSecret, pollImageTask, prefs.sessions, selectedClientKey]);
+
+  const send = async (promptOverride?: string, forcedMode?: ChatMode, attachmentOverride?: ChatImageRef[]) => {
+    if (!activeSession) return;
+    const mode = forcedMode ?? activeSession.mode;
+    const attachments = mode === "chat" ? (attachmentOverride ?? (promptOverride === undefined ? draftImages : [])) : [];
     const prompt = (promptOverride ?? draft).trim();
-    if (!prompt) return;
-    if (!prefs.clientKeyId) {
+    if (!prompt && attachments.length === 0) return;
+    if (!effectiveClientKeyId) {
       toast.error(t("chat.needClientKey"));
       return;
     }
@@ -306,26 +437,36 @@ export function ChatPage() {
     }
 
     const sessionId = activeSession.id;
+    if (
+      mode === "chat" &&
+      Array.from(taskControllersRef.current.values()).some((task) => task.kind === "chat" && task.sessionId === sessionId)
+    ) {
+      toast.message("当前会话已有一条回复正在生成");
+      return;
+    }
     const userMessage: ChatMessage = {
       id: createId("msg"),
       role: "user",
       content: prompt,
+      images: attachments.length > 0 ? attachments : undefined,
       createdAt: Date.now(),
     };
     const assistantId = createId("msg");
-    const mode = activeSession.mode;
     const imageSettings = imageSettingsForAvailableModels(activeSession.imageSettings, imageModels);
     const model =
       mode === "image"
         ? activeSession.model && imageModels.includes(activeSession.model)
           ? activeSession.model
           : pickImageModel(imageModels, imageSettings.quality)
-        : activeSession.model;
+        : activeModel;
     const generation: MessageGenerationMeta =
       mode === "image"
         ? {
             mode,
             model,
+            clientKeyId: selectedClientKey?.id,
+            clientKeyName: selectedClientKey?.name,
+            clientKeyPrefix: selectedClientKey?.prefix,
             n: imageSettings.n,
             aspectRatio: imageSettings.aspectRatio,
             resolution: imageSettings.resolution,
@@ -334,6 +475,9 @@ export function ChatPage() {
         : {
             mode,
             model,
+            clientKeyId: selectedClientKey?.id,
+            clientKeyName: selectedClientKey?.name,
+            clientKeyPrefix: selectedClientKey?.prefix,
           };
 
     const assistantMessage: ChatMessage = {
@@ -342,24 +486,25 @@ export function ChatPage() {
       content: "",
       createdAt: Date.now(),
       streaming: true,
+      task: { kind: mode, status: mode === "image" ? "queued" : "running", progress: 0 },
       generation,
     };
 
     setDraft("");
-    setSending(true);
+    if (mode === "chat") setDraftImages([]);
     appendMessages(sessionId, [userMessage, assistantMessage]);
     updateSession(sessionId, (session) => ({
       ...session,
-      title: titleWithPrompt(session.title, prompt, defaultTitle(locale, prefs.sessions.length || 1)),
+      title: titleWithPrompt(session.title, prompt || "图片对话", defaultTitle(locale, prefs.sessions.length || 1)),
       updatedAt: Date.now(),
     }));
 
     const controller = new AbortController();
-    abortRef.current = controller;
+    taskControllersRef.current.set(assistantId, { controller, sessionId, kind: mode });
 
     try {
-      if (activeSession.mode === "image") {
-        toast.message("正在生成图片，通常需要 8–15 秒…");
+      if (mode === "image") {
+        toast.message("图片任务已提交，可继续对话");
         // 强制使用生图模型，避免会话里残留的对话模型（如 grok-4.5）被误发到 /v1/images
         const imageModel = model;
         if (activeSession.model !== imageModel || activeSession.imageSettings !== imageSettings) {
@@ -370,24 +515,17 @@ export function ChatPage() {
             updatedAt: Date.now(),
           }));
         }
-        const images = await generateImages({
+        const { requestId } = await createImageJob({
           clientKey: clientSecret,
           prompt,
           settings: imageSettings,
           model: imageModel,
           signal: controller.signal,
         });
-        if (images.length === 0) {
-          throw {
-            class: "upstream",
-            message: t("chat.image.empty"),
-          } satisfies ClassifiedError;
-        }
         patchMessage(sessionId, assistantId, {
-          content: t("chat.image.done", { count: images.length }),
-          images: images.map((image) => ({ url: image.url, mimeType: image.mimeType })),
-          streaming: false,
+          task: { kind: "image", status: "running", requestId, progress: 0 },
         });
+        await pollImageTask({ sessionId, messageId: assistantId, requestId, secret: clientSecret, controller });
       } else {
         const model = activeModel;
         if (!model) {
@@ -395,11 +533,8 @@ export function ChatPage() {
         }
         const history = [...activeSession.messages, userMessage]
           .filter((message) => message.role === "user" || message.role === "assistant")
-          .filter((message) => message.content)
-          .map((message) => ({
-            role: message.role as "user" | "assistant",
-            content: message.content,
-          }));
+          .filter((message) => message.content || message.images?.length)
+          .map(toChatCompletionMessage);
         await streamChatCompletion({
           clientKey: clientSecret,
           model,
@@ -415,7 +550,7 @@ export function ChatPage() {
                   updatedAt: Date.now(),
                   messages: session.messages.map((message) =>
                     message.id === assistantId
-                      ? { ...message, content: `${message.content}${piece}`, streaming: true }
+                      ? { ...message, content: `${message.content}${piece}`, streaming: true, task: { kind: "chat", status: "running" } }
                       : message,
                   ),
                 };
@@ -423,13 +558,18 @@ export function ChatPage() {
             }));
           },
         });
-        patchMessage(sessionId, assistantId, { streaming: false });
+        patchMessage(sessionId, assistantId, {
+          streaming: false,
+          task: { kind: "chat", status: "completed", progress: 100 },
+        });
       }
     } catch (error) {
+      if (mode === "image" && !taskControllersRef.current.has(assistantId)) return;
       if (controller.signal.aborted) {
         patchMessage(sessionId, assistantId, {
           streaming: false,
-          content: activeSession.mode === "image" ? t("chat.image.cancelled") : t("chat.chat.cancelled"),
+          content: mode === "image" ? t("chat.image.cancelled") : t("chat.chat.cancelled"),
+          task: { kind: mode, status: "cancelled" },
         });
       } else {
         const classified = toClassifiedError(error, t("chat.error.unknown"));
@@ -437,20 +577,26 @@ export function ChatPage() {
         patchMessage(sessionId, assistantId, {
           streaming: false,
           content: classified.message || t("chat.error.unknown"),
+          task: { kind: mode, status: "failed" },
           error: {
             class: classified.class,
             message: classified.message,
             code: classified.code,
+            requestId: classified.requestId,
           },
         });
       }
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-        setSending(false);
-      }
+      const active = taskControllersRef.current.get(assistantId);
+      if (active?.controller === controller) taskControllersRef.current.delete(assistantId);
     }
   };
+
+  const activeChatMessage = [...activeSession.messages].reverse().find((message) =>
+    message.task?.kind === "chat" &&
+    (message.task.status === "queued" || message.task.status === "running"),
+  );
+  const chatSending = activeSession.mode === "chat" && Boolean(activeChatMessage);
 
   if (!activeSession) {
     return (
@@ -482,7 +628,7 @@ export function ChatPage() {
               <div className="text-[11px] text-muted-foreground">本地保存，不存密钥</div>
             </div>
             <div className="flex items-center gap-1">
-              <Button type="button" size="sm" variant="secondary" className="rounded-full" onClick={onCreateSession} disabled={sending}>
+              <Button type="button" size="sm" variant="secondary" className="rounded-full" onClick={onCreateSession}>
                 <MessageSquarePlus className="h-4 w-4" />
               </Button>
               <Button type="button" size="sm" variant="ghost" className="rounded-full lg:hidden" onClick={() => setSidebarOpen(false)}>
@@ -505,9 +651,9 @@ export function ChatPage() {
                     className="min-w-0 flex-1 truncate text-left"
                     onClick={() => {
                       setPrefs((prev) => ({ ...prev, activeSessionId: session.id }));
+                      setDraftImages([]);
                       setSidebarOpen(false);
                     }}
-                    disabled={sending}
                   >
                     {session.title || t("chat.untitled")}
                     <div className="text-[11px] opacity-60">{session.mode === "image" ? "生图" : "对话"}</div>
@@ -516,7 +662,6 @@ export function ChatPage() {
                     type="button"
                     className="rounded p-1 opacity-0 transition group-hover:opacity-100 hover:bg-background"
                     onClick={() => requestDeleteSession(session.id)}
-                    disabled={sending}
                     aria-label={t("chat.deleteSession")}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -528,8 +673,8 @@ export function ChatPage() {
           <div className="border-t border-border/50 p-3">
             <label className="mb-1 block text-[11px] font-medium text-muted-foreground">{t("chat.clientKey")}</label>
             <select
-              value={prefs.clientKeyId ?? ""}
-              disabled={loadingMeta || sending}
+              value={effectiveClientKeyId ?? ""}
+              disabled={loadingMeta}
               onChange={(event) =>
                 setPrefs((prev) => ({
                   ...prev,
@@ -606,14 +751,13 @@ export function ChatPage() {
                   ? "输入画面描述后点击生成，结果会显示在这里。"
                   : t("chat.threadEmpty")
               }
-              busy={sending}
               onFillPrompt={fillPrompt}
-              onResend={(prompt) => {
-                void send(prompt);
+              onResend={(prompt, references) => {
+                void send(prompt, undefined, references);
               }}
               onRegenerate={(prompt) => {
                 const nextPrompt = prompt.trim();
-                if (!nextPrompt || sending) return;
+                if (!nextPrompt) return;
                 if (activeSession.mode !== "image") {
                   updateSession(activeSession.id, (session) => ({
                     ...session,
@@ -622,10 +766,11 @@ export function ChatPage() {
                     updatedAt: Date.now(),
                   }));
                 }
-                void send(nextPrompt);
+                void send(nextPrompt, "image");
               }}
               onDeleteMessage={requestDeleteMessage}
               onOpenImageSettings={openImageSettings}
+              onStopTask={stopTask}
             />
           </div>
 
@@ -634,15 +779,18 @@ export function ChatPage() {
               key={`${activeSession.id}:${activeSession.mode}`}
               mode={activeSession.mode}
               value={draft}
-              sending={sending}
-              disabled={!prefs.clientKeyId || !clientSecret || loadingSecret}
+              sending={chatSending}
+              disabled={!effectiveClientKeyId || !clientSecret || loadingSecret}
               chatModels={chatModels}
               imageModels={imageModels}
               model={activeModel}
               imageSettings={activeImageSettings}
+              attachments={draftImages}
               onChange={setDraft}
               onSend={() => void send()}
-              onStop={stop}
+              onStop={() => {
+                if (activeChatMessage) stopTask(activeChatMessage.id);
+              }}
               onModeChange={(mode: ChatMode) => {
                 updateSession(activeSession.id, (session) => ({
                   ...session,
@@ -674,6 +822,7 @@ export function ChatPage() {
                   updatedAt: Date.now(),
                 }));
               }}
+              onAttachmentsChange={setDraftImages}
             />
           </div>
         </section>

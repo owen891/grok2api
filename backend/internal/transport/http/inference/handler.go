@@ -666,6 +666,8 @@ func officialVideoErrorCode(value string) string {
 		return "service_unavailable"
 	case "model_not_found":
 		return "invalid_argument"
+	case "upstream_quota_exhausted", "upstream_rate_limited", "egress_unavailable", "model_not_allowed", "client_key_unavailable":
+		return value
 	default:
 		return "internal_error"
 	}
@@ -1065,7 +1067,13 @@ func writeOpenAIError(c *gin.Context, status int, code, message string) {
 	case status >= 500:
 		errorType = "server_error"
 	}
-	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": errorType, "code": code, "param": nil}})
+	errorBody := gin.H{"message": message, "type": errorType, "code": code, "param": nil}
+	if requestID, ok := c.Get("requestId"); ok {
+		if value, valid := requestID.(string); valid && value != "" {
+			errorBody["request_id"] = value
+		}
+	}
+	c.AbortWithStatusJSON(status, gin.H{"error": errorBody})
 }
 
 func writeGatewayError(c *gin.Context, err error) {

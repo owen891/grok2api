@@ -118,6 +118,7 @@ type Selector struct {
 	lastSelectedAt map[uint64]time.Time
 	lastSuccessAt  map[uint64]time.Time
 	candidates     map[candidateCacheKey]candidateSnapshot
+	roundRobinLast map[candidateCacheKey]uint64
 	performance    map[routePerformanceKey]routePerformance
 	candidateLoads singleflight.Group
 	tierOrders     interface {
@@ -132,7 +133,7 @@ func NewSelector(accounts repository.AccountRepository, concurrency repository.C
 	if len(capacityWait) > 0 && capacityWait[0] > 0 {
 		wait = capacityWait[0]
 	}
-	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot), performance: make(map[routePerformanceKey]routePerformance)}
+	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot), roundRobinLast: make(map[candidateCacheKey]uint64), performance: make(map[routePerformanceKey]routePerformance)}
 }
 
 func (s *Selector) UpdateConfig(stickyTTL, cooldownBase, cooldownMax time.Duration, capacityWait ...time.Duration) {
@@ -169,7 +170,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	var earliestRetry time.Time
 	for _, candidate := range values {
 		value := candidate.Credential
-		if excluded[value.ID] || value.AuthStatus != account.AuthStatusActive {
+		if excluded[value.ID] || !value.Enabled || value.AuthStatus != account.AuthStatusActive {
 			continue
 		}
 		consideredCandidates++
@@ -275,11 +276,10 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	}
 	_, _, _, capacityWait := s.routingConfig()
 	waitDeadline := time.Now().Add(capacityWait)
+	roundRobinKey := candidateCacheKey{provider: provider, upstreamModel: upstreamModel, quotaMode: quotaMode}
+	reservedAccountID := s.orderRoundRobinCandidates(normalCandidates, roundRobinKey, s.resolveTierOrder(provider, upstreamModel))
 	for {
 		currentTime := time.Now().UTC()
-		if err := s.sortCandidates(ctx, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel), upstreamModel); err != nil {
-			return nil, err
-		}
 		for _, candidate := range normalCandidates {
 			lease, err := s.claimAccountSlot(ctx, candidate.Credential)
 			if err != nil {
@@ -297,6 +297,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			}
 			lease.Billing = candidate.Billing
 			lease.QuotaMode = effectiveQuotaMode(candidate, quotaMode)
+			s.commitRoundRobinSelection(roundRobinKey, reservedAccountID, candidate.Credential.ID)
 			return lease, nil
 		}
 		if capacityWait <= 0 {
@@ -310,6 +311,83 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			return nil, &SelectionUnavailableError{Reason: SelectionSaturated, RetryAfter: time.Second}
 		}
 	}
+}
+
+// orderRoundRobinCandidates gives each healthy route pool an independent turn.
+// Capability and tier groups retain their routing precedence; accounts within a
+// group use stable ID order so retries and cache reloads remain predictable.
+func (s *Selector) orderRoundRobinCandidates(values []account.RoutingCandidate, key candidateCacheKey, tierOrder []account.WebTier) uint64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sort.SliceStable(values, func(i, j int) bool {
+		left, right := values[i], values[j]
+		if left.SupportsModel != right.SupportsModel {
+			return left.SupportsModel
+		}
+		if left.ModelCapabilityKnown != right.ModelCapabilityKnown {
+			return left.ModelCapabilityKnown
+		}
+		leftTier := tierOrderRank(tierOrder, left.Credential.WebTier)
+		rightTier := tierOrderRank(tierOrder, right.Credential.WebTier)
+		if leftTier != rightTier {
+			return leftTier < rightTier
+		}
+		return values[i].Credential.ID < values[j].Credential.ID
+	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.roundRobinLast == nil {
+		s.roundRobinLast = make(map[candidateCacheKey]uint64)
+	}
+	lastAccountID := s.roundRobinLast[key]
+	for start := 0; start < len(values); {
+		end := start + 1
+		for end < len(values) && sameRoundRobinGroup(values[start], values[end], tierOrder) {
+			end++
+		}
+		rotateCandidateGroupAfter(values[start:end], lastAccountID)
+		start = end
+	}
+	reservedAccountID := values[0].Credential.ID
+	s.roundRobinLast[key] = reservedAccountID
+	return reservedAccountID
+}
+
+func sameRoundRobinGroup(left, right account.RoutingCandidate, tierOrder []account.WebTier) bool {
+	return left.SupportsModel == right.SupportsModel &&
+		left.ModelCapabilityKnown == right.ModelCapabilityKnown &&
+		tierOrderRank(tierOrder, left.Credential.WebTier) == tierOrderRank(tierOrder, right.Credential.WebTier)
+}
+
+func rotateCandidateGroupAfter(values []account.RoutingCandidate, lastAccountID uint64) {
+	if len(values) < 2 || lastAccountID == 0 {
+		return
+	}
+	offset := 0
+	for index, candidate := range values {
+		if candidate.Credential.ID > lastAccountID {
+			offset = index
+			break
+		}
+	}
+	if offset == 0 {
+		return
+	}
+	ordered := append([]account.RoutingCandidate(nil), values[offset:]...)
+	ordered = append(ordered, values[:offset]...)
+	copy(values, ordered)
+}
+
+func (s *Selector) commitRoundRobinSelection(key candidateCacheKey, reservedAccountID, selectedAccountID uint64) {
+	if selectedAccountID == 0 || selectedAccountID == reservedAccountID {
+		return
+	}
+	s.mu.Lock()
+	if s.roundRobinLast[key] == reservedAccountID {
+		s.roundRobinLast[key] = selectedAccountID
+	}
+	s.mu.Unlock()
 }
 
 // promptCacheStickyKey 将调用方缓存键压缩为固定长度，仅用于本地账号粘滞索引。
@@ -347,29 +425,11 @@ func (s *Selector) AcquirePinned(ctx context.Context, provider account.Provider,
 				return nil, &SelectionUnavailableError{Reason: SelectionCooling, RetryAfter: retryDelay(now, *value.CooldownUntil)}
 			}
 			if recovery := candidate.QuotaRecovery; recovery != nil && recovery.Status != account.QuotaRecoveryStatusActive {
-				if recovery.NextProbeAt == nil || now.Before(*recovery.NextProbeAt) {
-					var retryAfter time.Duration
-					if recovery.NextProbeAt != nil {
-						retryAfter = retryDelay(now, *recovery.NextProbeAt)
-					}
-					return nil, &SelectionUnavailableError{Reason: SelectionQuotaExhausted, RetryAfter: retryAfter}
+				var retryAfter time.Duration
+				if recovery.NextProbeAt != nil {
+					retryAfter = retryDelay(now, *recovery.NextProbeAt)
 				}
-				lease, err := s.acquirePinnedCapacity(ctx, value)
-				if err != nil {
-					return nil, err
-				}
-				claimed, err := s.accounts.ClaimQuotaProbe(ctx, value.ID, now, now.Add(quotaProbeLease))
-				if err != nil || !claimed {
-					lease.Release()
-					if err != nil {
-						return nil, err
-					}
-					return nil, fmt.Errorf("绑定的上游账号恢复探测已被占用")
-				}
-				lease.QuotaProbe = true
-				lease.QuotaProbeKind = recovery.Kind
-				lease.Billing = candidate.Billing
-				return lease, nil
+				return nil, &SelectionUnavailableError{Reason: SelectionQuotaExhausted, RetryAfter: retryAfter}
 			}
 			if candidate.Billing != nil && candidate.Billing.IsExhausted(value.MinimumRemaining) {
 				return nil, &SelectionUnavailableError{Reason: SelectionQuotaExhausted}

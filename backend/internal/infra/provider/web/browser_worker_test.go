@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -44,13 +46,39 @@ func TestCallBrowserWorker(t *testing.T) {
 func TestCallBrowserWorkerPropagatesError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(writer).Encode(browserWorkerResponse{Error: "browser unavailable"})
+		_ = json.NewEncoder(writer).Encode(browserWorkerResponse{Error: "browser unavailable", Code: "proxy_unavailable"})
 	}))
 	defer server.Close()
 
 	_, err := callBrowserWorker(context.Background(), server.URL, browserWorkerRequest{})
 	if err == nil || err.Error() != "browser unavailable" {
 		t.Fatalf("error = %v", err)
+	}
+	var failure *browserWorkerFailure
+	if !errors.As(err, &failure) || failure.Code != "proxy_unavailable" {
+		t.Fatalf("classified error = %#v", failure)
+	}
+}
+
+func TestCallBrowserWorkerRetriesTransientFailure(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			writer.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(writer).Encode(browserWorkerResponse{Error: "browser restarting", Code: "browser_unavailable"})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(browserWorkerResponse{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			BodyBase64: base64.StdEncoding.EncodeToString([]byte("data: done\n\n")),
+		})
+	}))
+	defer server.Close()
+
+	result, err := callBrowserWorker(context.Background(), server.URL, browserWorkerRequest{})
+	if err != nil || result.StatusCode != http.StatusOK || calls.Load() != 2 {
+		t.Fatalf("result=%#v err=%v calls=%d", result, err, calls.Load())
 	}
 }
 

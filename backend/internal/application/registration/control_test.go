@@ -273,6 +273,27 @@ func TestControllerProtocolModeUsesConfiguredWorkerDispatcher(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvironmentInheritsAndOverridesBrowserConfig(t *testing.T) {
+	t.Setenv("REGISTRATION_BROWSER_MODE", "xvfb")
+	t.Setenv("REGISTRATION_BROWSER_PATH", "/usr/bin/chromium")
+	controller := &Controller{config: Config{SpoolPath: t.TempDir()}}
+	if value := environmentValue(controller.workerEnvironment(), "REGISTRATION_BROWSER_MODE"); value != "xvfb" {
+		t.Fatalf("inherited browser mode = %q", value)
+	}
+	if value := environmentValue(controller.workerEnvironment(), "REGISTRATION_BROWSER_PATH"); value != "/usr/bin/chromium" {
+		t.Fatalf("inherited browser path = %q", value)
+	}
+
+	controller.config.BrowserMode = "background"
+	controller.config.BrowserPath = "/opt/chromium"
+	if value := environmentValue(controller.workerEnvironment(), "REGISTRATION_BROWSER_MODE"); value != "background" {
+		t.Fatalf("overridden browser mode = %q", value)
+	}
+	if value := environmentValue(controller.workerEnvironment(), "REGISTRATION_BROWSER_PATH"); value != "/opt/chromium" {
+		t.Fatalf("overridden browser path = %q", value)
+	}
+}
+
 func TestProtocolWorkerArgumentsSupportConfiguredCommandShapes(t *testing.T) {
 	script := filepath.Join("registration", "protocol_register_cli.py")
 	tests := []struct {

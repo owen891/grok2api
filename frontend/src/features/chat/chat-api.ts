@@ -2,30 +2,21 @@ import { runtimeConfig } from "@/shared/config/runtime-config";
 import {
   imageModelForQuality,
   isSupportedImageUrl,
-  type ChatErrorClass,
   type ImageSettings,
 } from "./chat-types";
+import {
+  classifyGatewayError,
+  localizeGatewayMessage,
+  type ClassifiedError,
+} from "./chat-error";
 import { ChatSseUpstreamError, consumeChatSse } from "./chat-sse";
+
+export { classifyGatewayError } from "./chat-error";
+export type { ClassifiedError } from "./chat-error";
 
 export type GatewayModel = {
   id: string;
   owned_by?: string;
-};
-
-export type ClassifiedError = {
-  class: ChatErrorClass;
-  message: string;
-  code?: string;
-  status?: number;
-};
-
-type OpenAIErrorBody = {
-  error?: {
-    message?: string;
-    type?: string;
-    code?: string | number;
-  };
-  message?: string;
 };
 
 function joinUrl(path: string): string {
@@ -41,68 +32,6 @@ function authHeaders(clientKey: string, extra?: HeadersInit): Headers {
   return headers;
 }
 
-export function classifyGatewayError(status: number, body: unknown, fallback: string): ClassifiedError {
-  const parsed = (body ?? {}) as OpenAIErrorBody;
-  const rawMessage =
-    parsed.error?.message ||
-    parsed.message ||
-    (typeof body === "string" && body.trim() ? body : fallback);
-  const code = parsed.error?.code != null ? String(parsed.error.code) : parsed.error?.type;
-
-  let errorClass: ChatErrorClass = "unknown";
-  if (status === 401 || status === 403) errorClass = "auth";
-  else if (status === 408 || status === 504) errorClass = "timeout";
-  else if (status === 429) errorClass = "rate";
-  else if (status === 402 || /spending|entitlement|quota|cpa|account/i.test(String(rawMessage))) errorClass = "upstream";
-  else if (status >= 500) errorClass = "upstream";
-
-  return {
-    class: errorClass,
-    message: localizeGatewayMessage(errorClass, String(rawMessage || fallback), status),
-    code,
-    status,
-  };
-}
-
-function localizeGatewayMessage(errorClass: ChatErrorClass, message: string, status?: number): string {
-  const raw = (message || "").trim();
-
-  if (errorClass === "auth") {
-    if (/invalid|unauthorized|forbidden|token|api key|client key|secret/i.test(raw)) {
-      return "客户端密钥无效或已失效，请重新选择并确认密钥。";
-    }
-    return raw || "鉴权失败，请检查客户端密钥。";
-  }
-  if (errorClass === "timeout") {
-    if (/abort|cancel/i.test(raw)) return "请求已取消。";
-    return "请求超时，上游响应过慢，请稍后重试。";
-  }
-  if (errorClass === "rate") {
-    return "请求过于频繁，请稍后再试。";
-  }
-  if (errorClass === "upstream") {
-    if (/spending|entitlement|quota|cpa|account|balance|insufficient/i.test(raw)) {
-      return "上游账户额度或权限不足，请检查 Grok 账号状态。";
-    }
-    if (/model|not found|unsupported/i.test(raw)) {
-      return "当前模型不可用，请切换其他模型后重试。";
-    }
-    return raw || "上游服务异常，请稍后重试。";
-  }
-  if (!raw || /^http\s*\d+/i.test(raw) || /empty response body/i.test(raw)) {
-    if (status === 404) return "接口不存在或路径错误。";
-    if (status && status >= 500) return "服务暂时不可用，请稍后重试。";
-    if (/empty response body/i.test(raw)) return "服务器返回为空，请重试。";
-    return raw || "请求失败，请稍后重试。";
-  }
-  if (/failed to fetch|networkerror|load failed/i.test(raw)) {
-    return "网络连接失败，请检查服务是否在线。";
-  }
-  return raw;
-}
-
-
-
 async function readError(response: Response): Promise<ClassifiedError> {
   let body: unknown;
   try {
@@ -115,7 +44,11 @@ async function readError(response: Response): Promise<ClassifiedError> {
   } catch {
     body = null;
   }
-  return classifyGatewayError(response.status, body, `HTTP ${response.status}`);
+  const classified = classifyGatewayError(response.status, body, `HTTP ${response.status}`);
+  return {
+    ...classified,
+    requestId: classified.requestId || response.headers.get("X-Request-ID") || undefined,
+  };
 }
 
 export async function listGatewayModels(clientKey: string, signal?: AbortSignal): Promise<GatewayModel[]> {
@@ -131,9 +64,13 @@ export async function listGatewayModels(clientKey: string, signal?: AbortSignal)
   return Array.isArray(payload.data) ? payload.data : [];
 }
 
+export type ChatCompletionContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export type ChatCompletionMessage = {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ChatCompletionContentPart[];
 };
 
 export async function streamChatCompletion(options: {
@@ -165,11 +102,7 @@ export async function streamChatCompletion(options: {
     return await consumeChatSse(response.body, options.onDelta);
   } catch (error) {
     if (error instanceof ChatSseUpstreamError) {
-      throw {
-        class: "upstream",
-        message: error.message,
-        code: error.code,
-      } satisfies ClassifiedError;
+      throw classifyGatewayError(502, { error: { message: error.message, code: error.code } }, error.message);
     }
     throw error;
   }
@@ -179,6 +112,137 @@ export type GeneratedImage = {
   url: string;
   mimeType?: string;
 };
+
+type ImagePayloadItem = { url?: string; b64_json?: string; mime_type?: string };
+
+export function decodeGeneratedImages(payload: unknown): GeneratedImage[] {
+  const data = payload && typeof payload === "object" && "data" in payload
+    ? (payload as { data?: unknown }).data
+    : undefined;
+  const items = Array.isArray(data) ? data as ImagePayloadItem[] : [];
+  const images: GeneratedImage[] = [];
+  for (const item of items) {
+    if (item.url && isSupportedImageUrl(item.url)) {
+      images.push({ url: item.url.trim(), mimeType: item.mime_type });
+      continue;
+    }
+    if (item.b64_json) {
+      const mime = item.mime_type && /^image\/[a-z0-9.+-]+$/i.test(item.mime_type) ? item.mime_type : "image/png";
+      images.push({ url: `data:${mime};base64,${item.b64_json}`, mimeType: mime });
+    }
+  }
+  return images;
+}
+
+export type ImageJob =
+  | { status: "pending"; model?: string; progress: number }
+  | { status: "done"; model?: string; progress: 100; images: GeneratedImage[] }
+  | { status: "failed"; error: ClassifiedError };
+
+export async function createImageJob(options: {
+  clientKey: string;
+  prompt: string;
+  settings: ImageSettings;
+  model?: string;
+  signal?: AbortSignal;
+}): Promise<{ requestId: string }> {
+  const model = options.model || imageModelForQuality(options.settings.quality);
+  const response = await fetch(joinUrl("/v1/images/generations"), {
+    method: "POST",
+    headers: authHeaders(options.clientKey, { "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      model,
+      prompt: options.prompt,
+      n: Math.min(4, Math.max(1, options.settings.n)),
+      aspect_ratio: options.settings.aspectRatio,
+      resolution: options.settings.resolution,
+      response_format: "url",
+      async: true,
+    }),
+    signal: options.signal,
+  });
+  if (!response.ok) throw await readError(response);
+  const payload = await response.json() as { request_id?: unknown };
+  const requestId = typeof payload.request_id === "string" ? payload.request_id.trim() : "";
+  if (!requestId) {
+    throw { class: "upstream", message: "图片任务未返回 request_id" } satisfies ClassifiedError;
+  }
+  return { requestId };
+}
+
+export async function getImageJob(options: {
+  clientKey: string;
+  requestId: string;
+  signal?: AbortSignal;
+}): Promise<ImageJob> {
+  const response = await fetch(joinUrl(`/v1/images/${encodeURIComponent(options.requestId)}`), {
+    method: "GET",
+    headers: authHeaders(options.clientKey),
+    signal: options.signal,
+  });
+  if (!response.ok) throw await readError(response);
+  const payload = await response.json() as Record<string, unknown>;
+  if (payload.status === "done") {
+    return {
+      status: "done",
+      model: typeof payload.model === "string" ? payload.model : undefined,
+      progress: 100,
+      images: decodeGeneratedImages(payload),
+    };
+  }
+  if (payload.status === "failed") {
+    const classified = classifyGatewayError(502, payload, "图片任务失败");
+    return { status: "failed", error: { ...classified, requestId: classified.requestId || options.requestId } };
+  }
+  const progress = typeof payload.progress === "number" && Number.isFinite(payload.progress)
+    ? Math.min(99, Math.max(0, Math.round(payload.progress)))
+    : 0;
+  return {
+    status: "pending",
+    model: typeof payload.model === "string" ? payload.model : undefined,
+    progress,
+  };
+}
+
+function pollDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function waitForImageJob(options: {
+  clientKey: string;
+  requestId: string;
+  signal?: AbortSignal;
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+  onProgress?: (progress: number) => void;
+}): Promise<GeneratedImage[]> {
+  const startedAt = Date.now();
+  const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000;
+  for (;;) {
+    const job = await getImageJob(options);
+    if (job.status === "done") return job.images;
+    if (job.status === "failed") throw job.error;
+    options.onProgress?.(job.progress);
+    if (Date.now() - startedAt >= timeoutMs) {
+      throw { class: "timeout", message: "图片任务轮询超时", code: "image_job_timeout", requestId: options.requestId } satisfies ClassifiedError;
+    }
+    await pollDelay(options.pollIntervalMs ?? 1000, options.signal);
+  }
+}
 
 export async function generateImages(options: {
   clientKey: string;
@@ -206,22 +270,7 @@ export async function generateImages(options: {
     throw await readError(response);
   }
 
-  const payload = (await response.json()) as {
-    data?: Array<{ url?: string; b64_json?: string; mime_type?: string }>;
-  };
-  const items = Array.isArray(payload.data) ? payload.data : [];
-  const images: GeneratedImage[] = [];
-  for (const item of items) {
-    if (item.url && isSupportedImageUrl(item.url)) {
-      images.push({ url: item.url.trim(), mimeType: item.mime_type });
-      continue;
-    }
-    if (item.b64_json) {
-      const mime = item.mime_type && /^image\/[a-z0-9.+-]+$/i.test(item.mime_type) ? item.mime_type : "image/png";
-      images.push({ url: `data:${mime};base64,${item.b64_json}`, mimeType: mime });
-    }
-  }
-  return images;
+  return decodeGeneratedImages(await response.json());
 }
 
 export async function editImages(options: {
@@ -249,19 +298,7 @@ export async function editImages(options: {
   });
 
   if (!response.ok) throw await readError(response);
-  const payload = (await response.json()) as {
-    data?: Array<{ url?: string; b64_json?: string; mime_type?: string }>;
-  };
-  const images: GeneratedImage[] = [];
-  for (const item of Array.isArray(payload.data) ? payload.data : []) {
-    if (item.url && isSupportedImageUrl(item.url)) {
-      images.push({ url: item.url.trim(), mimeType: item.mime_type });
-    } else if (item.b64_json) {
-      const mime = item.mime_type && /^image\/[a-z0-9.+-]+$/i.test(item.mime_type) ? item.mime_type : "image/png";
-      images.push({ url: `data:${mime};base64,${item.b64_json}`, mimeType: mime });
-    }
-  }
-  return images;
+  return decodeGeneratedImages(await response.json());
 }
 
 export function isAbortError(error: unknown): boolean {

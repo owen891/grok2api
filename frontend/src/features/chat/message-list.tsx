@@ -8,6 +8,7 @@ import {
   Pencil,
   RefreshCw,
   Settings2,
+  Square,
   Trash2,
   User,
 } from "lucide-react";
@@ -105,16 +106,23 @@ function useElapsedSeconds(active: boolean, startedAt?: number) {
   return Math.max(0, Math.floor((now - start) / 1000));
 }
 
-function StreamingSkeleton({ startedAt }: { startedAt: number }) {
+function StreamingSkeleton({
+  startedAt,
+  kind,
+  progress,
+}: {
+  startedAt: number;
+  kind: "chat" | "image";
+  progress?: number;
+}) {
   const seconds = useElapsedSeconds(true, startedAt);
   return (
     <div className="space-y-2 py-1">
       <div className="h-3 w-28 animate-pulse rounded bg-muted" />
-      <div className="h-40 animate-pulse rounded-xl bg-muted/80" />
+      {kind === "image" ? <div className="h-40 animate-pulse rounded-xl bg-muted/80" /> : null}
       <div className="text-xs text-muted-foreground">
-        正在生成，已等待 {seconds} 秒
-        {seconds >= 8 ? " · 生图通常需要 8–15 秒" : " · 请稍候"}
-        {seconds >= 20 ? " · 仍在处理，可继续等待或点停止" : ""}
+        {kind === "image" ? "图片任务处理中" : "正在生成回复"}，已等待 {seconds} 秒
+        {typeof progress === "number" && progress > 0 ? ` · ${progress}%` : ""}
       </div>
     </div>
   );
@@ -123,21 +131,21 @@ function StreamingSkeleton({ startedAt }: { startedAt: number }) {
 export function MessageList({
   messages,
   emptyHint,
-  busy,
   onFillPrompt,
   onResend,
   onRegenerate,
   onDeleteMessage,
   onOpenImageSettings,
+  onStopTask,
 }: {
   messages: ChatMessage[];
   emptyHint: string;
-  busy?: boolean;
   onFillPrompt?: (prompt: string) => void;
   onResend?: (prompt: string, references?: ChatImageRef[]) => void;
   onRegenerate?: (prompt: string, references?: ChatImageRef[]) => void;
   onDeleteMessage?: (messageId: string) => void;
   onOpenImageSettings?: () => void;
+  onStopTask?: (messageId: string) => void;
 }) {
   const [preview, setPreview] = useState<LightboxImage | null>(null);
 
@@ -166,10 +174,11 @@ export function MessageList({
               ? messages[messageIndex - 1].images
               : undefined;
           const canRetry = Boolean(
-            onRegenerate && previousUserPrompt && (message.images?.length || message.error || message.content),
+            onRegenerate && previousUserPrompt && message.task?.status !== "running" && (message.images?.length || message.error || message.content),
           );
+          const taskRunning = message.task?.status === "queued" || message.task?.status === "running";
           const needsWideAssistant = Boolean(
-            !isUser && (message.streaming || message.error),
+            !isUser && (taskRunning || message.streaming || message.error),
           );
           const hasAssistantImages = Boolean(!isUser && message.images?.length);
           const hasMultipleAssistantImages = Boolean(!isUser && (message.images?.length ?? 0) > 1);
@@ -224,7 +233,6 @@ export function MessageList({
                         <ActionButton
                           label="重发"
                           onClick={() => {
-                            if (busy) return;
                             onResend?.(message.content, message.images);
                           }}
                         >
@@ -234,14 +242,19 @@ export function MessageList({
                     ) : null}
 
                     {!isUser && canRetry ? (
-                      <ActionButton
-                        label="重新生成"
-                        onClick={() => {
-                          if (busy) return;
-                          onRegenerate?.(previousUserPrompt, previousUserReferences);
+                        <ActionButton
+                          label="重新生成"
+                          onClick={() => {
+                            onRegenerate?.(previousUserPrompt, previousUserReferences);
                         }}
                       >
                         <RefreshCw className="h-3.5 w-3.5" />
+                      </ActionButton>
+                    ) : null}
+
+                    {!isUser && taskRunning && onStopTask ? (
+                      <ActionButton label="停止此任务" onClick={() => onStopTask(message.id)}>
+                        <Square className="h-3.5 w-3.5" />
                       </ActionButton>
                     ) : null}
 
@@ -267,11 +280,15 @@ export function MessageList({
                 >
                   <div className="mb-1 text-[11px] font-medium tracking-wide text-muted-foreground">
                     {isUser ? "你" : "助手"}
-                    {message.streaming ? " · 生成中" : ""}
+                    {taskRunning || message.streaming ? " · 生成中" : ""}
                   </div>
 
-                  {message.streaming && !message.content && !(message.images && message.images.length) ? (
-                    <StreamingSkeleton startedAt={message.createdAt} />
+                  {(taskRunning || message.streaming) && !message.content && !(message.images && message.images.length) ? (
+                    <StreamingSkeleton
+                      startedAt={message.createdAt}
+                      kind={message.task?.kind || "chat"}
+                      progress={message.task?.progress}
+                    />
                   ) : null}
 
                   {message.content ? <div className="space-y-2">{plainTextBlocks(message.content)}</div> : null}
@@ -387,12 +404,12 @@ export function MessageList({
                         errorClass={message.error.class}
                         message={message.error.message}
                         code={message.error.code}
+                        requestId={message.error.requestId}
                       />
                       {previousUserPrompt ? (
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
-                            disabled={busy}
                             onClick={() => onRegenerate?.(previousUserPrompt, previousUserReferences)}
                             className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
                           >
@@ -401,7 +418,6 @@ export function MessageList({
                           </button>
                           <button
                             type="button"
-                            disabled={busy}
                             onClick={() => {
                               onFillPrompt?.(previousUserPrompt);
                               onOpenImageSettings?.();
@@ -420,6 +436,12 @@ export function MessageList({
                   {!isUser && message.generation ? (
                     <div className="mt-2 text-[11px] text-muted-foreground">
                       {formatGenerationMeta(message.generation)}
+                    </div>
+                  ) : null}
+
+                  {!isUser && message.task?.kind === "image" && message.task.requestId ? (
+                    <div className="mt-1 break-all text-[10px] text-muted-foreground/75">
+                      任务 ID · {message.task.requestId}
                     </div>
                   ) : null}
                 </div>

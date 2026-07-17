@@ -40,6 +40,8 @@ type Config struct {
 	WorkDir         string
 	ConfigPath      string
 	Command         []string
+	BrowserMode     string
+	BrowserPath     string
 }
 
 type Service struct {
