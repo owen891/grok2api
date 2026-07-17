@@ -1,7 +1,18 @@
 {
-  "latest": "v3.0.6",
+  "latest": "v3.0.7",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.0.7",
+      "date": "2026-07-18",
+      "entries": [
+        {
+          "type": "feature",
+          "zh": "Grok Web 账号状态栏新增“未开启 NSFW”快速筛选，可直接查看需要开启 NSFW 的账号。",
+          "en": "Added a 'NSFW disabled' quick filter to the Grok Web account status bar."
+        }
+      ]
+    },
     {
       "version": "v3.0.6",
       "date": "2026-07-18",

@@ -638,10 +638,10 @@ export function AccountsPage() {
                   ] }] : []),
                 ]} />
                 <Tabs
-                  value={nsfwFilter === "enabled" ? "nsfw" : statusFilter || "all"}
+                  value={nsfwFilter ? `nsfw-${nsfwFilter}` : statusFilter || "all"}
                   onValueChange={(value) => {
-                    if (value === "nsfw") {
-                      setNsfwFilter("enabled");
+                    if (value === "nsfw-enabled" || value === "nsfw-disabled") {
+                      setNsfwFilter(value === "nsfw-enabled" ? "enabled" : "disabled");
                       setStatusFilter("");
                     } else {
                       setNsfwFilter("");
@@ -657,7 +657,10 @@ export function AccountsPage() {
                     {quickStatusFilters.map((filter) => (
                       <TabsTrigger key={filter.value} value={filter.value}>{filter.label}</TabsTrigger>
                     ))}
-                    {provider === "grok_web" ? <TabsTrigger value="nsfw">{t("accounts.nsfw")}</TabsTrigger> : null}
+                    {provider === "grok_web" ? <>
+                      <TabsTrigger value="nsfw-enabled">{t("accounts.nsfw")}</TabsTrigger>
+                      <TabsTrigger value="nsfw-disabled">{t("accounts.nsfwNotEnabled")}</TabsTrigger>
+                    </> : null}
                   </TabsList>
                 </Tabs>
               </div>
