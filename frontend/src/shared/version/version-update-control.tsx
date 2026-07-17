@@ -15,6 +15,7 @@ const categoryStyles: Record<ReleaseEntryType, string> = {
   security: "border-amber-500/30 bg-amber-500/8 text-amber-700 dark:text-amber-300",
   ops: "border-sky-500/30 bg-sky-500/8 text-sky-700 dark:text-sky-300",
   improvement: "border-violet-500/30 bg-violet-500/8 text-violet-700 dark:text-violet-300",
+  style: "border-indigo-500/30 bg-indigo-500/8 text-indigo-700 dark:text-indigo-300",
 };
 
 export function VersionUpdateControl() {
@@ -133,7 +134,7 @@ const zhCopy = {
   current: "当前",
   updateAvailable: "有新版本",
   github: "前往 GitHub 更新",
-  categories: { feature: "功能", fix: "修复", security: "安全", ops: "运维", improvement: "优化" },
+  categories: { feature: "功能", fix: "修复", security: "安全", ops: "运维", improvement: "优化", style: "界面" },
 } as const;
 
 const enCopy = {
@@ -149,5 +150,5 @@ const enCopy = {
   current: "Current",
   updateAvailable: "Update available",
   github: "View updates on GitHub",
-  categories: { feature: "Feature", fix: "Fix", security: "Security", ops: "Ops", improvement: "Improvement" },
+  categories: { feature: "Feature", fix: "Fix", security: "Security", ops: "Ops", improvement: "Improvement", style: "Style" },
 } as const;

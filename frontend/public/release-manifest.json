@@ -1,7 +1,18 @@
 {
-  "latest": "v3.0.7",
+  "latest": "v3.0.8",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.0.8",
+      "date": "2026-07-18",
+      "entries": [
+        {
+          "type": "fix",
+          "zh": "修复版本更新清单包含界面类型说明时无法解析，导致版本信息和更新说明不显示的问题。",
+          "en": "Fixed release information disappearing when the manifest contained interface-style entries."
+        }
+      ]
+    },
     {
       "version": "v3.0.7",
       "date": "2026-07-18",

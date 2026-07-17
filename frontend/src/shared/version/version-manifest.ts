@@ -1,4 +1,4 @@
-export const releaseEntryTypes = ["feature", "fix", "security", "ops", "improvement"] as const;
+export const releaseEntryTypes = ["feature", "fix", "security", "ops", "improvement", "style"] as const;
 
 export type ReleaseEntryType = (typeof releaseEntryTypes)[number];
 
