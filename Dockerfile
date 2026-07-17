@@ -15,6 +15,7 @@ RUN --mount=type=cache,id=grok2api-pnpm,target=/pnpm/store \
     pnpm install --offline --frozen-lockfile
 
 COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig.json frontend/tsconfig.app.json frontend/tsconfig.node.json ./
+COPY VERSION /src/VERSION
 COPY frontend/public ./public
 COPY frontend/src ./src
 RUN --mount=type=cache,id=grok2api-tsc,target=/src/frontend/.cache,sharing=locked \
