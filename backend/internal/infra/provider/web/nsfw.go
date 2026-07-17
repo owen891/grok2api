@@ -116,8 +116,50 @@ func (a *Adapter) nsfwGRPC(ctx context.Context, lease *infraegress.Lease, endpoi
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("gRPC Web returned %d", response.StatusCode)
 	}
-	if _, err := firstGRPCWebMessage(data); err != nil {
+	if err := grpcWebStatus(data); err != nil {
 		return err
+	}
+	return nil
+}
+
+// grpcWebStatus validates the response trailers without requiring a protobuf
+// message. Auth mutation RPCs commonly return an empty successful body.
+func grpcWebStatus(body []byte) error {
+	grpcStatus := ""
+	grpcMessage := ""
+	for len(body) >= 5 {
+		flag := body[0]
+		length := int(binary.BigEndian.Uint32(body[1:5]))
+		body = body[5:]
+		if length < 0 || length > len(body) {
+			return fmt.Errorf("invalid gRPC-Web frame length")
+		}
+		payload := body[:length]
+		body = body[length:]
+		if flag&0x80 == 0 {
+			if flag != 0 {
+				return fmt.Errorf("unsupported compressed gRPC-Web response")
+			}
+			continue
+		}
+		for _, line := range bytes.Split(payload, []byte{'\n'}) {
+			name, value, ok := bytes.Cut(bytes.TrimSpace(line), []byte{':'})
+			if !ok {
+				continue
+			}
+			switch string(bytes.ToLower(bytes.TrimSpace(name))) {
+			case "grpc-status":
+				grpcStatus = string(bytes.TrimSpace(value))
+			case "grpc-message":
+				grpcMessage = string(bytes.TrimSpace(value))
+			}
+		}
+	}
+	if grpcStatus != "" && grpcStatus != "0" {
+		if grpcMessage != "" {
+			return fmt.Errorf("gRPC-Web status %s: %s", grpcStatus, grpcMessage)
+		}
+		return fmt.Errorf("gRPC-Web status %s", grpcStatus)
 	}
 	return nil
 }
