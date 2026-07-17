@@ -1,0 +1,51 @@
+name: Turnstile Solver Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/solver-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: turnstile-solver-image
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish solver image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pinned solver source
+        uses: actions/checkout@v4
+        with:
+          repository: HM2899/grokcli-2api
+          ref: 0d48ecf8b4ee17930b54f56551541fef8d5a61d4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish solver
+        uses: docker/build-push-action@v6
+        with:
+          context: ./turnstile-solver
+          file: ./turnstile-solver/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/owen891/grok2api:solver-0d48ecf8b4ee
+          cache-from: type=gha,scope=turnstile-solver
+          cache-to: type=gha,scope=turnstile-solver,mode=max
+          provenance: mode=max
+          sbom: true
