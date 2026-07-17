@@ -256,7 +256,10 @@ export function RegistrationPage() {
                   { value: "web", label: t("registration.accountTypeWeb") },
                   { value: "build", label: t("registration.accountTypeBuild") },
                 ]}
-                onChange={(value) => updateStart("accountType", value as RegistrationStartInput["accountType"])}
+                onChange={(value) => {
+                  const accountType = value as RegistrationStartInput["accountType"];
+                  setStartInput((current) => ({ ...current, accountType, autoNSFW: accountType === "web" ? true : false }));
+                }}
               />
               <NumberField
                 label={t(running ? "registration.nextBatchCount" : "registration.batchCount")}

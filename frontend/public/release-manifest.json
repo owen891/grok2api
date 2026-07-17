@@ -1,7 +1,18 @@
 {
-  "latest": "v3.0.5",
+  "latest": "v3.0.6",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.0.6",
+      "date": "2026-07-18",
+      "entries": [
+        {
+          "type": "fix",
+          "zh": "修复 Web 注册自动开启 NSFW 容易漏开的默认状态；切换到 Web 注册时默认勾选，切换到 Build 时自动关闭。",
+          "en": "Fixed the Web registration NSFW option being easy to miss by enabling it by default for Web and disabling it for Build."
+        }
+      ]
+    },
     {
       "version": "v3.0.5",
       "date": "2026-07-18",
