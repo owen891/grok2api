@@ -470,6 +470,28 @@ func TestPreflightRejectsInBandErrorBeforeStreaming(t *testing.T) {
 	}
 }
 
+func TestPreflightRejectsNestedUsageLimitAfterConversationFrame(t *testing.T) {
+	source := io.NopCloser(strings.NewReader(strings.Join([]string{
+		`data: {"result":{"conversation":{"conversationId":"conv_1"}}}`,
+		`data: {"result":{"response":{"error":{"message":"You've reached your usage limit. Please try again later."}}}}`,
+	}, "\n") + "\n"))
+	if _, err := preflightUpstream(source); !errors.Is(err, errWebUsageLimit) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestWebUsageLimitResponseUsesGatewayQuotaContract(t *testing.T) {
+	response := webUsageLimitResponse(errWebUsageLimit)
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests || !bytes.Contains(body, []byte(`"code":"usage_limit_reached"`)) {
+		t.Fatalf("status = %d, body = %s", response.StatusCode, body)
+	}
+}
+
 func TestPreflightClassifiesAntiBotRejection(t *testing.T) {
 	source := io.NopCloser(strings.NewReader(`{"error":{"message":"Request rejected by anti-bot rules.","code":7,"details":[]}}` + "\n"))
 	if _, err := preflightUpstream(source); !errors.Is(err, errWebAntiBot) {

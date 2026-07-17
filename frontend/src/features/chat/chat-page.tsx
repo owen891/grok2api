@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Loader2, Menu, MessageSquarePlus, Trash2, X } from "lucide-react";
+import { AlertTriangle, Loader2, Menu, MessageSquarePlus, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -17,10 +17,12 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   getClientKeySecret,
+  createClientKey,
   listClientKeys,
   type ClientKeyDTO,
 } from "@/features/client-keys/client-keys-api";
-import { listModels } from "@/entities/model/model-api";
+import { getAccountSummary } from "@/features/accounts/accounts-api";
+import { listModels, syncModels } from "@/entities/model/model-api";
 import type { ModelRouteDTO } from "@/entities/model/types";
 import {
   createImageJob,
@@ -83,6 +85,25 @@ async function loadAllModels(): Promise<ModelRouteDTO[]> {
     if (result.items.length === 0) break;
     page += 1;
   }
+  // A fresh installation can have accounts but no persisted capability routes yet.
+  // Reconcile once here so the chat screen becomes usable without a manual admin action.
+  if (items.length === 0) {
+    try {
+      await syncModels();
+      page = 1;
+      total = Number.POSITIVE_INFINITY;
+      items.length = 0;
+      while (items.length < total && page <= 20) {
+        const result = await listModels({ page, pageSize });
+        items.push(...result.items.filter((m) => m.enabled));
+        total = result.total;
+        if (result.items.length === 0) break;
+        page += 1;
+      }
+    } catch {
+      // The normal model query error is still surfaced by the metadata query.
+    }
+  }
   return items;
 }
 
@@ -98,7 +119,21 @@ async function loadActiveClientKeys(): Promise<ClientKeyDTO[]> {
     if (result.items.length === 0) break;
     page += 1;
   }
-  return items.filter((key) => key.enabled);
+  const active = items.filter((key) => key.enabled);
+  if (active.length > 0) return active;
+
+  // Keep the first-run chat flow self-contained. An empty allowedModelIds list is
+  // the existing backend convention for allowing every enabled model route.
+  const created = await createClientKey({
+    name: "默认密钥",
+    enabled: true,
+    expiresAt: "",
+    rpmLimit: 0,
+    maxConcurrent: 0,
+    billingLimitUsdTicks: 0,
+    allowedModelIds: [],
+  });
+  return [created.key];
 }
 
 function pickImageModel(imageModels: string[], quality: "speed" | "quality"): string {
@@ -144,14 +179,15 @@ export function ChatPage() {
   const metadataQuery = useQuery({
     queryKey: ["chat", "metadata"],
     queryFn: async () => {
-      const [clientKeys, adminModels] = await Promise.all([loadActiveClientKeys(), loadAllModels()]);
-      return { clientKeys, adminModels };
+      const [clientKeys, adminModels, accountSummary] = await Promise.all([loadActiveClientKeys(), loadAllModels(), getAccountSummary()]);
+      return { clientKeys, adminModels, accountSummary };
     },
   });
   const clientKeys = metadataQuery.data?.clientKeys ?? emptyClientKeys;
   const adminModels = metadataQuery.data?.adminModels ?? emptyAdminModels;
+  const accountSummary = metadataQuery.data?.accountSummary;
   const selectedClientKey = useMemo(
-    () => clientKeys.find((key) => key.id === prefs.clientKeyId) ?? null,
+    () => clientKeys.find((key) => key.id === prefs.clientKeyId) ?? clientKeys[0] ?? null,
     [clientKeys, prefs.clientKeyId],
   );
   const effectiveClientKeyId = selectedClientKey?.id ?? null;
@@ -176,6 +212,8 @@ export function ChatPage() {
     : metadataQuery.error
       ? t("chat.metaLoadFailed")
       : null;
+  const noUpstreamAccounts = !loadingMeta && !metaError && accountSummary?.total === 0;
+  const noAvailableModels = !loadingMeta && !metaError && Boolean(accountSummary && accountSummary.total > 0) && adminModels.length === 0 && gatewayModelIds.length === 0;
 
   const chatModels = useMemo(() => {
     const gatewayChat = gatewayModelIds.filter((id) => !/imagine|image|video/i.test(id));
@@ -697,6 +735,17 @@ export function ChatPage() {
                   {t("chat.manageKeys")}
                 </Link>
               </p>
+            ) : null}
+            {noUpstreamAccounts ? (
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{t("chat.noUpstreamAccounts")} <Link to="/accounts" className="font-medium underline underline-offset-2">{t("chat.connectAccount")}</Link></span>
+              </div>
+            ) : noAvailableModels ? (
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{t("chat.noAvailableModels")} <Link to="/models" className="font-medium underline underline-offset-2">{t("chat.manageModels")}</Link></span>
+              </div>
             ) : null}
             {metaError ? <p className="mt-2 text-xs text-destructive">{metaError}</p> : null}
             {loadingMeta || loadingSecret ? (

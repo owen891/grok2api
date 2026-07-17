@@ -1029,7 +1029,8 @@ function AccountStatus({ account }: { account: AccountDTO }) {
 
 function isWebQuotaExhausted(windows: AccountDTO["quotaWindows"]): boolean {
   if (!windows || windows.length === 0) return false;
-  const weekly = windows.find((window) => window.mode === "weekly");
-  if (weekly) return weekly.remaining <= 0;
-  return windows.every((window) => window.remaining <= 0);
+  // An exhausted mode is still an unavailable account for normal routing.
+  // Show the same waiting state as the selector so the account list does not
+  // claim an account is healthy while its active quota is already zero.
+  return windows.some((window) => window.remaining <= 0);
 }

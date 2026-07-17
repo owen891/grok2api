@@ -194,6 +194,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				a.feedbackAntiBot(ctx, lease, statsigTarget)
 				return antiBotProviderResponse(), nil
 			}
+			if isWebUsageLimitError(preflightErr) {
+				return webUsageLimitResponse(preflightErr), nil
+			}
 			return nil, preflightErr
 		}
 
@@ -208,6 +211,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			if errors.Is(consumeErr, errWebAntiBot) {
 				a.feedbackAntiBot(ctx, lease, statsigTarget)
 				return antiBotProviderResponse(), nil
+			}
+			if isWebUsageLimitError(consumeErr) {
+				return webUsageLimitResponse(consumeErr), nil
 			}
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, consumeErr)
 			return nil, consumeErr
@@ -265,8 +271,13 @@ func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 					if errorValue, ok := root["error"].(map[string]any); ok {
 						return nil, webResponseError(errorValue)
 					}
-					if result, ok := root["result"].(map[string]any); ok && (result["conversation"] != nil || result["response"] != nil) {
-						return &readerCloser{Reader: io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), closer: source}, nil
+					if result, ok := root["result"].(map[string]any); ok {
+						if response, ok := result["response"].(map[string]any); ok {
+							if errorValue, ok := response["error"].(map[string]any); ok {
+								return nil, webResponseError(errorValue)
+							}
+							return &readerCloser{Reader: io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), closer: source}, nil
+						}
 					}
 				}
 			}
@@ -855,6 +866,18 @@ func isWebUsageLimitMessage(message string) bool {
 
 func isWebUsageLimitError(err error) bool {
 	return errors.Is(err, errWebUsageLimit) || (err != nil && isWebUsageLimitMessage(err.Error()))
+}
+
+func webUsageLimitResponse(err error) *provider.Response {
+	message := "Grok Web usage limit reached"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		message = err.Error()
+	}
+	return jsonProviderResponse(http.StatusTooManyRequests, map[string]any{"error": map[string]any{
+		"message": message,
+		"type":    "rate_limit_error",
+		"code":    "usage_limit_reached",
+	}})
 }
 
 func collectModelResponseImages(parsed *parsedChat, modelResponse map[string]any) string {
