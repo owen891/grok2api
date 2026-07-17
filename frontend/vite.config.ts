@@ -1,13 +1,17 @@
 import path from "node:path";
+import { readFileSync } from "node:fs";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+const appVersion = readFileSync(path.resolve(__dirname, "../VERSION"), "utf8").trim();
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   define: {
     __GROK2API_DEV_API_TARGET__: JSON.stringify(process.env.VITE_DEV_API_TARGET ?? ""),
+    __APP_VERSION__: JSON.stringify(appVersion),
   },
   resolve: {
     alias: {

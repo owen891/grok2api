@@ -1,0 +1,54 @@
+{
+  "latest": "v3.0.2",
+  "repositoryURL": "https://github.com/owen891/grok2api",
+  "releases": [
+    {
+      "version": "v3.0.2",
+      "date": "2026-07-17",
+      "entries": [
+        {
+          "type": "feature",
+          "zh": "新增版本更新入口、可滚动版本历史、更新状态圆点和自动提醒。",
+          "en": "Added the version center, scrollable release history, update indicator, and automatic reminders."
+        },
+        {
+          "type": "ops",
+          "zh": "版本信息由构建时 VERSION 注入，并从 GitHub manifest 检查最新版本。",
+          "en": "Injects the current VERSION at build time and checks the latest GitHub manifest."
+        }
+      ]
+    },
+    {
+      "version": "v3.0.1",
+      "date": "2026-07-17",
+      "entries": [
+        {
+          "type": "fix",
+          "zh": "修复协议注册在 Docker 与服务器环境中的 Solver、代理和预检配置。",
+          "en": "Fixed Solver, proxy, and preflight settings for protocol registration in Docker and server deployments."
+        },
+        {
+          "type": "fix",
+          "zh": "spool 文件增加跨进程原子认领，避免多个实例重复导入同一凭据。",
+          "en": "Added cross-process atomic spool claims to prevent duplicate credential imports."
+        },
+        {
+          "type": "ops",
+          "zh": "失败凭据支持定时清理，服务器发布目录、数据目录和注册网络配置改为稳定参数。",
+          "en": "Added failed-credential retention and stable server paths and registration network settings."
+        }
+      ]
+    },
+    {
+      "version": "v3.0.0",
+      "date": "2026-07-13",
+      "entries": [
+        {
+          "type": "feature",
+          "zh": "发布 Grok2API v3 管理后台、注册任务、聊天工作区和媒体管理能力。",
+          "en": "Released the Grok2API v3 console, registration tasks, chat workspace, and media management."
+        }
+      ]
+    }
+  ]
+}
