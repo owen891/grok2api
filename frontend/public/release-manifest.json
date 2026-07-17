@@ -1,7 +1,33 @@
 {
-  "latest": "v3.0.2",
+  "latest": "v3.0.3",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.0.3",
+      "date": "2026-07-17",
+      "entries": [
+        {
+          "type": "fix",
+          "zh": "修复 Grok Web 生图与对话调度：模糊 429 保留真实额度并短暂冷却换号，只有上游明确确认耗尽时才标记对应额度窗口。",
+          "en": "Fixed Grok Web image and chat scheduling so ambiguous 429 responses preserve quota and retry another account, while only confirmed exhaustion marks the relevant quota window."
+        },
+        {
+          "type": "feature",
+          "zh": "账号管理新增按当前筛选结果全选、反选和清空选择，并补齐 Web 额度耗尽状态展示。",
+          "en": "Added filtered select-all, invert, and clear-selection actions to account management, plus accurate Web quota exhaustion status."
+        },
+        {
+          "type": "fix",
+          "zh": "修复协议注册代理预检与 worker 参数传递，支持直连、显式代理和系统代理解析，并返回具体失败检查项。",
+          "en": "Fixed protocol registration proxy preflight and worker argument propagation for direct, explicit, and system proxy modes, with actionable failed-check details."
+        },
+        {
+          "type": "ops",
+          "zh": "补齐注册代理、Turnstile Solver 和服务器发布目录的 Compose 配置与部署说明。",
+          "en": "Completed Compose configuration and deployment guidance for registration proxies, the Turnstile solver, and server release directories."
+        }
+      ]
+    },
     {
       "version": "v3.0.2",
       "date": "2026-07-17",

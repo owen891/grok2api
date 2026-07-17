@@ -173,7 +173,7 @@ const decodeDevicePoll = createObjectDecoder<DevicePollDTO>("device poll", {
   status: isOneOf("pending", "succeeded", "syncFailed"), account: isOptional(accountValidator), synced: isOptional(isNumber), syncFailed: isOptional(isNumber),
 });
 
-type ListAccountsInput = {
+export type ListAccountsInput = {
   page: number;
   pageSize: number;
   search?: string;
@@ -197,6 +197,18 @@ export function listAccounts(input: ListAccountsInput): Promise<PaginatedDTO<Acc
   }
   query.set("provider", input.provider);
   return apiRequest(`/api/admin/v1/accounts?${query}`, {}, decodeAccountPage);
+}
+
+export async function listAllAccountIDs(input: Omit<ListAccountsInput, "page" | "pageSize">): Promise<string[]> {
+  const pageSize = 100;
+  const firstPage = await listAccounts({ ...input, page: 1, pageSize });
+  const ids = new Set(firstPage.items.map((account) => account.id));
+  const pageCount = Math.ceil(firstPage.total / pageSize);
+  for (let page = 2; page <= pageCount; page += 1) {
+    const result = await listAccounts({ ...input, page, pageSize });
+    result.items.forEach((account) => ids.add(account.id));
+  }
+  return [...ids];
 }
 
 export function getAccountSummary(): Promise<AccountSummaryDTO> {

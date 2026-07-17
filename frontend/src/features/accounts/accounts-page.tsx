@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link2, MoreHorizontal, Pencil, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
+import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link2, ListChecks, ListRestart, MoreHorizontal, Pencil, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -41,6 +41,7 @@ import {
   importAccounts,
   importConsoleAccounts,
   importWebAccounts,
+  listAllAccountIDs,
   listAccounts,
   pollDeviceAuthorization,
   refreshAccountBilling,
@@ -384,6 +385,32 @@ export function AccountsPage() {
     onError: showError,
   });
 
+  const selectionFilterKey = [provider, debouncedSearch, typeFilter, statusFilter, provider === "grok_build" ? renewalFilter : ""].join("\u0000");
+  const selectionFilterKeyRef = useRef(selectionFilterKey);
+  useEffect(() => {
+    selectionFilterKeyRef.current = selectionFilterKey;
+  }, [selectionFilterKey]);
+  const filteredSelectionMutation = useMutation({
+    mutationFn: async (mode: "all" | "invert") => ({
+      mode,
+      key: selectionFilterKey,
+      ids: await listAllAccountIDs({
+        provider,
+        search: debouncedSearch,
+        type: typeFilter,
+        status: statusFilter,
+        renewal: provider === "grok_build" ? renewalFilter : undefined,
+        sortBy: sort.field,
+        sortOrder: sort.order,
+      }),
+    }),
+    onSuccess: ({ mode, key, ids }) => {
+      if (key !== selectionFilterKeyRef.current) return;
+      setSelected((current) => mode === "all" ? new Set(ids) : new Set(ids.filter((id) => !current.has(id))));
+    },
+    onError: showError,
+  });
+
   useEffect(() => {
     if (!deviceOpen || !deviceSession || deviceStatus !== "pending") {
       return;
@@ -526,6 +553,8 @@ export function AccountsPage() {
     { value: "disabled", label: t("accounts.statusDisabled") },
     { value: "reauthRequired", label: t("accounts.statusReauthRequired") },
     { value: "cooldown", label: t("accounts.statusCooldown") },
+    { value: "waitingReset", label: t("accounts.waitingReset") },
+    { value: "probing", label: t("accounts.probing") },
   ] as const;
 
   return (
@@ -565,68 +594,66 @@ export function AccountsPage() {
 
         <DataTableShell
         toolbar={(
-          <>
-            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-              <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
-                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input className="h-8 pl-9 text-xs" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder={t("accounts.search")} aria-label={t("accounts.search")} />
-              </div>
-              <DataTableFilters filters={[
-                ...(provider === "grok_console" ? [] : [{ id: "type", label: t("accounts.type"), value: typeFilter, onChange: (value: string) => { setTypeFilter(value); setPage(1); }, options: provider === "grok_web" ? [
-                  { value: "auto", label: "Auto" },
-                  { value: "basic", label: "Basic" },
-                  { value: "super", label: "Super" },
-                  { value: "heavy", label: "Heavy" },
-                ] : [
-                  { value: "free", label: t("accounts.quotaFree") },
-                  { value: "paid", label: t("accounts.quotaSuper") },
-                  { value: "unknown", label: t("dashboard.unknown") },
-                ] }]),
-                { id: "status", label: t("accounts.status"), value: statusFilter, onChange: (value) => { setStatusFilter(value); setPage(1); }, options: [
-                  { value: "active", label: t("accounts.statusActive") },
-                  { value: "disabled", label: t("accounts.statusDisabled") },
-                  { value: "reauthRequired", label: t("accounts.statusReauthRequired") },
-                  { value: "cooldown", label: t("accounts.statusCooldown") },
-                  { value: "waitingReset", label: t("accounts.waitingReset") },
-                  { value: "probing", label: t("accounts.probing") },
-                ] },
-                ...(provider === "grok_build" ? [{ id: "renewal", label: t("accountCredential.label"), value: renewalFilter, onChange: (value: string) => { setRenewalFilter(value); setPage(1); }, options: [
-                  { value: "refreshable", label: t("accountCredential.autoRefresh") },
-                  { value: "unrefreshable", label: t("accountCredential.noAutoRefresh") },
-                ] }] : []),
-              ]} />
-              <Tabs
-                value={statusFilter || "all"}
-                onValueChange={(value) => { setStatusFilter(value === "all" ? "" : value); setPage(1); }}
-                className="w-full sm:w-auto"
-                aria-label={t("accounts.status")}
-              >
-                <TabsList className="max-w-full overflow-x-auto">
-                  {quickStatusFilters.map((filter) => (
-                    <TabsTrigger key={filter.value} value={filter.value}>{filter.label}</TabsTrigger>
-                  ))}
-                </TabsList>
-              </Tabs>
-              {selected.size > 0 ? (
-                <div className="ml-1 border-l border-border/70 pl-2">
-                  <Button variant="destructive" size="sm" onClick={() => setBatchDeleteOpen(true)}>
-                    <Trash2 />
-                    {t("common.delete")}
-                  </Button>
+          <div className="flex min-h-10 w-full flex-wrap items-center justify-between gap-2">
+            {selected.size === 0 ? (
+              <>
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input className="h-8 pl-9 text-xs" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); setSelected(new Set()); }} placeholder={t("accounts.search")} aria-label={t("accounts.search")} />
                 </div>
-              ) : null}
-            </div>
-            {selected.size > 0 ? (
-              <div className="flex flex-wrap items-center gap-1.5 sm:border-l sm:border-border/70 sm:pl-3">
-                <span className="mr-1 text-xs text-muted-foreground">{t("common.selectedCount", { count: selected.size })}</span>
-                <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(true)}>{t("common.enable")}</Button>
-                <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(false)}>{t("common.disable")}</Button>
-                {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets([...selected])}>{t("accounts.convertToBuild")}</Button> : null}
-                {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets([...selected])}>{t("webConsoleSync.action")}</Button> : null}
-                {provider === "grok_build" ? <Button variant="secondary" size="sm" onClick={() => batchBillingMutation.mutate()}>{t("accounts.refreshBilling")}</Button> : null}
+                <DataTableFilters filters={[
+                  ...(provider === "grok_console" ? [] : [{ id: "type", label: t("accounts.type"), value: typeFilter, onChange: (value: string) => { setTypeFilter(value); setPage(1); setSelected(new Set()); }, options: provider === "grok_web" ? [
+                    { value: "auto", label: "Auto" },
+                    { value: "basic", label: "Basic" },
+                    { value: "super", label: "Super" },
+                    { value: "heavy", label: "Heavy" },
+                  ] : [
+                    { value: "free", label: t("accounts.quotaFree") },
+                    { value: "paid", label: t("accounts.quotaSuper") },
+                    { value: "unknown", label: t("dashboard.unknown") },
+                  ] }]),
+                  { id: "status", label: t("accounts.status"), value: statusFilter, onChange: (value) => { setStatusFilter(value); setPage(1); setSelected(new Set()); }, options: [
+                    { value: "active", label: t("accounts.statusActive") },
+                    { value: "disabled", label: t("accounts.statusDisabled") },
+                    { value: "reauthRequired", label: t("accounts.statusReauthRequired") },
+                    { value: "cooldown", label: t("accounts.statusCooldown") },
+                    { value: "waitingReset", label: t("accounts.waitingReset") },
+                    { value: "probing", label: t("accounts.probing") },
+                  ] },
+                  ...(provider === "grok_build" ? [{ id: "renewal", label: t("accountCredential.label"), value: renewalFilter, onChange: (value: string) => { setRenewalFilter(value); setPage(1); setSelected(new Set()); }, options: [
+                    { value: "refreshable", label: t("accountCredential.autoRefresh") },
+                    { value: "unrefreshable", label: t("accountCredential.noAutoRefresh") },
+                  ] }] : []),
+                ]} />
+                <Tabs
+                  value={statusFilter || "all"}
+                  onValueChange={(value) => { setStatusFilter(value === "all" ? "" : value); setPage(1); setSelected(new Set()); }}
+                  className="w-full sm:w-auto"
+                  aria-label={t("accounts.status")}
+                >
+                  <TabsList className="max-w-full overflow-x-auto">
+                    {quickStatusFilters.map((filter) => (
+                      <TabsTrigger key={filter.value} value={filter.value}>{filter.label}</TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
+                {(result?.total ?? 0) > 0 ? (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="sm" disabled={filteredSelectionMutation.isPending}>
+                        {filteredSelectionMutation.isPending ? <Spinner /> : <ListChecks />}
+                        {t("common.selection")}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem onClick={() => filteredSelectionMutation.mutate("all")}><ListChecks />{t("common.selectAllFiltered")}</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => filteredSelectionMutation.mutate("invert")}><ListRestart />{t("common.invertFilteredSelection")}</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : null}
               </div>
-            ) : (
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets("all")}>{t("accountBulk.convertAllToBuild")}</Button> : null}
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets("all")}>{t("webConsoleSync.allAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
@@ -646,8 +673,34 @@ export function AccountsPage() {
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
+              </>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="mr-2 text-xs text-muted-foreground">{t("common.selectedCount", { count: selected.size })}</span>
+                  <Button variant="ghost" size="sm" disabled={filteredSelectionMutation.isPending || selected.size >= (result?.total ?? 0)} onClick={() => filteredSelectionMutation.mutate("all")}>
+                    {filteredSelectionMutation.isPending && filteredSelectionMutation.variables === "all" ? <Spinner /> : <ListChecks />}
+                    {t("common.selectAllFiltered")}
+                  </Button>
+                  <Button variant="ghost" size="sm" disabled={filteredSelectionMutation.isPending} onClick={() => filteredSelectionMutation.mutate("invert")}>
+                    {filteredSelectionMutation.isPending && filteredSelectionMutation.variables === "invert" ? <Spinner /> : <ListRestart />}
+                    {t("common.invertFilteredSelection")}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}><X />{t("common.clearSelection")}</Button>
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(true)}>{t("common.enable")}</Button>
+                  <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(false)}>{t("common.disable")}</Button>
+                  {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets([...selected])}>{t("accounts.convertToBuild")}</Button> : null}
+                  {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets([...selected])}>{t("webConsoleSync.action")}</Button> : null}
+                  {provider === "grok_build" ? <Button variant="secondary" size="sm" onClick={() => batchBillingMutation.mutate()}>{t("accounts.refreshBilling")}</Button> : null}
+                  <div className="ml-1 border-l border-border/70 pl-2">
+                    <Button variant="destructive" size="sm" onClick={() => setBatchDeleteOpen(true)}><Trash2 />{t("common.delete")}</Button>
+                  </div>
+                </div>
+              </>
             )}
-          </>
+          </div>
         )}
         footer={result && result.total > 0 ? <Pagination page={result.page} pageSize={result.pageSize} total={result.total} onPageChange={setPage} onPageSizeChange={(value) => { setPageSize(value); setPage(1); }} /> : undefined}
       >
@@ -944,6 +997,9 @@ function AccountStatus({ account }: { account: AccountDTO }) {
   if (account.provider === "grok_console" && account.quotaWindows?.some((window) => window.mode === "console" && window.remaining <= 0)) {
     return <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.waitingReset")}</Badge>;
   }
+  if (account.provider === "grok_web" && isWebQuotaExhausted(account.quotaWindows)) {
+    return <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.waitingReset")}</Badge>;
+  }
   if (account.quota.status === "waitingReset") {
     return <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.waitingReset")}</Badge>;
   }
@@ -954,4 +1010,11 @@ function AccountStatus({ account }: { account: AccountDTO }) {
     return <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.statusCooldown")}</Badge>;
   }
   return <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("accounts.statusActive")}</Badge>;
+}
+
+function isWebQuotaExhausted(windows: AccountDTO["quotaWindows"]): boolean {
+  if (!windows || windows.length === 0) return false;
+  const weekly = windows.find((window) => window.mode === "weekly");
+  if (weekly) return weekly.remaining <= 0;
+  return windows.every((window) => window.remaining <= 0);
 }

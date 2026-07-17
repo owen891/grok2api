@@ -64,8 +64,12 @@ __pycache__/
 
 # Local release/build artifacts
 /build/
+/backend/deploy_artifact/
 /deploy_artifact/app/
+/deploy_artifact/app-release/
+/deploy_artifact/*.tar
 /deploy_artifact/*.tar.gz
+/deploy_artifact/*.tar.part*
 /.planning/
 
 # Local debugging captures

@@ -100,6 +100,25 @@ type PreflightResult struct {
 	Config WorkerSettings   `json:"config"`
 }
 
+type PreflightError struct {
+	Checks []PreflightCheck
+}
+
+func (e *PreflightError) Error() string {
+	failed := make([]string, 0, len(e.Checks))
+	for _, check := range e.Checks {
+		if !check.OK {
+			failed = append(failed, check.Name+": "+check.Detail)
+		}
+	}
+	if len(failed) == 0 {
+		return ErrPreflight.Error()
+	}
+	return ErrPreflight.Error() + " (" + strings.Join(failed, "; ") + ")"
+}
+
+func (e *PreflightError) Unwrap() error { return ErrPreflight }
+
 type EmailSourceSettings struct {
 	ID               string `json:"id"`
 	Type             string `json:"type"`
@@ -225,7 +244,11 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 	}
 	preflight := c.preflightLocked(ctx)
 	if !preflight.OK {
-		return Status{}, ErrPreflight
+		return Status{}, &PreflightError{Checks: preflight.Checks}
+	}
+	effectiveProxy, proxyOK, _ := resolveRegistrationProxy(preflight.Config.Proxy)
+	if !proxyOK {
+		return Status{}, &PreflightError{Checks: []PreflightCheck{{Name: "proxy", Detail: "resolved proxy is not reachable"}}}
 	}
 	if err := c.acquireLockLocked(); err != nil {
 		return Status{}, err
@@ -262,6 +285,9 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 		"--threads", strconv.Itoa(input.Threads),
 		"--account-type", accountType,
 	)
+	if effectiveProxy != "" {
+		arguments = append(arguments, "--proxy", effectiveProxy)
+	}
 	if input.Extra > 0 {
 		arguments = append(arguments, "--extra", strconv.Itoa(input.Extra))
 	}
@@ -471,7 +497,7 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	add("emailCredentials", len(enabledSources) > 0 && credentialsReady, "API key or YYDS JWT for every enabled source")
 	// 协议路径不依赖浏览器 CPA 探测地址；仅校验 proxy 可选性。
 	add("cpaBaseURL", true, "protocol mode skips browser CPA probe")
-	proxyOK, proxyDetail := proxyReady(settings.Proxy)
+	_, proxyOK, proxyDetail := resolveRegistrationProxy(settings.Proxy)
 	add("proxy", proxyOK, proxyDetail)
 	add("cpaProxy", true, "protocol mode skips cpaProxy")
 	solver := strings.ToLower(strings.TrimSpace(stringValue(configValue["captcha_solver"], "local")))

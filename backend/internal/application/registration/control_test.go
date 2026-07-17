@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -110,6 +111,75 @@ func TestControllerStartsPersistsStateAndReturnsNewestLogs(t *testing.T) {
 	}
 	if raw["spool_dir"] != filepath.Join(controller.config.SpoolPath, "incoming") {
 		t.Fatalf("protocol spool directory was not forced to the private importer queue: %#v", raw["spool_dir"])
+	}
+}
+
+func TestControllerResolvesSystemProxyForWorker(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	proxyURL := "http://" + listener.Addr().String()
+	t.Setenv("HTTPS_PROXY", proxyURL)
+	argsPath := filepath.Join(t.TempDir(), "worker-args.txt")
+	t.Setenv("GO_REGISTRATION_HELPER_ARGS_FILE", argsPath)
+
+	controller := newControllerTest(t, 0)
+	mode := "system"
+	if _, err := controller.UpdateSettings(WorkerSettingsPatch{Proxy: &mode}); err != nil {
+		t.Fatal(err)
+	}
+	preflight := controller.Preflight(context.Background())
+	if !preflight.OK {
+		t.Fatalf("system proxy preflight = %+v", preflight)
+	}
+	if _, err := controller.Start(context.Background(), StartInput{Count: 1, Threads: 1}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStopped(t, controller)
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := strings.Split(string(data), "\n")
+	proxyIndex := slices.Index(arguments, "--proxy")
+	if proxyIndex < 0 || proxyIndex+1 >= len(arguments) || arguments[proxyIndex+1] != proxyURL {
+		t.Fatalf("worker arguments = %q, want resolved proxy %q", arguments, proxyURL)
+	}
+}
+
+func TestNormalizeSystemProxySetting(t *testing.T) {
+	tests := map[string]string{
+		"":               "",
+		"127.0.0.1:7897": "http://127.0.0.1:7897",
+		"https=http-proxy:8443;http=http-proxy:8080": "http://http-proxy:8443",
+		"socks=127.0.0.1:1080":                       "socks5://127.0.0.1:1080",
+		"socks5://127.0.0.1:1080":                    "socks5://127.0.0.1:1080",
+	}
+	for input, want := range tests {
+		if got := normalizeSystemProxySetting(input); got != want {
+			t.Errorf("normalizeSystemProxySetting(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestRegistrationSpecificProxyPrecedesProcessProxy(t *testing.T) {
+	t.Setenv("REGISTRATION_HTTPS_PROXY", "http://registration-proxy:8443")
+	t.Setenv("HTTPS_PROXY", "http://process-proxy:8080")
+	if got := systemProxyURL(); got != "http://registration-proxy:8443" {
+		t.Fatalf("systemProxyURL() = %q", got)
+	}
+}
+
+func TestExplicitProxyDoesNotFallBackToSystem(t *testing.T) {
+	lookupCalled := false
+	_, ok, _ := resolveRegistrationProxyWithSystem("http://127.0.0.1:1", func() string {
+		lookupCalled = true
+		return "http://127.0.0.1:7897"
+	})
+	if ok || lookupCalled {
+		t.Fatalf("explicit proxy result ok=%v lookupCalled=%v", ok, lookupCalled)
 	}
 }
 

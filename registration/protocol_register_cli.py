@@ -724,6 +724,7 @@ def main() -> int:
     parser.add_argument("--account-type", choices=("build", "web"), default="build")
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--proxy")
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -733,6 +734,8 @@ def main() -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = load_config(config_path)
+    if args.proxy is not None:
+        cfg["proxy"] = args.proxy.strip()
     cfg["_config_path"] = str(config_path)
     # 让 reg.config 读到同一份配置
     reg.config.clear()

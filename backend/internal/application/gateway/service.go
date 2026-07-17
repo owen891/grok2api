@@ -443,20 +443,19 @@ attemptLoop:
 				continue
 			}
 		}
-		egressForbidden := s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden
-		finalEgressForbidden := egressForbidden && (attempt > 0 || attempt+1 >= attempts)
-		if isRetryable(response.StatusCode) && !finalEgressForbidden {
+		if isRetryable(response.StatusCode) {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 			body, _ := readRetryableBody(response.Body)
-			if egressForbidden {
+			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			egressForbidden := s.providers.RetryForbiddenAsEgress(credential.Provider) &&
+				response.StatusCode == http.StatusForbidden && !lastFailure.AccountScoped
+			if egressForbidden && attempt == 0 && attempt+1 < attempts {
 				// Web 403/code 7 表示出口浏览器会话被拒绝；Provider 已重建会话并降低节点健康，不应误伤账号。
 				delete(excluded, credential.ID)
 				lease.Release()
 				lastErr = fmt.Errorf("Grok Web 出口会话被反机器人规则拒绝")
-				lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
 				continue
 			}
-			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
 			if s.providers.SupportsCredentialRefresh(credential.Provider) && !authRecoveryAttempted[credential.ID] && credential.EncryptedRefreshToken != "" && (lastFailure.PermanentAccountDenial || lastFailure.CredentialRejected) {
 				authRecoveryAttempted[credential.ID] = true
 				refreshed, refreshErr := ensureCredential(credential, true)
@@ -480,22 +479,24 @@ attemptLoop:
 				}
 				goto handleResponse
 			}
-			failureHandled := false
-			if lease.QuotaMode != "" && response.StatusCode == http.StatusTooManyRequests {
-				exhausted, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
-				s.selector.MarkQuotaStateChanged(credential.Provider)
-				failureHandled = reconcileErr == nil && exhausted
-			} else if used, limit, exhausted := parseFreeQuotaExhaustion(body); exhausted {
-				s.selector.MarkFreeQuotaExhausted(ctx, credential, used, limit)
-				failureHandled = true
-			} else if lastFailure.ModelQuotaExhausted {
+			failureHandled := s.reconcileQuotaFailure(ctx, credential, route.UpstreamModel, lease.QuotaMode, lastFailure, response.StatusCode, retryAfter)
+			if !failureHandled {
+				if used, limit, exhausted := parseFreeQuotaExhaustion(body); exhausted {
+					s.selector.MarkFreeQuotaExhausted(ctx, credential, used, limit)
+					failureHandled = true
+				}
+			}
+			if !failureHandled && lastFailure.ModelQuotaExhausted {
 				s.selector.MarkModelQuotaExhausted(ctx, credential, route.UpstreamModel, retryAfter)
 				failureHandled = true
-			} else if lastFailure.FreeQuotaExhausted {
+			} else if !failureHandled && lastFailure.FreeQuotaExhausted {
 				s.selector.MarkFreeQuotaExhausted(ctx, credential, 0, 0)
 				failureHandled = true
-			} else if lastFailure.QuotaExhausted {
-				failureHandled = s.selector.MarkPaidQuotaExhausted(ctx, credential, lease.Billing)
+			} else if !failureHandled && lastFailure.QuotaExhausted {
+				quotaKind, _ := s.providers.QuotaKind(credential.Provider)
+				if quotaKind == provider.QuotaBilling {
+					failureHandled = s.selector.MarkPaidQuotaExhausted(ctx, credential, lease.Billing)
+				}
 			}
 			if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
 				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
@@ -864,6 +865,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 		}
 		if isRetryableMediaStatus(response.StatusCode) {
 			status := response.StatusCode
+			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 			body, bodyErr := readRetryableBody(response.Body)
 			failure := newHTTPUpstreamFailure(status, body, credential.ID, credential.Name)
 			if bodyErr != nil {
@@ -872,16 +874,15 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			lastErr = failure
 			failedCredential := credential
 			lastCredentialFailure = &failedCredential
-			if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && status == http.StatusTooManyRequests && lease.QuotaMode != "" {
-				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-				exhausted, reconcileErr := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
-				s.selector.MarkQuotaStateChanged(credential.Provider)
-				if reconcileErr != nil || !exhausted {
-					s.selector.MarkFailure(ctx, credential, status, retryAfter)
-				}
+			failureHandled := s.reconcileQuotaFailure(ctx, credential, route.UpstreamModel, lease.QuotaMode, failure, status, retryAfter)
+			if failure.AccountScoped && !failureHandled {
+				s.selector.MarkFailure(ctx, credential, status, retryAfter)
 			}
+			s.logger.Warn("image_attempt_failed", "request_id", requestID, "attempt", attempt+1, "account_id", credential.ID,
+				"provider", credential.Provider, "status", status, "failure_code", failure.Code,
+				"quota_confirmed", failure.QuotaExhausted, "quota_mode", lease.QuotaMode, "account_scoped", failure.AccountScoped)
 			lease.Release()
-			if status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(credential.Provider) {
+			if status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(credential.Provider) && !failure.AccountScoped {
 				delete(excluded, credential.ID)
 			}
 			if attempt+1 < attempts {
@@ -1067,6 +1068,42 @@ func (b *finalizingBody) Close() error {
 		b.finalize()
 	}
 	return err
+}
+
+// reconcileQuotaFailure mutates quota state only when the upstream explicitly
+// confirms exhaustion. An ambiguous Web 429 gets a short account cooldown and
+// an asynchronous remote quota refresh instead of being persisted as zero.
+func (s *Service) reconcileQuotaFailure(ctx context.Context, credential accountdomain.Credential, upstreamModel, quotaMode string, failure *UpstreamFailure, status int, retryAfter time.Duration) bool {
+	quotaMode = strings.TrimSpace(quotaMode)
+	if failure == nil {
+		return false
+	}
+	quotaKind, _ := s.providers.QuotaKind(credential.Provider)
+	if quotaKind == provider.QuotaRemoteWindow {
+		if !failure.QuotaExhausted {
+			if status == http.StatusTooManyRequests {
+				s.accounts.QueueQuotaRefresh(credential.ID, quotaMode)
+			}
+			return false
+		}
+		if quotaMode == "" {
+			s.accounts.QueueQuotaRefresh(credential.ID, "")
+			s.selector.MarkModelQuotaExhausted(ctx, credential, upstreamModel, retryAfter)
+			return true
+		}
+		exhausted, err := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, quotaMode, retryAfter)
+		s.selector.MarkQuotaStateChanged(credential.Provider)
+		return err == nil && exhausted
+	}
+	if quotaMode == "" {
+		return false
+	}
+	if status != http.StatusTooManyRequests {
+		return false
+	}
+	exhausted, err := s.accounts.ReconcileRateLimit(ctx, credential.ID, quotaMode, retryAfter)
+	s.selector.MarkQuotaStateChanged(credential.Provider)
+	return err == nil && exhausted
 }
 
 func isRetryable(status int) bool {

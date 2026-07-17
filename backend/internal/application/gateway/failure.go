@@ -177,7 +177,20 @@ func isPermanentAccountDenial(text string) bool {
 }
 
 func isPaidQuotaExhaustion(text string) bool {
-	return strings.Contains(text, "personal-team-blocked:spending-limit")
+	return containsAny(
+		text,
+		"personal-team-blocked:spending-limit",
+		"insufficient_quota",
+		"insufficient quota",
+		"quota exhausted",
+		"quota_exhausted",
+		"billing limit",
+		"billing_limit",
+		"spending limit",
+		"spending_limit",
+		"credits exhausted",
+		"credits_exhausted",
+	)
 }
 
 func isFreeQuotaExhaustion(text string) bool {

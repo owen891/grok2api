@@ -1696,17 +1696,19 @@ func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRef
 				}
 			}
 		}
-		if refreshMode != "" {
-			var refreshErr error
-			if err := s.syncPool.Do(ctx, func(workCtx context.Context) error {
+		var refreshErr error
+		if err := s.syncPool.Do(ctx, func(workCtx context.Context) error {
+			if refreshMode != "" {
 				_, refreshErr = s.RefreshWebQuotaMode(workCtx, request.accountID, refreshMode)
-				return refreshErr
-			}); err != nil {
-				refreshErr = err
+			} else {
+				_, refreshErr = s.RefreshWebQuota(workCtx, request.accountID)
 			}
-			if refreshErr != nil && !errors.Is(refreshErr, context.Canceled) {
-				s.logger.Warn("web_quota_refresh_failed", "account_id", request.accountID, "mode", refreshMode, "error", refreshErr)
-			}
+			return refreshErr
+		}); err != nil {
+			refreshErr = err
+		}
+		if refreshErr != nil && !errors.Is(refreshErr, context.Canceled) {
+			s.logger.Warn("web_quota_refresh_failed", "account_id", request.accountID, "mode", refreshMode, "error", refreshErr)
 		}
 		cancel()
 

@@ -40,7 +40,7 @@ RUN mkdir -p \
     /app/registration \
     /run/grok2api
 
-COPY --chmod=0755 docker/registration-entrypoint.sh /usr/local/bin/grok2api-registration
+COPY --chmod=0755 docker-registration-entrypoint.sh /usr/local/bin/grok2api-registration
 
 WORKDIR /app
 EXPOSE 8000

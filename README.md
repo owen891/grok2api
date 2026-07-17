@@ -78,6 +78,7 @@ flowchart LR
 git clone https://github.com/owen891/grok2api.git
 cd grok2api
 cp config.example.yaml config.yaml
+cp .env.example .env
 ```
 
 2. 生成并填写安全密钥：
@@ -114,6 +115,8 @@ docker compose up -d
 ```
 
 `docker compose pull` 使用官方镜像；`docker compose build` 才会包含当前工作树的后端、前端和注册 worker 改动。
+
+注册 worker 的服务器代理通过 Compose 环境变量配置：直连时保持 `REGISTRATION_PROXY=`；宿主机代理使用 `http://host.docker.internal:PORT`；Compose 内代理使用服务名。也可以设置 `REGISTRATION_PROXY=system`，并提供 `REGISTRATION_HTTPS_PROXY`、`REGISTRATION_HTTP_PROXY` 或 `REGISTRATION_ALL_PROXY`。这些注册专用变量不会改变其他 Provider 的出口。容器内的 `127.0.0.1` 指向容器自身，不代表服务器宿主机。
 
 官方镜像已经包含前端构建产物，管理端与 API 由同一个 Go 服务提供。Compose 默认将 `config.yaml` 只读挂载到容器，并使用 `grok2api-data` 命名卷保存 SQLite 数据库和本地媒体。
 

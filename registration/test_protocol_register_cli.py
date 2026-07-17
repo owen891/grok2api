@@ -195,6 +195,44 @@ class ProtocolCheckpointTests(unittest.TestCase):
             state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual({"done": 1, "ok": 1, "attempted": 2, "failed": 1}, {key: state[key] for key in ("done", "ok", "attempted", "failed")})
 
+    def test_main_runtime_proxy_overrides_persisted_proxy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            state_dir = root / "state"
+            log_file = root / "registration.log"
+            config.write_text(
+                json.dumps({"captcha_solver": "local", "proxy": "http://127.0.0.1:7890"}),
+                encoding="utf-8",
+            )
+            observed: list[str] = []
+
+            def fake_register(_index, _cfg, **kwargs):
+                observed.append(kwargs["proxy"])
+                return {
+                    "ok": True,
+                    "email": "proxy@example.invalid",
+                    "password": "secret",
+                    "spool": "synthetic.json",
+                    "engine": "protocol",
+                }
+
+            argv = [
+                "protocol_register_cli.py",
+                "--config", str(config),
+                "--state-dir", str(state_dir),
+                "--log-file", str(log_file),
+                "--count", "1",
+                "--threads", "1",
+                "--proxy", "http://127.0.0.1:7897",
+            ]
+            worker._stop.clear()
+            with patch.object(sys, "argv", argv), patch.object(worker, "register_one", side_effect=fake_register):
+                exit_code = worker.main()
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(["http://127.0.0.1:7897"], observed)
+
 
 if __name__ == "__main__":
     unittest.main()

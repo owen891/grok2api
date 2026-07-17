@@ -19,6 +19,11 @@ services:
       REGISTRATION_DISABLE_REMOTE_IMPORT: "1"
       REGISTRATION_CAPTCHA_ENDPOINT: "${REGISTRATION_CAPTCHA_ENDPOINT:-http://grok-turnstile-solver:5072}"
       REGISTRATION_PROXY: "${REGISTRATION_PROXY:-}"
+      REGISTRATION_SOLVER_PROXY: "${REGISTRATION_SOLVER_PROXY:-}"
+      REGISTRATION_HTTP_PROXY: "${REGISTRATION_HTTP_PROXY:-}"
+      REGISTRATION_HTTPS_PROXY: "${REGISTRATION_HTTPS_PROXY:-}"
+      REGISTRATION_ALL_PROXY: "${REGISTRATION_ALL_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-127.0.0.1,localhost,grok-web-browser,grok-turnstile-solver}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     working_dir: /app
@@ -27,7 +32,7 @@ services:
       - "${GROK2API_RELEASE_DIR:-/opt/grok2api-current}/grok2api:/app/grok2api:ro"
       - "${GROK2API_RELEASE_DIR:-/opt/grok2api-current}/frontend/dist:/app/frontend/dist:ro"
       - "${GROK2API_DATA_DIR:-/opt/grok2api-data}:/app/data"
-      - "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/registration:/app/registration:ro"
+      - "${GROK2API_RELEASE_DIR:-/opt/grok2api-current}/registration:/app/registration:ro"
     depends_on:
       grok-web-browser:
         condition: service_healthy
@@ -58,7 +63,7 @@ services:
     ports:
       - "127.0.0.1:8192:8192"
     volumes:
-      - "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/scripts/grok_web_browser_worker.py:/opt/grok-worker/grok_web_browser_worker.py:ro"
+      - "${GROK2API_RELEASE_DIR:-/opt/grok2api-current}/scripts/grok_web_browser_worker.py:/opt/grok-worker/grok_web_browser_worker.py:ro"
     shm_size: "2gb"
     restart: unless-stopped
     init: true
@@ -75,9 +80,9 @@ services:
   grok-turnstile-solver:
     container_name: grok-turnstile-solver
     image: grok-turnstile-solver:0d48ecf8b4ee
-    build:
-      context: "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/.deps/grokcli-2api/turnstile-solver"
-      dockerfile: Dockerfile
+    entrypoint:
+      - /bin/bash
+      - /opt/grok2api/turnstile-solver-entrypoint.sh
     environment:
       TZ: "Asia/Shanghai"
       TURNSTILE_HOST: "0.0.0.0"
@@ -86,7 +91,12 @@ services:
       TURNSTILE_BROWSER_TYPE: "camoufox"
       TURNSTILE_LAZY: "1"
       TURNSTILE_IDLE_SEC: "180"
-      TURNSTILE_DEBUG: "0"
+      TURNSTILE_DEBUG: "${TURNSTILE_DEBUG:-0}"
+      TURNSTILE_PROXY: "${REGISTRATION_SOLVER_PROXY:-}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/turnstile-solver-entrypoint.sh:/opt/grok2api/turnstile-solver-entrypoint.sh:ro"
     shm_size: "1gb"
     restart: unless-stopped
     init: true

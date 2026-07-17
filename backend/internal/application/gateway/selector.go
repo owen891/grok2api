@@ -516,14 +516,13 @@ func (s *Selector) MarkModelQuotaExhausted(ctx context.Context, credential accou
 
 // MarkPaidQuotaExhausted 使用已知真实账期将付费账号移出号池，到期后才允许 Billing 探测。
 func (s *Selector) MarkPaidQuotaExhausted(ctx context.Context, credential account.Credential, billing *account.Billing) bool {
-	if billing == nil || (billing.MonthlyLimit <= 0 && billing.OnDemandCap <= 0 && billing.OnDemandUsed <= 0 && billing.PrepaidBalance <= 0 && billing.CreditUsagePercent <= 0) {
-		return false
-	}
-	periodEnd, ok := billing.PeriodEnd()
-	if !ok {
-		return false
-	}
 	now := time.Now().UTC()
+	periodEnd := now.Add(24 * time.Hour)
+	if billing != nil {
+		if parsed, ok := billing.PeriodEnd(); ok && parsed.After(now) {
+			periodEnd = parsed
+		}
+	}
 	_ = s.accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{
 		AccountID: credential.ID, Kind: account.QuotaRecoveryKindPaid, Status: account.QuotaRecoveryStatusExhausted,
 		ExhaustedAt: &now, NextProbeAt: &periodEnd, LastConfirmedAt: &now, UpdatedAt: now,

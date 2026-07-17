@@ -31,6 +31,10 @@ func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 			accountScoped: true, quotaExhausted: true, code: "upstream_quota_exhausted", upstreamCode: "personal-team-blocked:spending-limit",
 		},
 		{
+			name: "generic paid quota", status: http.StatusForbidden, body: `{"error":{"code":"insufficient_quota","message":"quota exhausted"}}`,
+			accountScoped: true, quotaExhausted: true, code: "upstream_quota_exhausted", upstreamCode: "insufficient_quota",
+		},
+		{
 			name: "unknown policy rejection", status: http.StatusForbidden, body: `{"error":"upstream policy rejected request"}`,
 			code: "upstream_forbidden",
 		},
@@ -41,6 +45,10 @@ func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 		{
 			name: "image usage limit", status: http.StatusTooManyRequests, body: `{"error":{"code":"usage_limit_reached","message":"You've reached your usage limit. Please try again later."}}`,
 			accountScoped: true, quotaExhausted: true, freeQuotaExhausted: true, code: "upstream_quota_exhausted", upstreamCode: "usage_limit_reached",
+		},
+		{
+			name: "ambiguous numeric rate limit", status: http.StatusTooManyRequests, body: `{"error":{"code":8,"message":"rate limited"}}`,
+			accountScoped: true, code: "upstream_rate_limited",
 		},
 	}
 	for _, test := range tests {

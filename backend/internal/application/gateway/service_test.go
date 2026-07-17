@@ -422,7 +422,7 @@ func TestGatewayRefreshesAndRetriesBuildPermissionDenialOnce(t *testing.T) {
 	}
 }
 
-func TestWebRateLimitExhaustsOnlyRequestedQuotaMode(t *testing.T) {
+func TestWebAmbiguousRateLimitPreservesQuotaAndCoolsAccount(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "web-rate-limit.db"))
 	if err != nil {
@@ -462,11 +462,12 @@ func TestWebRateLimitExhaustsOnlyRequestedQuotaMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := webRateLimitAdapter{}
+	adapter := &webRateLimitAdapter{synced: make(chan string, 1)}
 	registry := provider.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	accountService.SetQuotaRecoveryQueue(memory.NewQuotaRecoveryQueue())
+	runQuotaRefreshWorkers(t, accountService)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
 	if _, err := service.CreateResponse(ctx, Input{RequestID: "req-web-429", ClientKey: key, PublicModel: "grok-web-test", Body: []byte(`{"model":"grok-web-test"}`)}); err == nil {
@@ -480,11 +481,41 @@ func TestWebRateLimitExhaustsOnlyRequestedQuotaMode(t *testing.T) {
 	for _, window := range windows[credential.ID] {
 		remaining[window.Mode] = window.Remaining
 	}
-	if remaining["fast"] != 0 || remaining["auto"] != 4 {
+	if remaining["fast"] != 3 || remaining["auto"] != 4 {
 		t.Fatalf("quota remaining = %#v", remaining)
+	}
+	updated, err := accountRepo.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.CooldownUntil == nil || !updated.CooldownUntil.After(time.Now().UTC()) || updated.LastError != "upstream status 429" {
+		t.Fatalf("rate-limited account = %#v", updated)
+	}
+	select {
+	case mode := <-adapter.synced:
+		if mode != "fast" {
+			t.Fatalf("rate-limit refresh mode = %q", mode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ambiguous rate-limit quota refresh")
 	}
 	if _, err := accountRepo.GetQuotaRecovery(ctx, credential.ID); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("Web 429 must not create Build quota recovery state: %v", err)
+	}
+	confirmed := newHTTPUpstreamFailure(http.StatusTooManyRequests, []byte(`{"error":{"code":"usage_limit_reached","message":"You've reached your usage limit."}}`), credential.ID, credential.Name)
+	if !service.reconcileQuotaFailure(ctx, credential, "grok-web-test", "fast", confirmed, http.StatusTooManyRequests, time.Hour) {
+		t.Fatal("confirmed Web quota exhaustion was not reconciled")
+	}
+	windows, err = accountRepo.GetQuotaWindows(ctx, []uint64{credential.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining = map[string]int{}
+	for _, window := range windows[credential.ID] {
+		remaining[window.Mode] = window.Remaining
+	}
+	if remaining["fast"] != 0 || remaining["auto"] != 4 {
+		t.Fatalf("confirmed quota remaining = %#v", remaining)
 	}
 }
 
@@ -535,7 +566,7 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := &webImageStreamAdapter{synced: make(chan string, 1)}
+	adapter := &webImageStreamAdapter{synced: make(chan string, 16)}
 	registry := provider.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
@@ -682,7 +713,13 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.ReplaceAccountCapabilities(ctx, backupCredential.ID, []string{"grok-imagine-image-quality"}, now); err != nil {
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, backupCredential.ID, []string{"grok-imagine-image-quality", "grok-imagine-image"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := accountRepo.SaveQuotaWindows(ctx, backupCredential.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+		AccountID: backupCredential.ID, Mode: "fast", Remaining: 6, Total: 10,
+		WindowSeconds: 3600, Source: account.QuotaSourceUpstream, SyncedAt: &now,
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	selector.MarkQuotaStateChanged(account.ProviderWeb)
@@ -705,8 +742,8 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	adapter.SetResponseStatuses()
 	adapter.SetResponseStatuses(http.StatusTooManyRequests, http.StatusTooManyRequests)
 	_, err = service.GenerateImage(ctx, ImageGenerationInput{
-		RequestID: "req-image-rate-limited", ClientKey: key, PublicModel: "grok-imagine-image-quality",
-		Prompt: "test", Count: 1, Resolution: "1k", ResponseFormat: "url",
+		RequestID: "req-image-rate-limited", ClientKey: key, PublicModel: "grok-imagine-image",
+		Prompt: "test", Count: 1, ResponseFormat: "url",
 	})
 	var rateFailure *UpstreamFailure
 	if !errors.As(err, &rateFailure) || rateFailure.Code != "upstream_rate_limited" {
@@ -716,6 +753,26 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	if err != nil || total != 7 || logs[0].RequestID != "req-image-rate-limited" || logs[0].ErrorCode != "upstream_rate_limited" {
 		t.Fatalf("image rate audit = %#v, total=%d, err=%v", logs, total, err)
 	}
+	for _, value := range []account.Credential{credential, backupCredential} {
+		updated, getErr := accountRepo.Get(ctx, value.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if updated.CooldownUntil == nil || !updated.CooldownUntil.After(time.Now().UTC()) {
+			t.Fatalf("rate-limited image account = %#v", updated)
+		}
+		windows, quotaErr := accountRepo.GetQuotaWindows(ctx, []uint64{value.ID})
+		if quotaErr != nil {
+			t.Fatal(quotaErr)
+		}
+		if len(windows[value.ID]) != 1 || windows[value.ID][0].Mode != "fast" || windows[value.ID][0].Remaining <= 0 {
+			t.Fatalf("ambiguous image rate limit changed quota: %#v", windows[value.ID])
+		}
+		if err := accountRepo.UpdateHealth(ctx, value.ID, 0, nil, "", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selector.MarkQuotaStateChanged(account.ProviderWeb)
 	adapter.SetResponseStatuses()
 	billingBeforeFailure, err = keyRepo.Get(ctx, key.ID)
 	if err != nil {
@@ -930,7 +987,9 @@ func (a *systemicForbiddenAdapter) Attempts() []uint64 {
 	return append([]uint64(nil), a.attempts...)
 }
 
-type webRateLimitAdapter struct{}
+type webRateLimitAdapter struct {
+	synced chan string
+}
 
 type webImageStreamAdapter struct {
 	mu             sync.Mutex
@@ -946,18 +1005,29 @@ type webChatQuotaAdapter struct {
 	synced chan string
 }
 
-func (webRateLimitAdapter) Provider() account.Provider { return account.ProviderWeb }
-func (webRateLimitAdapter) Definition() provider.Definition {
+func (*webRateLimitAdapter) Provider() account.Provider { return account.ProviderWeb }
+func (*webRateLimitAdapter) Definition() provider.Definition {
 	return testConversationDefinition(account.ProviderWeb)
 }
-func (webRateLimitAdapter) QuotaMode(string) string { return "fast" }
-func (webRateLimitAdapter) TierOrder(string) []account.WebTier {
+func (*webRateLimitAdapter) QuotaMode(string) string { return "fast" }
+func (*webRateLimitAdapter) TierOrder(string) []account.WebTier {
 	return []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
 }
-func (webRateLimitAdapter) ForwardResponse(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
+func (*webRateLimitAdapter) ForwardResponse(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
 	header := make(http.Header)
 	header.Set("Retry-After", "3600")
 	return &provider.Response{StatusCode: http.StatusTooManyRequests, Header: header, Body: io.NopCloser(strings.NewReader(`{"error":"limited"}`))}, nil
+}
+func (*webRateLimitAdapter) SyncQuota(context.Context, account.Credential) (provider.QuotaSnapshot, error) {
+	return provider.QuotaSnapshot{}, errors.New("unexpected full quota sync")
+}
+func (a *webRateLimitAdapter) SyncQuotaMode(_ context.Context, credential account.Credential, mode string) (account.QuotaWindow, error) {
+	now := time.Now().UTC()
+	a.synced <- mode
+	return account.QuotaWindow{
+		AccountID: credential.ID, Mode: mode, Remaining: 3, Total: 20,
+		WindowSeconds: 3600, SyncedAt: &now, Source: account.QuotaSourceUpstream,
+	}, nil
 }
 
 func (a *webImageStreamAdapter) Provider() account.Provider { return account.ProviderWeb }
