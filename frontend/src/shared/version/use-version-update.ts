@@ -70,7 +70,9 @@ function shouldShowReminder(latestVersion: string): boolean {
 }
 
 async function loadManifest(): Promise<ReleaseManifest> {
-  const candidates = [`${remoteManifestURL}?t=${Date.now()}`, "/release-manifest.json"];
+  // Use the bundled manifest first so a stale GitHub Raw edge cache cannot
+  // make the running application report an older release than its build.
+  const candidates = ["/release-manifest.json", `${remoteManifestURL}?t=${Date.now()}`];
   let lastError: unknown;
   for (const url of candidates) {
     try {
