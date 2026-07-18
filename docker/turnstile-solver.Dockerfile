@@ -48,7 +48,7 @@ RUN python -m pip install --no-cache-dir -U pip setuptools wheel \
     && python -m pip install --no-cache-dir -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt
 
-COPY turnstile-solver/api_solver.py turnstile-solver/browser_configs.py turnstile-solver/db_results.py /app/
+COPY turnstile-solver/turnstile-solver/api_solver.py turnstile-solver/turnstile-solver/browser_configs.py turnstile-solver/turnstile-solver/db_results.py /app/
 COPY docker/turnstile-solver-entrypoint.sh /app/entrypoint.sh
 COPY docker/patch-turnstile-solver.py /tmp/patch-turnstile-solver.py
 
