@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -81,6 +82,14 @@ func (s *Service) UpdateConcurrency(value int) {
 type Result struct {
 	Succeeded int
 	Failed    int
+	Failures  []Failure
+}
+
+// Failure preserves the account and the stage error so asynchronous imports
+// can explain why an otherwise valid credential was not synchronized.
+type Failure struct {
+	AccountID uint64
+	Error     string
 }
 
 // Sync 等待本次涉及的账号完成额度与模型补齐；已同步数据会跳过，同账号并发请求会合并。
@@ -109,6 +118,8 @@ func (s *Service) syncStream(ctx context.Context, accountIDs <-chan uint64, obse
 	var succeeded atomic.Int64
 	var failed atomic.Int64
 	var total atomic.Int64
+	var failuresMu sync.Mutex
+	var failures []Failure
 	var progressMu sync.Mutex
 	completed := 0
 	count := max(1, int(s.workers.Load()))
@@ -128,6 +139,9 @@ func (s *Service) syncStream(ctx context.Context, accountIDs <-chan uint64, obse
 					if errors.As(err, &panicErr) {
 						s.logger.Error("account_initial_sync_panicked", "account_id", accountID, "error", panicErr, "stack", string(panicErr.Stack))
 					}
+					failuresMu.Lock()
+					failures = append(failures, Failure{AccountID: accountID, Error: err.Error()})
+					failuresMu.Unlock()
 					failed.Add(1)
 				} else {
 					succeeded.Add(1)
@@ -168,7 +182,11 @@ sendLoop:
 	}
 	close(jobs)
 	workers.Wait()
-	return Result{Succeeded: int(succeeded.Load()), Failed: int(failed.Load())}
+	failuresMu.Lock()
+	sort.Slice(failures, func(i, j int) bool { return failures[i].AccountID < failures[j].AccountID })
+	failureCopy := append([]Failure(nil), failures...)
+	failuresMu.Unlock()
+	return Result{Succeeded: int(succeeded.Load()), Failed: int(failed.Load()), Failures: failureCopy}
 }
 
 func (s *Service) syncAccount(ctx context.Context, accountID uint64) error {

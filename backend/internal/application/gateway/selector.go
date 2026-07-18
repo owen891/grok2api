@@ -76,6 +76,54 @@ type SelectionUnavailableError struct {
 	RetryAfter time.Duration
 }
 
+type routingBlockKind uint8
+
+const (
+	routingBlockNone routingBlockKind = iota
+	routingBlockModelCooling
+	routingBlockCooling
+	routingBlockQuotaRecovery
+	routingBlockQuota
+)
+
+type routingBlock struct {
+	kind    routingBlockKind
+	retryAt time.Time
+}
+
+// candidateRoutingBlock is the single inference eligibility policy. Recovery
+// states are deliberately checked before billing/window snapshots so a stale
+// positive window cannot re-enable an exhausted account.
+func candidateRoutingBlock(candidate account.RoutingCandidate, value account.Credential, now time.Time) routingBlock {
+	if candidate.ModelQuotaBlock != nil && now.Before(candidate.ModelQuotaBlock.CooldownUntil) {
+		return routingBlock{kind: routingBlockModelCooling, retryAt: candidate.ModelQuotaBlock.CooldownUntil}
+	}
+	if value.CooldownUntil != nil && now.Before(*value.CooldownUntil) {
+		return routingBlock{kind: routingBlockCooling, retryAt: *value.CooldownUntil}
+	}
+	if recovery := candidate.QuotaRecovery; recovery != nil && recovery.Status != account.QuotaRecoveryStatusActive {
+		var retryAt time.Time
+		if recovery.NextProbeAt != nil {
+			retryAt = *recovery.NextProbeAt
+		}
+		return routingBlock{kind: routingBlockQuotaRecovery, retryAt: retryAt}
+	}
+	if candidate.FreeQuota && candidate.ObservedTokens >= account.EstimatedFreeTokenLimit {
+		return routingBlock{kind: routingBlockQuota}
+	}
+	if candidate.Billing != nil && candidate.Billing.IsExhausted(value.MinimumRemaining) {
+		return routingBlock{kind: routingBlockQuota}
+	}
+	if candidate.QuotaWindow != nil && candidate.QuotaWindow.Remaining <= 0 {
+		var retryAt time.Time
+		if candidate.QuotaWindow.ResetAt != nil {
+			retryAt = *candidate.QuotaWindow.ResetAt
+		}
+		return routingBlock{kind: routingBlockQuota, retryAt: retryAt}
+	}
+	return routingBlock{}
+}
+
 func (e *SelectionUnavailableError) Error() string {
 	if e == nil {
 		return "没有可用上游账号"
@@ -178,37 +226,27 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			continue
 		}
 		supportedCandidates++
-		if candidate.ModelQuotaBlock != nil && now.Before(candidate.ModelQuotaBlock.CooldownUntil) {
+		block := candidateRoutingBlock(candidate, value, now)
+		switch block.kind {
+		case routingBlockModelCooling:
 			modelCoolingCandidates++
-			earliestRetry = earlierFuture(earliestRetry, candidate.ModelQuotaBlock.CooldownUntil, now)
+			earliestRetry = earlierFuture(earliestRetry, block.retryAt, now)
 			continue
-		}
-		if value.CooldownUntil != nil && now.Before(*value.CooldownUntil) {
+		case routingBlockCooling:
 			coolingCandidates++
-			earliestRetry = earlierFuture(earliestRetry, *value.CooldownUntil, now)
+			earliestRetry = earlierFuture(earliestRetry, block.retryAt, now)
 			continue
-		}
-		quotaRecovery := candidate.QuotaRecovery
-		if quotaRecovery != nil && quotaRecovery.Status != account.QuotaRecoveryStatusActive {
-			if allowQuotaProbe && quotaRecovery.NextProbeAt != nil && !now.Before(*quotaRecovery.NextProbeAt) {
+		case routingBlockQuotaRecovery:
+			if allowQuotaProbe && candidate.QuotaRecovery != nil && candidate.QuotaRecovery.NextProbeAt != nil && !now.Before(*candidate.QuotaRecovery.NextProbeAt) {
 				probeCandidates = append(probeCandidates, candidate)
 			} else {
 				quotaCandidates++
-				if quotaRecovery.NextProbeAt != nil {
-					earliestRetry = earlierFuture(earliestRetry, *quotaRecovery.NextProbeAt, now)
-				}
+				earliestRetry = earlierFuture(earliestRetry, block.retryAt, now)
 			}
 			continue
-		}
-		if candidate.Billing != nil && candidate.Billing.IsExhausted(value.MinimumRemaining) {
+		case routingBlockQuota:
 			quotaCandidates++
-			continue
-		}
-		if candidate.QuotaWindow != nil && candidate.QuotaWindow.Remaining <= 0 {
-			quotaCandidates++
-			if candidate.QuotaWindow.ResetAt != nil {
-				earliestRetry = earlierFuture(earliestRetry, *candidate.QuotaWindow.ResetAt, now)
-			}
+			earliestRetry = earlierFuture(earliestRetry, block.retryAt, now)
 			continue
 		}
 		normalCandidates = append(normalCandidates, candidate)
@@ -418,28 +456,14 @@ func (s *Selector) AcquirePinned(ctx context.Context, provider account.Provider,
 			if candidate.ModelCapabilityKnown && !candidate.SupportsModel {
 				return nil, &SelectionUnavailableError{Reason: SelectionUnsupportedModel}
 			}
-			if candidate.ModelQuotaBlock != nil && now.Before(candidate.ModelQuotaBlock.CooldownUntil) {
-				return nil, &SelectionUnavailableError{Reason: SelectionModelCooling, RetryAfter: retryDelay(now, candidate.ModelQuotaBlock.CooldownUntil)}
-			}
-			if value.CooldownUntil != nil && now.Before(*value.CooldownUntil) {
-				return nil, &SelectionUnavailableError{Reason: SelectionCooling, RetryAfter: retryDelay(now, *value.CooldownUntil)}
-			}
-			if recovery := candidate.QuotaRecovery; recovery != nil && recovery.Status != account.QuotaRecoveryStatusActive {
-				var retryAfter time.Duration
-				if recovery.NextProbeAt != nil {
-					retryAfter = retryDelay(now, *recovery.NextProbeAt)
-				}
-				return nil, &SelectionUnavailableError{Reason: SelectionQuotaExhausted, RetryAfter: retryAfter}
-			}
-			if candidate.Billing != nil && candidate.Billing.IsExhausted(value.MinimumRemaining) {
-				return nil, &SelectionUnavailableError{Reason: SelectionQuotaExhausted}
-			}
-			if candidate.QuotaWindow != nil && candidate.QuotaWindow.Remaining <= 0 {
-				var retryAfter time.Duration
-				if candidate.QuotaWindow.ResetAt != nil {
-					retryAfter = retryDelay(now, *candidate.QuotaWindow.ResetAt)
-				}
-				return nil, &SelectionUnavailableError{Reason: SelectionQuotaExhausted, RetryAfter: retryAfter}
+			block := candidateRoutingBlock(candidate, value, now)
+			switch block.kind {
+			case routingBlockModelCooling:
+				return nil, &SelectionUnavailableError{Reason: SelectionModelCooling, RetryAfter: retryDelay(now, block.retryAt)}
+			case routingBlockCooling:
+				return nil, &SelectionUnavailableError{Reason: SelectionCooling, RetryAfter: retryDelay(now, block.retryAt)}
+			case routingBlockQuotaRecovery, routingBlockQuota:
+				return nil, &SelectionUnavailableError{Reason: SelectionQuotaExhausted, RetryAfter: retryDelay(now, block.retryAt)}
 			}
 		}
 		lease, err := s.acquirePinnedCapacity(ctx, value)

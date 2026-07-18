@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - ".github/workflows/solver-image.yml"
+      - "docker/turnstile-solver.Dockerfile"
+      - "docker/turnstile-solver.requirements.txt"
+      - "docker/patch-turnstile-solver.py"
+      - "docker/turnstile-solver-entrypoint.sh"
   workflow_dispatch:
 
 concurrency:
@@ -21,11 +25,15 @@ jobs:
     name: Publish solver image
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
       - name: Checkout pinned solver source
         uses: actions/checkout@v4
         with:
           repository: HM2899/grokcli-2api
           ref: 0d48ecf8b4ee17930b54f56551541fef8d5a61d4
+          path: turnstile-solver
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -40,12 +48,14 @@ jobs:
       - name: Build and publish solver
         uses: docker/build-push-action@v6
         with:
-          context: ./turnstile-solver
-          file: ./turnstile-solver/Dockerfile
-          platforms: linux/amd64
+          context: .
+          file: ./docker/turnstile-solver.Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/owen891/grok2api:solver-0d48ecf8b4ee
+          tags: ghcr.io/owen891/grok2api:solver-0d48ecf8b4ee-fixed
           cache-from: type=gha,scope=turnstile-solver
           cache-to: type=gha,scope=turnstile-solver,mode=max
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
           provenance: mode=max
           sbom: true

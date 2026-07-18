@@ -10,6 +10,7 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
@@ -28,9 +29,10 @@ var (
 )
 
 type UpdateInput struct {
-	PublicID   *string
-	Enabled    *bool
-	AccountIDs *[]uint64
+	PublicID      *string
+	Enabled       *bool
+	AccountIDs    *[]uint64
+	EgressGroupID *uint64
 }
 
 type CreateInput struct {
@@ -40,6 +42,7 @@ type CreateInput struct {
 	Capability    modeldomain.Capability
 	Enabled       bool
 	AccountIDs    []uint64
+	EgressGroupID uint64
 }
 
 type AccountOption struct {
@@ -55,17 +58,40 @@ type ListFilter struct {
 
 // Service 负责上游模型发现、内部来源路由与对外模型名称维护。
 type Service struct {
-	models    repository.ModelRepository
-	accounts  repository.AccountRepository
-	account   *accountapp.Service
-	providers *provider.Registry
-	bulkPool  *batch.Pool
-	logger    *slog.Logger
-	syncAll   singleflight.Group
+	models       repository.ModelRepository
+	accounts     repository.AccountRepository
+	account      *accountapp.Service
+	providers    *provider.Registry
+	bulkPool     *batch.Pool
+	logger       *slog.Logger
+	egressGroups interface {
+		GetEgressGroup(context.Context, uint64) (egressdomain.Group, error)
+	}
+	syncAll singleflight.Group
 }
 
-func NewService(models repository.ModelRepository, accounts repository.AccountRepository, accountService *accountapp.Service, providers *provider.Registry) *Service {
-	return &Service{models: models, accounts: accounts, account: accountService, providers: providers, bulkPool: batch.NewPool(defaultModelSyncWorkers), logger: slog.Default()}
+func NewService(models repository.ModelRepository, accounts repository.AccountRepository, accountService *accountapp.Service, providers *provider.Registry, groups ...interface {
+	GetEgressGroup(context.Context, uint64) (egressdomain.Group, error)
+}) *Service {
+	service := &Service{models: models, accounts: accounts, account: accountService, providers: providers, bulkPool: batch.NewPool(defaultModelSyncWorkers), logger: slog.Default()}
+	if len(groups) > 0 {
+		service.egressGroups = groups[0]
+	}
+	return service
+}
+
+func (s *Service) validateEgressGroup(ctx context.Context, providerValue account.Provider, groupID uint64) error {
+	if groupID == 0 || s.egressGroups == nil {
+		return nil
+	}
+	group, err := s.egressGroups.GetEgressGroup(ctx, groupID)
+	if err != nil {
+		return invalidInput("egress group 不存在")
+	}
+	if !group.Enabled || string(group.Scope) != string(providerValue) {
+		return invalidInput("egress group 作用域必须匹配 Provider 且处于启用状态")
+	}
+	return nil
 }
 
 func (s *Service) SetBulkPool(pool *batch.Pool) {
@@ -140,6 +166,9 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (modeldomain.Ro
 	if err != nil {
 		return modeldomain.Route{}, err
 	}
+	if err := s.validateEgressGroup(ctx, input.Provider, input.EgressGroupID); err != nil {
+		return modeldomain.Route{}, err
+	}
 	if definition.ModelCatalog == provider.ModelCatalogStatic && s.providers.QuotaMode(input.Provider, upstreamModel) == "" {
 		return modeldomain.Route{}, invalidInput(fmt.Sprintf("%s 仅支持内置模型目录中的上游模型", definition.ModelNamespace))
 	}
@@ -150,6 +179,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (modeldomain.Ro
 	value := modeldomain.Route{
 		PublicID: publicID, Provider: input.Provider, UpstreamModel: upstreamModel,
 		Capability: input.Capability, Origin: modeldomain.OriginManual, Enabled: input.Enabled,
+		EgressGroupID: input.EgressGroupID,
 	}
 	created, err := s.models.Create(ctx, value, accountIDs)
 	return created, mapRepositoryError(err)
@@ -169,6 +199,12 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (mod
 	}
 	if input.Enabled != nil {
 		value.Enabled = *input.Enabled
+	}
+	if input.EgressGroupID != nil {
+		if err := s.validateEgressGroup(ctx, value.Provider, *input.EgressGroupID); err != nil {
+			return modeldomain.Route{}, err
+		}
+		value.EgressGroupID = *input.EgressGroupID
 	}
 	var accountIDs *[]uint64
 	if input.AccountIDs != nil {

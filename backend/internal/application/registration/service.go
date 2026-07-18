@@ -37,15 +37,16 @@ type nsfwSetter interface {
 }
 
 type Config struct {
-	Enabled         bool
-	SpoolPath       string
-	PollInterval    time.Duration
-	FailedRetention time.Duration
-	WorkDir         string
-	ConfigPath      string
-	Command         []string
-	BrowserMode     string
-	BrowserPath     string
+	Enabled           bool
+	SpoolPath         string
+	PollInterval      time.Duration
+	FailedRetention   time.Duration
+	WorkDir           string
+	ConfigPath        string
+	Command           []string
+	BrowserMode       string
+	BrowserPath       string
+	ResolveProxyGroup func(context.Context, uint64, string) ([]string, error)
 }
 
 type Service struct {
@@ -57,15 +58,21 @@ type Service struct {
 }
 
 type fileResult struct {
-	Status        string    `json:"status"`
-	Created       int       `json:"created"`
-	Updated       int       `json:"updated"`
-	Synced        int       `json:"synced"`
-	SyncFailed    int       `json:"syncFailed"`
-	NSFWRequested bool      `json:"nsfwRequested,omitempty"`
-	NSFWEnabled   int       `json:"nsfwEnabled,omitempty"`
-	NSFWFailed    int       `json:"nsfwFailed,omitempty"`
-	ProcessedAt   time.Time `json:"processedAt"`
+	Status        string      `json:"status"`
+	Created       int         `json:"created"`
+	Updated       int         `json:"updated"`
+	Synced        int         `json:"synced"`
+	SyncFailed    int         `json:"syncFailed"`
+	SyncErrors    []syncError `json:"syncErrors,omitempty"`
+	NSFWRequested bool        `json:"nsfwRequested,omitempty"`
+	NSFWEnabled   int         `json:"nsfwEnabled,omitempty"`
+	NSFWFailed    int         `json:"nsfwFailed,omitempty"`
+	ProcessedAt   time.Time   `json:"processedAt"`
+}
+
+type syncError struct {
+	AccountID uint64 `json:"accountId"`
+	Error     string `json:"error"`
 }
 
 type spoolDirectories struct {
@@ -292,6 +299,9 @@ func (s *Service) processFile(ctx context.Context, source, originalName, process
 	synced := s.syncer.Sync(ctx, imported.AccountIDs...)
 	result.Synced = synced.Succeeded
 	result.SyncFailed = synced.Failed
+	for _, failure := range synced.Failures {
+		result.SyncErrors = append(result.SyncErrors, syncError{AccountID: failure.AccountID, Error: failure.Error})
+	}
 	if synced.Failed > 0 {
 		result.Status = "sync_failed"
 		return s.finish(source, originalName, failed, result)

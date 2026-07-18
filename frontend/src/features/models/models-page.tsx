@@ -20,6 +20,7 @@ import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { createModel, deleteModel, deleteModels, listModelAccountOptions, listModels, syncModels, updateModel, updateModelsEnabled } from "@/entities/model/model-api";
+import { listEgressGroups } from "@/features/settings/settings-api";
 import type { ModelRouteDTO } from "@/entities/model/types";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
@@ -53,17 +54,19 @@ export function ModelsPage() {
     enabled: z.boolean(),
     bindingMode: z.boolean(),
     accountIds: z.array(z.string()),
+    egressGroupId: z.string(),
   }).refine((value) => !value.bindingMode || value.accountIds.length > 0, { path: ["accountIds"], message: t("models.selectAccountRequired") });
   type ModelForm = z.infer<typeof schema>;
   const form = useForm<ModelForm>({
     resolver: zodResolver(schema),
-    defaultValues: { publicId: "", provider: "grok_build", upstreamModel: "", capability: "responses", enabled: true, bindingMode: false, accountIds: [] },
+    defaultValues: { publicId: "", provider: "grok_build", upstreamModel: "", capability: "responses", enabled: true, bindingMode: false, accountIds: [], egressGroupId: "" },
   });
   const modelEnabled = useWatch({ control: form.control, name: "enabled" });
   const selectedProvider = useWatch({ control: form.control, name: "provider" });
   const selectedCapability = useWatch({ control: form.control, name: "capability" });
   const bindingMode = useWatch({ control: form.control, name: "bindingMode" });
   const selectedAccountIDs = useWatch({ control: form.control, name: "accountIds" });
+  const selectedEgressGroupID = useWatch({ control: form.control, name: "egressGroupId" });
 
   const modelsQuery = useQuery({
     queryKey: ["models", page, pageSize, debouncedSearch, statusFilter, providerFilter, sort.field, sort.order],
@@ -75,13 +78,14 @@ export function ModelsPage() {
     queryFn: () => listModelAccountOptions(selectedProvider),
     enabled: editing !== null,
   });
+  const egressGroupsQuery = useQuery({ queryKey: ["egress-groups", "models", selectedProvider], queryFn: () => listEgressGroups(), enabled: editing !== null });
 
   const updateMutation = useMutation({
     mutationFn: (values: ModelForm) => {
       if (!editing) throw new Error(t("errors.generic"));
-      const input = { ...values, accountIds: values.bindingMode ? values.accountIds : [] };
+      const input = { ...values, accountIds: values.bindingMode ? values.accountIds : [], egressGroupId: values.egressGroupId || "" };
       if (editing === "new") return createModel(input);
-      return updateModel(editing.id, { publicId: input.publicId, enabled: input.enabled, accountIds: input.accountIds });
+      return updateModel(editing.id, { publicId: input.publicId, enabled: input.enabled, accountIds: input.accountIds, egressGroupId: input.egressGroupId });
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["models"] });
@@ -146,13 +150,14 @@ export function ModelsPage() {
       enabled: model.enabled,
       bindingMode: model.bindingMode,
       accountIds: model.accountIds,
+      egressGroupId: model.egressGroupId,
     });
   }
 
   function beginCreate(): void {
     setEditing("new");
     setAccountSearch("");
-    form.reset({ publicId: "", provider: "grok_build", upstreamModel: "", capability: "responses", enabled: true, bindingMode: false, accountIds: [] });
+    form.reset({ publicId: "", provider: "grok_build", upstreamModel: "", capability: "responses", enabled: true, bindingMode: false, accountIds: [], egressGroupId: "" });
   }
 
   function toggleBoundAccount(id: string, checked: boolean): void {
@@ -354,6 +359,7 @@ export function ModelsPage() {
                 </div>
               ) : null}
             </div>
+            <div className="space-y-2"><Label>{t("models.egressGroup", "Egress group")}</Label><Select value={selectedEgressGroupID || "direct"} onValueChange={(value) => form.setValue("egressGroupId", value === "direct" ? "" : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="direct">{t("common.direct", "Direct")}</SelectItem>{(egressGroupsQuery.data?.items ?? []).filter((group) => group.enabled && group.scope === selectedProvider).map((group) => <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>)}</SelectContent></Select></div>
             <div className="flex items-center justify-between border-b py-2"><Label htmlFor="model-enabled">{modelEnabled ? t("common.enabled") : t("common.disabled")}</Label><Switch id="model-enabled" checked={modelEnabled} onCheckedChange={(checked) => form.setValue("enabled", checked)} /></div>
             <DialogFooter><Button type="button" variant="secondary" size="sm" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button type="submit" size="sm" disabled={updateMutation.isPending}>{updateMutation.isPending ? <Spinner /> : null}{t("common.save")}</Button></DialogFooter>
           </form>

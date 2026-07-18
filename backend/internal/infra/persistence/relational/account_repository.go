@@ -23,12 +23,13 @@ type quotaBreakdownJSON struct {
 }
 
 const (
-	accountPaidBillingPredicate     = `EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.monthly_limit > 0 OR billing.on_demand_cap > 0 OR billing.on_demand_used > 0 OR billing.prepaid_balance > 0 OR billing.credit_usage_percent > 0))`
-	accountFreeSignalPredicate      = `(LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.is_unified_billing_user = TRUE OR billing.usage_period_type <> '' OR billing.top_up_method <> '' OR billing.billing_period_start <> '' OR (billing.history_json <> '' AND billing.history_json <> '[]' AND billing.history_json <> 'null'))))`
-	accountRecoveryPredicate        = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
-	providerQuotaExhaustedPredicate = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))`
-	accountTypeSortExpression       = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountPaidBillingPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
-	accountStatusSortExpression     = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
+	accountPaidBillingPredicate        = `EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.monthly_limit > 0 OR billing.on_demand_cap > 0 OR billing.on_demand_used > 0 OR billing.prepaid_balance > 0 OR billing.credit_usage_percent > 0))`
+	accountFreeSignalPredicate         = `(LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.is_unified_billing_user = TRUE OR billing.usage_period_type <> '' OR billing.top_up_method <> '' OR billing.billing_period_start <> '' OR (billing.history_json <> '' AND billing.history_json <> '[]' AND billing.history_json <> 'null'))))`
+	accountRecoveryPredicate           = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
+	accountFreeQuotaExhaustedPredicate = `(NOT (` + accountPaidBillingPredicate + `) AND (` + accountFreeSignalPredicate + `) AND EXISTS (SELECT 1 FROM request_audits usage WHERE usage.account_id = provider_accounts.id AND usage.created_at >= ? AND usage.total_tokens > 0 GROUP BY usage.account_id HAVING COALESCE(SUM(usage.total_tokens), 0) >= ?))`
+	providerQuotaExhaustedPredicate    = `((provider_accounts.provider = 'grok_web' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining <= 0)) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))`
+	accountTypeSortExpression          = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountPaidBillingPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
+	accountStatusSortExpression        = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
 )
 
 func (r *AccountRepository) List(ctx context.Context, input repository.AccountListQuery) ([]account.Credential, int64, error) {
@@ -53,15 +54,15 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	}
 	switch input.Filter.Status {
 	case "active":
-		query = query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+providerQuotaExhaustedPredicate+" AND (cooldown_until IS NULL OR cooldown_until <= ?)", true, account.AuthStatusActive, input.Filter.Now)
+		query = query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+providerQuotaExhaustedPredicate+" AND NOT "+accountFreeQuotaExhaustedPredicate+" AND (cooldown_until IS NULL OR cooldown_until <= ?)", true, account.AuthStatusActive, input.Filter.Now.Add(-account.FreeUsageWindow), account.EstimatedFreeTokenLimit, input.Filter.Now)
 	case "disabled":
 		query = query.Where("enabled = ?", false)
 	case "reauthRequired":
 		query = query.Where("enabled = ? AND auth_status = ?", true, account.AuthStatusReauthRequired)
 	case "cooldown":
-		query = query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND cooldown_until > ?", true, account.AuthStatusActive, input.Filter.Now)
+		query = query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+accountFreeQuotaExhaustedPredicate+" AND cooldown_until > ?", true, account.AuthStatusActive, input.Filter.Now.Add(-account.FreeUsageWindow), account.EstimatedFreeTokenLimit, input.Filter.Now)
 	case "waitingReset":
-		query = query.Where("enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR "+providerQuotaExhaustedPredicate+")", true, account.AuthStatusActive)
+		query = query.Where("enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR "+providerQuotaExhaustedPredicate+" OR "+accountFreeQuotaExhaustedPredicate+")", true, account.AuthStatusActive, input.Filter.Now.Add(-account.FreeUsageWindow), account.EstimatedFreeTokenLimit)
 	case "probing":
 		query = query.Where("enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing')", true, account.AuthStatusActive)
 	}
@@ -103,20 +104,21 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 
 func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]repository.AccountSummary, error) {
 	var rows []repository.AccountSummary
+	freeSince := now.Add(-account.FreeUsageWindow)
 	selectFields := `
 		provider,
 		COUNT(*) AS total,
-		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND (cooldown_until IS NULL OR cooldown_until <= ?) THEN 1 ELSE 0 END) AS available,
-		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND cooldown_until > ? THEN 1 ELSE 0 END) AS cooldown,
-		SUM(CASE WHEN enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + `) THEN 1 ELSE 0 END) AS waiting_reset,
+		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND NOT ` + accountFreeQuotaExhaustedPredicate + ` AND (cooldown_until IS NULL OR cooldown_until <= ?) THEN 1 ELSE 0 END) AS available,
+		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND NOT ` + accountFreeQuotaExhaustedPredicate + ` AND cooldown_until > ? THEN 1 ELSE 0 END) AS cooldown,
+		SUM(CASE WHEN enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` OR ` + accountFreeQuotaExhaustedPredicate + `) THEN 1 ELSE 0 END) AS waiting_reset,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 1 ELSE 0 END) AS probing,
 		SUM(CASE WHEN enabled = ? THEN 1 ELSE 0 END) AS disabled,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? THEN 1 ELSE 0 END) AS reauth_required`
 	err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select(
 		selectFields,
-		true, account.AuthStatusActive, now,
-		true, account.AuthStatusActive, now,
-		true, account.AuthStatusActive,
+		true, account.AuthStatusActive, freeSince, account.EstimatedFreeTokenLimit, now,
+		true, account.AuthStatusActive, freeSince, account.EstimatedFreeTokenLimit, now,
+		true, account.AuthStatusActive, freeSince, account.EstimatedFreeTokenLimit,
 		true, account.AuthStatusActive,
 		false,
 		true, account.AuthStatusReauthRequired,
@@ -166,6 +168,24 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 	if err != nil {
 		return nil, err
 	}
+	observedTokens := make(map[uint64]int64, len(ids))
+	if len(ids) > 0 {
+		var rows []struct {
+			AccountID   uint64
+			TotalTokens int64
+		}
+		if err := r.db.db.WithContext(ctx).
+			Model(&requestAuditModel{}).
+			Select("account_id, COALESCE(SUM(total_tokens), 0) AS total_tokens").
+			Where("account_id IN ? AND created_at >= ? AND total_tokens > 0", ids, time.Now().UTC().Add(-account.FreeUsageWindow)).
+			Group("account_id").
+			Scan(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			observedTokens[row.AccountID] = row.TotalTokens
+		}
+	}
 	quotaWindows := make(map[uint64]account.QuotaWindow, len(ids))
 	if len(ids) > 0 && (provider == account.ProviderWeb || quotaMode != "") {
 		var rows []quotaWindowModel
@@ -173,7 +193,7 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 		if provider == account.ProviderWeb {
 			modes = append(modes, "weekly")
 		}
-		if quotaMode != "" {
+		if quotaMode != "" && quotaMode != "weekly" {
 			modes = append(modes, quotaMode)
 		}
 		if err := r.db.db.WithContext(ctx).Where("account_id IN ? AND mode IN ?", ids, modes).Order("CASE WHEN mode = 'weekly' THEN 0 ELSE 1 END").Find(&rows).Error; err != nil {
@@ -217,10 +237,11 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 		if len(bound) > 0 {
 			capabilityKnown, supportsModel = true, true
 		}
-		candidate := account.RoutingCandidate{Credential: value, ModelCapabilityKnown: capabilityKnown, SupportsModel: supportsModel}
+		candidate := account.RoutingCandidate{Credential: value, ModelCapabilityKnown: capabilityKnown, SupportsModel: supportsModel, ObservedTokens: observedTokens[value.ID]}
 		if billing, ok := billings[value.ID]; ok {
 			candidate.Billing = &billing
 		}
+		candidate.FreeQuota = isFreeQuotaCandidate(value, candidate.Billing)
 		if recovery, ok := recoveries[value.ID]; ok {
 			candidate.QuotaRecovery = &recovery
 		}
@@ -233,6 +254,19 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 		result = append(result, candidate)
 	}
 	return result, nil
+}
+
+func isFreeQuotaCandidate(value account.Credential, billing *account.Billing) bool {
+	if billing != nil && (billing.MonthlyLimit > 0 || billing.OnDemandCap > 0 || billing.OnDemandUsed > 0 || billing.PrepaidBalance > 0 || billing.CreditUsagePercent > 0) {
+		return false
+	}
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(value.ObservedModel)), "-build-free") {
+		return true
+	}
+	if billing == nil {
+		return false
+	}
+	return billing.IsUnifiedBillingUser || billing.UsagePeriodType != "" || billing.TopUpMethod != "" || billing.BillingPeriodStart != "" || len(billing.History) > 0
 }
 
 func (r *AccountRepository) ListEnabled(ctx context.Context, provider account.Provider) ([]account.Credential, error) {

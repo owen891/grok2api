@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
@@ -31,9 +32,10 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 type updateRequest struct {
-	PublicID   *string   `json:"publicId"`
-	Enabled    *bool     `json:"enabled"`
-	AccountIDs *[]string `json:"accountIds"`
+	PublicID      *string   `json:"publicId"`
+	Enabled       *bool     `json:"enabled"`
+	AccountIDs    *[]string `json:"accountIds"`
+	EgressGroupID *string   `json:"egressGroupId"`
 }
 
 type createRequest struct {
@@ -43,6 +45,7 @@ type createRequest struct {
 	Capability    string   `json:"capability" binding:"required"`
 	Enabled       bool     `json:"enabled"`
 	AccountIDs    []string `json:"accountIds"`
+	EgressGroupID string   `json:"egressGroupId"`
 }
 
 type batchUpdateRequest struct {
@@ -61,6 +64,7 @@ type modelResponse struct {
 	UpstreamModel     string     `json:"upstreamModel"`
 	Capability        string     `json:"capability"`
 	Enabled           bool       `json:"enabled"`
+	EgressGroupID     string     `json:"egressGroupId"`
 	Origin            string     `json:"origin"`
 	AccountIDs        []string   `json:"accountIds"`
 	BindingMode       bool       `json:"bindingMode"`
@@ -119,9 +123,15 @@ func (h *Handler) create(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 		return
 	}
+	egressGroupID, parseErr := parseOptionalID(request.EgressGroupID)
+	if parseErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidId", parseErr.Error())
+		return
+	}
 	value, err := h.service.Create(c.Request.Context(), modelapp.CreateInput{
 		PublicID: request.PublicID, Provider: account.Provider(request.Provider), UpstreamModel: request.UpstreamModel,
 		Capability: modeldomain.Capability(request.Capability), Enabled: request.Enabled, AccountIDs: accountIDs,
+		EgressGroupID: egressGroupID,
 	})
 	if err != nil {
 		h.writeServiceError(c, "modelCreateFailed", err)
@@ -201,7 +211,22 @@ func (h *Handler) update(c *gin.Context) {
 		}
 		accountIDs = &parsed
 	}
-	value, err := h.service.Update(c.Request.Context(), id, modelapp.UpdateInput{PublicID: request.PublicID, Enabled: request.Enabled, AccountIDs: accountIDs})
+	var egressGroupID *uint64
+	if request.EgressGroupID != nil {
+		rawID := strings.TrimSpace(*request.EgressGroupID)
+		if rawID == "" {
+			value := uint64(0)
+			egressGroupID = &value
+		} else {
+			value, parseErr := strconv.ParseUint(rawID, 10, 64)
+			if parseErr != nil {
+				response.Error(c, http.StatusBadRequest, "invalidId", parseErr.Error())
+				return
+			}
+			egressGroupID = &value
+		}
+	}
+	value, err := h.service.Update(c.Request.Context(), id, modelapp.UpdateInput{PublicID: request.PublicID, Enabled: request.Enabled, AccountIDs: accountIDs, EgressGroupID: egressGroupID})
 	if err != nil {
 		h.writeServiceError(c, "modelUpdateFailed", err)
 		return
@@ -247,6 +272,7 @@ func newModelResponse(value modeldomain.Route) modelResponse {
 	return modelResponse{
 		ID: value.ID, PublicID: modeldomain.ExternalPublicID(value.Provider, value.PublicID), Provider: string(value.Provider), UpstreamModel: modeldomain.DisplayUpstreamModel(value.Provider, value.UpstreamModel), Capability: string(value.Capability),
 		Enabled: value.Enabled, Origin: string(value.Origin), AccountIDs: accountIDs, BindingMode: manualBinding, SupportedAccounts: value.SupportedAccounts,
+		EgressGroupID:  formatOptionalID(value.EgressGroupID),
 		SyncedAccounts: value.SyncedAccounts, TotalAccounts: value.TotalAccounts, CapabilityKnown: capabilityKnown,
 		Available: available, LastSyncedAt: value.LastSyncedAt,
 	}
@@ -262,6 +288,25 @@ func parseIDs(values []string) ([]uint64, error) {
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+func parseOptionalID(value string) (uint64, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return 0, nil
+	}
+	id, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func formatOptionalID(value uint64) string {
+	if value == 0 {
+		return ""
+	}
+	return strconv.FormatUint(value, 10)
 }
 
 func pagination(c *gin.Context) (int, int) {

@@ -153,6 +153,7 @@ type WorkerSettings struct {
 	TempmailLolDomain        string                `json:"tempmailLolDomain"`
 	TempmailLolPrefix        string                `json:"tempmailLolPrefix"`
 	Proxy                    string                `json:"proxy"`
+	ProxyGroupID             string                `json:"proxyGroupId"`
 	CPABaseURL               string                `json:"cpaBaseURL"`
 	CPAProxy                 string                `json:"cpaProxy"`
 	CPAHeadless              bool                  `json:"cpaHeadless"`
@@ -177,6 +178,7 @@ type WorkerSettingsPatch struct {
 	TempmailLolDomain        *string                `json:"tempmailLolDomain"`
 	TempmailLolPrefix        *string                `json:"tempmailLolPrefix"`
 	Proxy                    *string                `json:"proxy"`
+	ProxyGroupID             *string                `json:"proxyGroupId"`
 	CPABaseURL               *string                `json:"cpaBaseURL"`
 	CPAProxy                 *string                `json:"cpaProxy"`
 	CPAHeadless              *bool                  `json:"cpaHeadless"`
@@ -243,8 +245,12 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 	if err := c.ensureWorkerConfigLocked(); err != nil {
 		return Status{}, err
 	}
+	if err := c.resolveProxyGroupLocked(ctx, registrationProxyScope(accountType)); err != nil {
+		return Status{}, err
+	}
 	preflight := c.preflightLocked(ctx)
 	if !preflight.OK {
+		c.appendPreflightLogLocked(preflight)
 		return Status{}, &PreflightError{Checks: preflight.Checks}
 	}
 	effectiveProxy, proxyOK, _ := resolveRegistrationProxy(preflight.Config.Proxy)
@@ -258,6 +264,7 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 		c.releaseLockLocked()
 		return Status{}, err
 	}
+	c.appendPreflightLogLocked(preflight)
 
 	mode := "count"
 	value := input.Count
@@ -450,7 +457,55 @@ func (c *Controller) UpdateSettings(patch WorkerSettingsPatch) (WorkerSettings, 
 func (c *Controller) Preflight(ctx context.Context) PreflightResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.preflightLocked(ctx)
+	result := c.preflightLocked(ctx)
+	c.appendPreflightLogLocked(result)
+	return result
+}
+
+func (c *Controller) appendPreflightLogLocked(result PreflightResult) {
+	status := "失败"
+	if result.OK {
+		status = "通过"
+	}
+	c.appendLogLocked(fmt.Sprintf("[预检] 注册 worker 预检%s", status))
+	for _, check := range result.Checks {
+		checkStatus := "失败"
+		if check.OK {
+			checkStatus = "通过"
+		}
+		c.appendLogLocked(fmt.Sprintf("[预检] %s：%s（%s）", preflightCheckLabel(check.Name), preflightDetailLabel(check.Detail), checkStatus))
+	}
+}
+
+func preflightDetailLabel(detail string) string {
+	labels := map[string]string{
+		"ready": "已就绪", "protocol": "协议模式", "local-http": "本地 HTTP 服务",
+		"worker unavailable": "Worker 不可用", "protocol mode skips browser CPA probe": "协议模式不执行浏览器 CPA 探测",
+		"protocol mode skips cpaProxy":                 "协议模式不使用 CPA 代理",
+		"API key or YYDS JWT for every enabled source": "每个启用邮件来源都需要 API Key 或 YYDS JWT",
+		"yescaptcha_api_key":                           "需要配置 YesCaptcha API Key",
+	}
+	if label, ok := labels[detail]; ok {
+		return label
+	}
+	return detail
+}
+
+func preflightCheckLabel(name string) string {
+	if strings.HasPrefix(name, "emailAPI:") {
+		return "邮件 API 地址（" + strings.TrimPrefix(name, "emailAPI:") + "）"
+	}
+	labels := map[string]string{
+		"enabled": "功能开关", "workdir": "工作目录", "worker": "Worker 命令", "config": "Worker 配置",
+		"registrationData": "注册数据目录", "spool": "任务队列目录", "engine": "注册引擎", "emailSources": "邮件来源",
+		"emailCredentials": "邮件凭据", "cpaBaseURL": "CPA 地址", "proxy": "代理", "cpaProxy": "CPA 代理",
+		"captchaEndpoint": "清障服务地址", "captchaSolver": "清障方案", "yescaptcha": "YesCaptcha 配置",
+		"protocolWorker": "协议 Worker", "dependencies": "协议依赖",
+	}
+	if label, ok := labels[name]; ok {
+		return label
+	}
+	return name
 }
 
 func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
@@ -460,7 +515,7 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 			Checks: []PreflightCheck{{Name: "enabled", OK: false, Detail: "registration worker is disabled"}},
 		}
 	}
-	checks := make([]PreflightCheck, 0, 9)
+	checks := make([]PreflightCheck, 0, 20)
 	add := func(name string, ok bool, detail string) {
 		checks = append(checks, PreflightCheck{Name: name, OK: ok, Detail: detail})
 	}
@@ -474,6 +529,7 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	add("registrationData", dataErr == nil, c.dataPath())
 	spoolErr := ensurePrivateDirectory(filepath.Join(c.config.SpoolPath, "incoming"))
 	add("spool", spoolErr == nil, c.config.SpoolPath)
+	add("logDirectory", ensurePrivateDirectory(c.dataPath()) == nil, c.logPath())
 
 	settings := WorkerSettings{}
 	configValue := map[string]any{}
@@ -499,12 +555,32 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	}
 	add("emailSources", len(enabledSources) > 0, strings.Join(providerNames, ", "))
 	add("emailCredentials", len(enabledSources) > 0 && credentialsReady, "API key or YYDS JWT for every enabled source")
+	for _, source := range enabledSources {
+		apiBase := strings.TrimSpace(source.APIBase)
+		_, apiErr := validateHTTPURL(apiBase)
+		add("emailAPI:"+source.ID, apiErr == nil, apiBase)
+	}
 	// 协议路径不依赖浏览器 CPA 探测地址；仅校验 proxy 可选性。
-	add("cpaBaseURL", true, "protocol mode skips browser CPA probe")
+	if settings.CPABaseURL != "" {
+		_, cpaErr := validateCPABaseURL(settings.CPABaseURL)
+		add("cpaBaseURL", cpaErr == nil, settings.CPABaseURL)
+	} else {
+		add("cpaBaseURL", true, "协议模式不执行浏览器 CPA 探测")
+	}
 	_, proxyOK, proxyDetail := resolveRegistrationProxy(settings.Proxy)
 	add("proxy", proxyOK, proxyDetail)
-	add("cpaProxy", true, "protocol mode skips cpaProxy")
-	solver := strings.ToLower(strings.TrimSpace(stringValue(configValue["captcha_solver"], "local")))
+	if strings.TrimSpace(settings.CPAProxy) == "" {
+		add("cpaProxy", true, "未单独配置，沿用注册代理")
+	} else {
+		cpaProxyOK, cpaProxyDetail := proxyReady(settings.CPAProxy)
+		add("cpaProxy", cpaProxyOK, cpaProxyDetail)
+	}
+	cpaDir := filepath.Join(c.dataPath(), "cpa_auths")
+	add("cpaAuthDir", ensurePrivateDirectory(cpaDir) == nil, cpaDir)
+	solver := strings.ToLower(strings.TrimSpace(stringValue(configValue["clearance_provider"], stringValue(configValue["captcha_solver"], "docker"))))
+	if solver == "docker" {
+		solver = "local"
+	}
 	if solver == "" {
 		solver = "local"
 	}
@@ -532,6 +608,7 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	protocolScript := filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
 	_, protocolErr := os.Stat(protocolScript)
 	add("protocolWorker", protocolErr == nil, protocolScript)
+	add("oauthConfig", oauthConfigReady(configValue), "OAuth 授权模块、端点和 Turnstile 配置")
 
 	dependencyOK := false
 	dependencyDetail := "worker unavailable"
@@ -563,6 +640,15 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		result.OK = result.OK && check.OK
 	}
 	return result
+}
+
+func oauthConfigReady(config map[string]any) bool {
+	if len(config) == 0 {
+		return false
+	}
+	// The protocol worker performs the import and endpoint checks. This guard
+	// catches an accidentally replaced config before spawning that worker.
+	return strings.TrimSpace(stringValue(config["engine"], "protocol")) == "protocol"
 }
 
 func (c *Controller) monitor(command *exec.Cmd, reader *os.File, done chan struct{}) {
@@ -775,6 +861,14 @@ func (c *Controller) forceSafeWorkerSettings(value map[string]any) {
 	value["cpa_auth_dir"] = filepath.Join(c.dataPath(), "cpa_auths")
 	if endpoint, ok := os.LookupEnv("REGISTRATION_CAPTCHA_ENDPOINT"); ok {
 		value["captcha_endpoint"] = strings.TrimSpace(endpoint)
+		value["clearance_endpoint"] = strings.TrimSpace(endpoint)
+	}
+	if strings.TrimSpace(stringValue(value["clearance_provider"], "")) == "" {
+		if strings.ToLower(strings.TrimSpace(stringValue(value["captcha_solver"], "local"))) == "yescaptcha" {
+			value["clearance_provider"] = "yescaptcha"
+		} else {
+			value["clearance_provider"] = "docker"
+		}
 	}
 	if proxy, ok := os.LookupEnv("REGISTRATION_PROXY"); ok {
 		value["proxy"] = strings.TrimSpace(proxy)
@@ -802,6 +896,41 @@ func (c *Controller) workerEnvironment() []string {
 		environment = setEnvironment(environment, key, value)
 	}
 	return environment
+}
+
+func registrationProxyScope(accountType string) string {
+	if accountType == "web" {
+		return "grok_web"
+	}
+	return "grok_build"
+}
+
+func (c *Controller) resolveProxyGroupLocked(ctx context.Context, expectedScope string) error {
+	value, err := readJSONMap(c.config.ConfigPath)
+	if err != nil {
+		return err
+	}
+	rawID := strings.TrimSpace(stringValue(value["proxy_group_id"], ""))
+	if rawID == "" {
+		delete(value, "proxy_pool")
+		return writeJSONAtomic(c.config.ConfigPath, value, 0o600)
+	}
+	groupID, err := strconv.ParseUint(rawID, 10, 64)
+	if err != nil || groupID == 0 {
+		return fmt.Errorf("%w: 代理组 ID 无效", ErrInvalidInput)
+	}
+	if c.config.ResolveProxyGroup == nil {
+		return fmt.Errorf("%w: 代理组解析器未配置", ErrInvalidInput)
+	}
+	proxies, err := c.config.ResolveProxyGroup(ctx, groupID, expectedScope)
+	if err != nil {
+		return fmt.Errorf("解析注册代理组: %w", err)
+	}
+	if len(proxies) == 0 {
+		return fmt.Errorf("%w: 代理组没有可用节点", ErrInvalidInput)
+	}
+	value["proxy_pool"] = proxies
+	return writeJSONAtomic(c.config.ConfigPath, value, 0o600)
 }
 
 func (c *Controller) dataPath() string { return filepath.Dir(c.config.SpoolPath) }
@@ -925,7 +1054,10 @@ func readLogEntries(path string, limit int) ([]LogEntry, error) {
 }
 
 func settingsView(value map[string]any) WorkerSettings {
-	solver := strings.ToLower(strings.TrimSpace(stringValue(value["captcha_solver"], "local")))
+	solver := strings.ToLower(strings.TrimSpace(stringValue(value["clearance_provider"], stringValue(value["captcha_solver"], "docker"))))
+	if solver == "docker" {
+		solver = "local"
+	}
 	if solver != "yescaptcha" {
 		solver = "local"
 	}
@@ -942,7 +1074,8 @@ func settingsView(value map[string]any) WorkerSettings {
 		TempmailLolDomain:      stringValue(value["tempmail_lol_domain"], ""),
 		TempmailLolPrefix:      stringValue(value["tempmail_lol_prefix"], ""),
 		Proxy:                  stringValue(value["proxy"], ""), CPABaseURL: stringValue(value["cpa_base_url"], "https://cli-chat-proxy.grok.com/v1"),
-		CPAProxy: stringValue(value["cpa_proxy"], ""), CPAHeadless: boolValue(value["cpa_headless"], false),
+		ProxyGroupID: stringValue(value["proxy_group_id"], ""),
+		CPAProxy:     stringValue(value["cpa_proxy"], ""), CPAHeadless: boolValue(value["cpa_headless"], false),
 		CPAProbeChat: boolValue(value["cpa_probe_chat"], true), CPACloseBrowserAfterAuth: boolValue(value["cpa_close_browser_after_auth"], true),
 		CaptchaSolver: solver, CaptchaEndpoint: endpoint,
 		YydsAPIKeyConfigured:    strings.TrimSpace(stringValue(value["yyds_api_key"], "")) != "",
@@ -962,16 +1095,31 @@ func applySettingsPatch(value map[string]any, patch WorkerSettingsPatch) error {
 	if patch.CaptchaSolver != nil {
 		solver := strings.ToLower(strings.TrimSpace(*patch.CaptchaSolver))
 		if !slices.Contains([]string{"local", "yescaptcha"}, solver) {
-			return fmt.Errorf("%w: 不支持的验证码方式", ErrInvalidInput)
+			return fmt.Errorf("%w: 不支持的清障方式", ErrInvalidInput)
 		}
 		value["captcha_solver"] = solver
+		if solver == "local" {
+			value["clearance_provider"] = "docker"
+		} else {
+			value["clearance_provider"] = solver
+		}
+	}
+	if patch.ProxyGroupID != nil {
+		groupID := strings.TrimSpace(*patch.ProxyGroupID)
+		if groupID != "" {
+			if _, err := strconv.ParseUint(groupID, 10, 64); err != nil {
+				return fmt.Errorf("%w: 代理组 ID 无效", ErrInvalidInput)
+			}
+		}
+		value["proxy_group_id"] = groupID
 	}
 	if patch.CaptchaEndpoint != nil {
 		endpoint, err := validateCaptchaEndpoint(*patch.CaptchaEndpoint)
 		if err != nil {
-			return fmt.Errorf("%w: 验证码 endpoint 无效", ErrInvalidInput)
+			return fmt.Errorf("%w: 清障 endpoint 无效", ErrInvalidInput)
 		}
 		value["captcha_endpoint"] = endpoint
+		value["clearance_endpoint"] = endpoint
 	}
 	for key, secret := range map[string]*string{
 		"yyds_api_key":       patch.YydsAPIKey,

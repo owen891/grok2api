@@ -14,6 +14,7 @@ import (
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	dashboardapp "github.com/chenyme/grok2api/backend/internal/application/dashboard"
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
+	egressgroupapp "github.com/chenyme/grok2api/backend/internal/application/egressgroup"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
@@ -25,6 +26,7 @@ import (
 	clientkeyhttp "github.com/chenyme/grok2api/backend/internal/transport/http/clientkey"
 	dashboardhttp "github.com/chenyme/grok2api/backend/internal/transport/http/dashboard"
 	egresshttp "github.com/chenyme/grok2api/backend/internal/transport/http/egress"
+	egressgrouphttp "github.com/chenyme/grok2api/backend/internal/transport/http/egressgroup"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/inference"
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -60,6 +62,7 @@ type Dependencies struct {
 	Media        *mediaapp.Service
 	Settings     *settingsapp.Service
 	Egress       *egressapp.Service
+	EgressGroups *egressgroupapp.Service
 	Registration *registrationapp.Controller
 }
 
@@ -146,6 +149,9 @@ func New(deps Dependencies) *gin.Engine {
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
+	if deps.EgressGroups != nil {
+		egressgrouphttp.NewHandler(deps.EgressGroups).Register(adminProtected)
+	}
 	if deps.Registration != nil {
 		registrationhttp.NewHandler(deps.Registration).Register(adminProtected)
 	}

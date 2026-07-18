@@ -12,6 +12,7 @@ package main
 import (
 	"fmt"
 	"os"
+	_ "time/tzdata"
 
 	"github.com/chenyme/grok2api/backend/internal/cli"
 )

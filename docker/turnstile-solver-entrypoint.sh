@@ -21,7 +21,7 @@ fi
 
 if [[ -n "$proxy" ]]; then
   case "$proxy" in
-    http://*|https://*|socks4://*|socks5://*) ;;
+    http://*|https://*|socks4://*|socks5://*|socks5h://*) ;;
     *)
       echo "[turnstile-solver] TURNSTILE_PROXY must be a reachable proxy URL" >&2
       exit 64

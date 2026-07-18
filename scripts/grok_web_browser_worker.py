@@ -34,6 +34,15 @@ CHALLENGE_MARKERS = (
 )
 
 
+def session_fingerprint(value: dict) -> str:
+    """Restart Chromium when proxy, UA, or Cloudflare state changes."""
+    proxy_url = str(value.get("proxyURL", "")).strip()
+    user_agent = str(value.get("userAgent", "")).strip()
+    cookies = parse_cookie_header(str(value.get("cloudflareCookies", "")))
+    cookie_state = json.dumps(cookies, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256((proxy_url + "\0" + user_agent + "\0" + cookie_state).encode()).hexdigest()
+
+
 def classify_worker_error(error: Exception) -> str:
     message = str(error).lower()
     if "err_proxy_connection_failed" in message or "proxy connection" in message:
@@ -154,7 +163,7 @@ class BrowserSession:
     def _ensure_driver(self, value: dict):
         proxy_url = str(value.get("proxyURL", "")).strip()
         user_agent = str(value.get("userAgent", "")).strip()
-        fingerprint = hashlib.sha256((proxy_url + "\0" + user_agent).encode()).hexdigest()
+        fingerprint = session_fingerprint(value)
         if self.driver is not None and fingerprint == self.fingerprint:
             return self.driver
         self._close_unlocked()

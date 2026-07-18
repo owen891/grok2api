@@ -5,6 +5,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"gorm.io/gorm"
 )
 
 type EgressRepository struct{ db *Database }
@@ -63,14 +64,19 @@ func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.No
 }
 
 func (r *EgressRepository) DeleteEgressNode(ctx context.Context, id uint64) error {
-	result := r.db.db.WithContext(ctx).Delete(&egressNodeModel{}, id)
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
+	return r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&egressGroupMemberModel{}, "node_id = ?", id).Error; err != nil {
+			return mapError(err)
+		}
+		result := tx.Delete(&egressNodeModel{}, id)
+		if result.Error != nil {
+			return mapError(result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return repository.ErrNotFound
+		}
+		return nil
+	})
 }
 
 func toEgressDomain(row egressNodeModel) egress.Node {

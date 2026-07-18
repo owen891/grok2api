@@ -62,6 +62,18 @@ func TestListFilters(t *testing.T) {
 		}
 		assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{Provider: "grok_web", QuotaType: tier, Now: now}, 1)
 	}
+	waitingWeb := accountModel{IdentityKey: testIdentityKey("web-waiting-reset"), Provider: "grok_web", Name: "web-waiting-reset", SourceKey: "web-waiting-reset", Enabled: true, AuthStatus: "active", Priority: 1}
+	if err := database.db.WithContext(ctx).Create(&waitingWeb).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.WithContext(ctx).Create(&quotaWindowModel{AccountID: waitingWeb.ID, Mode: "weekly", Remaining: 10, Total: 100, WindowSeconds: 604800, Source: "upstream", UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.WithContext(ctx).Create(&quotaWindowModel{AccountID: waitingWeb.ID, Mode: "fast", Remaining: 0, Total: 20, WindowSeconds: 86400, Source: "upstream", UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{Provider: "grok_web", Status: "active", Now: now}, 4)
+	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{Provider: "grok_web", Status: "waitingReset", Now: now}, 1)
 	accountValues, _, err := accounts.List(ctx, repository.AccountListQuery{Page: repository.PageQuery{Limit: 20, Sort: repository.SortQuery{Field: "name", Direction: repository.SortAscending}}, Filter: repository.AccountListFilter{Provider: "grok_build", Now: now}})
 	if err != nil || len(accountValues) != 3 || accountValues[0].Name != "disabled" || accountValues[2].Name != "paid" {
 		t.Fatalf("account name sort = %#v, err = %v", accountValues, err)

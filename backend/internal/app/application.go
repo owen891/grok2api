@@ -17,6 +17,7 @@ import (
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	dashboardapp "github.com/chenyme/grok2api/backend/internal/application/dashboard"
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
+	egressgroupapp "github.com/chenyme/grok2api/backend/internal/application/egressgroup"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
@@ -65,6 +66,69 @@ type Application struct {
 	startup           *startupState
 }
 
+func resolveRegistrationProxyGroup(ctx context.Context, groups repository.EgressGroupRepository, cipher *security.Cipher, groupID uint64, expectedScope string, visited map[uint64]struct{}) ([]string, error) {
+	if groupID == 0 {
+		return nil, nil
+	}
+	if _, exists := visited[groupID]; exists {
+		return nil, fmt.Errorf("registration proxy group fallback cycle")
+	}
+	visited[groupID] = struct{}{}
+	group, err := groups.GetEgressGroup(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if expectedScope != "" && string(group.Scope) != expectedScope {
+		return nil, fmt.Errorf("registration proxy group scope %q does not match %q", group.Scope, expectedScope)
+	}
+	if !group.Enabled {
+		if group.FallbackGroupID == nil {
+			return nil, nil
+		}
+		return resolveRegistrationProxyGroup(ctx, groups, cipher, *group.FallbackGroupID, expectedScope, visited)
+	}
+	nodeRepository, ok := groups.(repository.EgressRepository)
+	if !ok {
+		return nil, fmt.Errorf("registration proxy group node repository is unavailable")
+	}
+	members, err := groups.ListEgressGroupMembers(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[uint64]struct{}, len(members))
+	for _, member := range members {
+		if member.Enabled {
+			allowed[member.NodeID] = struct{}{}
+		}
+	}
+	nodes, err := nodeRepository.ListEgressNodes(ctx, group.Scope, repository.SortQuery{})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	proxies := make([]string, 0, len(allowed))
+	for _, node := range nodes {
+		if _, ok := allowed[node.ID]; !ok || !node.Enabled || node.EncryptedProxyURL == "" || (node.CooldownUntil != nil && now.Before(*node.CooldownUntil)) {
+			continue
+		}
+		proxyURL, err := cipher.Decrypt(node.EncryptedProxyURL)
+		if err != nil {
+			return nil, err
+		}
+		normalized, err := egressapp.NormalizeProxyURL(proxyURL)
+		if err != nil {
+			return nil, err
+		}
+		if normalized != "" {
+			proxies = append(proxies, normalized)
+		}
+	}
+	if len(proxies) > 0 || group.FallbackGroupID == nil {
+		return proxies, nil
+	}
+	return resolveRegistrationProxyGroup(ctx, groups, cipher, *group.FallbackGroupID, expectedScope, visited)
+}
+
 // New 完成数据库、Provider、应用服务和 HTTP 路由装配。
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Application, error) {
 	var database *relational.Database
@@ -100,6 +164,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	dashboardRepo := relational.NewDashboardRepository(database)
 	runtimeSettingsRepo := relational.NewRuntimeSettingsRepository(database, cipher)
 	egressRepo := relational.NewEgressRepository(database)
+	egressGroupService := egressgroupapp.NewService(egressRepo, egressRepo, cipher)
 	mediaJobRepo := relational.NewMediaJobRepository(database)
 	mediaAssetRepo := relational.NewMediaAssetRepository(database)
 	loadedConfig, settingsUpdatedAt, settingsRevision, err := settingsapp.LoadPersisted(ctx, cfg, runtimeSettingsRepo)
@@ -156,7 +221,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	}
 	mediaService := mediaapp.NewService(mediaAssetRepo, mediaJobRepo, localMediaStore, refreshLock, mediaConfig(cfg))
 
-	egressManager := infraegress.NewManager(egressRepo, cipher)
+	egressManager := infraegress.NewManager(egressRepo, cipher, concurrency)
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{BaseURL: cfg.Provider.Build.BaseURL, ClientVersion: cfg.Provider.Build.ClientVersion, ClientIdentifier: cfg.Provider.Build.ClientIdentifier, TokenAuth: cfg.Provider.Build.TokenAuth, UserAgent: cfg.Provider.Build.UserAgent}, cipher)
 	cliAdapter.SetEgress(egressManager)
 	webAdapter := webprovider.NewAdapter(webProviderConfig(cfg), egressManager, cipher, responseRepo, mediaService)
@@ -210,7 +275,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			}
 		}
 	}
-	modelService := modelapp.NewService(modelRepo, accountRepo, accountService, providers)
+	modelService := modelapp.NewService(modelRepo, accountRepo, accountService, providers, egressRepo)
 	modelService.SetBulkPool(syncPool)
 	modelService.SetLogger(logger)
 	if err := modelRepo.ReplaceProviderRoutes(ctx, account.ProviderWeb, webprovider.Routes()); err != nil {
@@ -236,6 +301,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		FailedRetention: cfg.Registration.FailedRetention.Value(),
 		WorkDir:         cfg.Registration.WorkDir, ConfigPath: cfg.Registration.ConfigPath,
 		Command: append([]string(nil), cfg.Registration.Command...), BrowserMode: cfg.Registration.BrowserMode, BrowserPath: cfg.Registration.BrowserPath,
+		ResolveProxyGroup: func(resolveCtx context.Context, groupID uint64, expectedScope string) ([]string, error) {
+			return resolveRegistrationProxyGroup(resolveCtx, egressRepo, cipher, groupID, expectedScope, make(map[uint64]struct{}))
+		},
 	}
 	registrationController := registrationapp.NewController(logger, registrationConfig)
 	if cfg.Registration.Enabled {
@@ -291,7 +359,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Registration: registrationController})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, EgressGroups: egressGroupService, Registration: registrationController})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,

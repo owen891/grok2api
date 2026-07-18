@@ -1,10 +1,13 @@
 import unittest
+import sys
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from scripts.grok_web_browser_worker import (
     BrowserSession,
     classify_worker_error,
     parse_cookie_header,
+    session_fingerprint,
     translated_proxy_url,
     validate_request,
 )
@@ -27,6 +30,13 @@ class BrowserWorkerValidationTests(unittest.TestCase):
             parse_cookie_header("cf_clearance=ok; sso=secret; __cf_bm=bm; x-userid=user"),
             {"cf_clearance": "ok", "__cf_bm": "bm"},
         )
+
+    def test_cloudflare_cookie_change_restarts_session(self):
+        base = {"proxyURL": "http://proxy:8080", "userAgent": "Chrome", "cloudflareCookies": "cf_clearance=one"}
+        reordered = {**base, "cloudflareCookies": "cf_clearance=one; __cf_bm=bm"}
+        same_values = {**base, "cloudflareCookies": "cf_clearance=one"}
+        self.assertEqual(session_fingerprint(base), session_fingerprint(same_values))
+        self.assertNotEqual(session_fingerprint(base), session_fingerprint(reordered))
 
     def test_request_is_limited_to_fast_image_endpoint(self):
         value = validate_request(
@@ -86,6 +96,22 @@ class BrowserWorkerValidationTests(unittest.TestCase):
         ensure_driver.assert_called_once_with(value)
         prepare_page.assert_called_once_with(driver, value)
         statsig_id.assert_called_once_with(driver, value)
+
+    def test_ensure_driver_passes_proxy_to_webdriver(self):
+        session = BrowserSession()
+        driver = Mock()
+        utils = SimpleNamespace(USER_AGENT=None, get_webdriver=Mock(return_value=driver))
+        value = {
+            "proxyURL": "http://user:pass@proxy.example:8080",
+            "userAgent": "Chrome/Test",
+            "cloudflareCookies": "",
+        }
+        with patch.dict(sys.modules, {"utils": utils}):
+            session._ensure_driver(value)
+        utils.get_webdriver.assert_called_once_with(
+            {"url": "http://proxy.example:8080", "username": "user", "password": "pass"}
+        )
+        self.assertEqual(utils.USER_AGENT, "Chrome/Test")
 
 
 if __name__ == "__main__":

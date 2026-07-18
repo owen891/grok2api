@@ -269,6 +269,32 @@ func TestAccountRepositorySummarizesOperationalStates(t *testing.T) {
 	}
 }
 
+func TestAccountRepositorySummarizesObservedFreeExhaustion(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDatabase(t)
+	repo := NewAccountRepository(database)
+	audits := NewAuditRepository(database)
+	value, _, err := repo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "build-free-exhausted", SourceKey: "build-free-exhausted",
+		EncryptedAccessToken: testEncryptedToken, AuthStatus: account.AuthStatusActive, ObservedModel: "grok-test-build-free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID := value.ID
+	now := time.Now().UTC()
+	if err := audits.Create(ctx, auditdomain.Record{RequestID: "free-exhausted", ClientKeyID: 1, ModelRouteID: 1, AccountID: &accountID, StatusCode: 200, TotalTokens: account.EstimatedFreeTokenLimit, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := repo.Summarize(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Available != 0 || rows[0].WaitingReset != 1 {
+		t.Fatalf("summary = %#v", rows)
+	}
+}
+
 func TestAccountIdentityPrefersStableOAuthIdentity(t *testing.T) {
 	first := accountIdentity(account.Credential{Provider: account.ProviderBuild, UserID: "user-1", TeamID: "team-1", SourceKey: "device:old-token"})
 	second := accountIdentity(account.Credential{Provider: account.ProviderBuild, UserID: "user-1", TeamID: "team-1", SourceKey: "device:new-token"})

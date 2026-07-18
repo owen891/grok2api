@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -33,6 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import yyds_mail as reg  # noqa: E402
+from clearance_provider import create_clearance_provider  # noqa: E402
 from cpa_xai.schema import build_cpa_xai_auth, credential_file_name  # noqa: E402
 from cpa_xai.writer import write_cpa_xai_auth  # noqa: E402
 
@@ -47,13 +49,24 @@ _failed = 0
 _ok = 0
 
 CHECKPOINT_VERSION = 1
+STAGE_ALIASES = {
+    "email_ready": "pending_email",
+    "account_created": "pending_sso",
+    "sso_ready": "pending_sso",
+    "credential_ready": "pending_submit",
+    "credential_written": "succeeded",
+    "failed": "failed",
+}
 RESUMABLE_STAGES = {
+    "selecting_proxy",
     "account_created",
     "sso_ready",
     "oauth_failed",
     "credential_ready",
     "credential_written",
 }
+# A submit timeout is intentionally excluded: it needs operator/API
+# reconciliation before another account creation attempt is allowed.
 
 
 def _now() -> str:
@@ -94,10 +107,24 @@ def resolve_yescaptcha_key(cfg: dict[str, Any]) -> str:
 
 
 def captcha_mode(cfg: dict[str, Any]) -> str:
-    mode = str(cfg.get("captcha_solver") or cfg.get("turnstile_solver") or "local").strip().lower()
+    mode = str(cfg.get("clearance_provider") or cfg.get("captcha_solver") or cfg.get("turnstile_solver") or "docker").strip().lower()
     if mode in {"yescaptcha", "yes", "remote"}:
         return "yescaptcha"
     return "local"
+
+
+def proxy_pool(cfg: dict[str, Any]) -> list[str]:
+    raw = cfg.get("proxy_pool")
+    values = raw if isinstance(raw, list) else []
+    result: list[str] = []
+    for value in values:
+        candidate = str(value or "").strip()
+        if candidate and candidate not in result:
+            result.append(candidate)
+    fallback = str(cfg.get("proxy") or cfg.get("browser_proxy") or "").strip()
+    if fallback and fallback not in result:
+        result.append(fallback)
+    return result
 
 
 def solve_turnstile_token(
@@ -108,51 +135,13 @@ def solve_turnstile_token(
     log_file: Path | None = None,
     worker_id: int | str = "main",
 ) -> str:
-    mode = captcha_mode(cfg)
-    if mode == "yescaptcha":
-        from xconsole_client import YesCaptchaSolver, config as C
-        key = resolve_yescaptcha_key(cfg)
-        if not key:
-            raise RuntimeError("captcha_solver=yescaptcha 但未配置 yescaptcha_api_key")
-        solver = YesCaptchaSolver(key)
-        token = solver.solve_turnstile(
-            website_url=website_url,
-            website_key=C.TURNSTILE_SITEKEY,
-            premium=True,
-        )
-        log(worker_id, f"YesCaptcha 过盾成功（{len(token)} 字符）", log_file)
-        return token
-
-    from local_turnstile import solve_turnstile_local
-    from xconsole_client import config as C
-    endpoint = str(
-        cfg.get("captcha_endpoint")
-        or cfg.get("local_captcha_endpoint")
-        or cfg.get("yescaptcha_endpoint")
-        or ""
-    ).strip()
-    client_key = str(
-        cfg.get("captcha_client_key")
-        or cfg.get("local_captcha_client_key")
-        or cfg.get("yescaptcha_api_key")
-        or ""
-    ).strip()
-    # 防止 YYDS 的 AC- key 被当成 captcha key
-    if client_key.startswith("AC-"):
-        client_key = "local"
-    log(worker_id, f"本地过盾请求中：{endpoint or '（未配置 endpoint）'}...", log_file)
-    token = solve_turnstile_local(
-        website_url=website_url,
-        website_key=getattr(C, "TURNSTILE_SITEKEY", "0x4AAAAAAAhrPj9_JwTyl4nM"),
-        timeout=float(cfg.get("turnstile_timeout") or 120),
-        headless=True,
-        proxy=proxy or "",
-        endpoint=endpoint,
-        client_key=client_key or "local",
-        task_type=str(cfg.get("captcha_task_type") or "TurnstileTaskProxyless"),
-    )
-    log(worker_id, f"本地过盾成功（{len(token)} 字符）", log_file)
-    return token
+    provider = create_clearance_provider(cfg, yescaptcha_key=resolve_yescaptcha_key(cfg))
+    log(worker_id, f"清障请求中：provider={provider.name}", log_file)
+    result = provider.solve(website_url=website_url, proxy=proxy or "")
+    if not result.token:
+        raise RuntimeError("清障服务未返回 Turnstile Token")
+    log(worker_id, f"清障成功：provider={provider.name} token_length={len(result.token)}", log_file)
+    return result.token
 
 
 def resolve_sso(
@@ -315,6 +304,17 @@ def write_checkpoint(path: Path, **fields: Any) -> dict[str, Any]:
     current = read_checkpoint(path)
     current.update(fields)
     current["version"] = CHECKPOINT_VERSION
+    if fields.get("stage"):
+        current["state_stage"] = STAGE_ALIASES.get(str(fields["stage"]), str(fields["stage"]))
+    email = str(current.get("email") or "").strip().lower()
+    if email:
+        current["email_hash"] = hashlib.sha256(email.encode("utf-8")).hexdigest()
+    current.setdefault("attempt_id", uuid.uuid4().hex)
+    current.setdefault("job_id", path.stem)
+    if "proxy_node_id" not in current and str(current.get("proxy_node") or "").isdigit():
+        current["proxy_node_id"] = int(current["proxy_node"])
+    if "proxy_group_id" not in current and str(current.get("proxy_group") or "").isdigit():
+        current["proxy_group_id"] = int(current["proxy_group"])
     current["updated_at"] = _now()
     if "created_at" not in current:
         current["created_at"] = current["updated_at"]
@@ -395,9 +395,36 @@ def preflight(cfg: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     try:
         from xconsole_client import XConsoleAuthClient  # noqa: F401
+        from xconsole_client import config as auth_config
         from xconsole_client.oauth_protocol import login_with_protocol  # noqa: F401
+        from xconsole_client.oauth_protocol import extract_cookies_from_auth_client  # noqa: F401
+        from xconsole_client.xai_oauth import AUTHORIZATION_ENDPOINT, TOKEN_ENDPOINT
     except Exception as exc:
-        errors.append(f"protocol imports: {exc}")
+        errors.append(f"协议模块导入失败: {exc}")
+    else:
+        if not str(getattr(auth_config, "TURNSTILE_SITEKEY", "")).strip():
+            errors.append("Turnstile 站点密钥未配置")
+        if not str(AUTHORIZATION_ENDPOINT).startswith("https://"):
+            errors.append(f"OAuth 授权地址无效: {AUTHORIZATION_ENDPOINT}")
+        if not str(TOKEN_ENDPOINT).startswith("https://"):
+            errors.append(f"OAuth Token 地址无效: {TOKEN_ENDPOINT}")
+    mode = captcha_mode(cfg)
+    if mode == "yescaptcha" and not resolve_yescaptcha_key(cfg):
+        errors.append("过盾方案为 YesCaptcha，但未配置 API Key")
+    if mode == "local":
+        endpoint = str(cfg.get("captcha_endpoint") or cfg.get("local_captcha_endpoint") or "").strip()
+        if not endpoint:
+            errors.append("过盾方案为本地服务，但未配置 captcha_endpoint")
+        elif not (endpoint.startswith("http://") or endpoint.startswith("https://") or endpoint.startswith("docker://")):
+            errors.append(f"本地过盾地址格式无效: {endpoint}")
+    proxies = proxy_pool(cfg)
+    for proxy in proxies:
+        if "://" not in proxy:
+            errors.append(f"代理地址缺少协议前缀: {proxy}")
+    for key in ("cpa_base_url",):
+        value = str(cfg.get(key) or "").strip()
+        if value and not value.startswith("https://"):
+            errors.append(f"CPA 地址必须使用 HTTPS: {value}")
     return errors
 
 
@@ -428,7 +455,15 @@ def register_one(
     cookies: Any = checkpoint.get("cookies") or {}
     stage = str(checkpoint.get("stage") or "")
     attempts = int(checkpoint.get("attempts") or 0) + 1
-    write_checkpoint(checkpoint_path, attempts=attempts, status="running")
+    checkpoint_stage = stage or "selecting_proxy"
+    write_checkpoint(
+        checkpoint_path,
+        attempts=attempts,
+        attempt_id=uuid.uuid4().hex,
+        status="running",
+        stage=checkpoint_stage,
+        proxy_group_id=cfg.get("proxy_group_id") or "",
+    )
     try:
         if stage == "credential_ready":
             source = Path(str(checkpoint.get("credential_path") or ""))
@@ -490,18 +525,41 @@ def register_one(
                 log(index, f"本地过盾失败: {captcha_exc}", log_file)
                 raise
 
-            res = client.create_account(
-                email=email,
-                given_name="Grok",
-                family_name="User",
-                password=password,
-                email_validation_code=code,
-                turnstile_token=turnstile,
-                castle_request_token="",
-                conversion_id=str(uuid.uuid4()),
-            )
+            write_checkpoint(checkpoint_path, stage="pending_submit", status="running")
+            # Once the request leaves the process, a lost response cannot be
+            # classified as a safe retry. Persist this fence before I/O.
+            write_checkpoint(checkpoint_path, stage="submission_unknown", status="in_flight")
+            try:
+                res = client.create_account(
+                    email=email,
+                    given_name="Grok",
+                    family_name="User",
+                    password=password,
+                    email_validation_code=code,
+                    turnstile_token=turnstile,
+                    castle_request_token="",
+                    conversion_id=str(uuid.uuid4()),
+                )
+            except Exception as submit_exc:
+                write_checkpoint(checkpoint_path, stage="submission_unknown", status="needs_reconcile", last_error=str(submit_exc))
+                raise
             if not res.ok:
-                raise RuntimeError(f"create_account HTTP {res.http_status}")
+                status_code = int(getattr(res, "http_status", 0) or 0)
+                if 400 <= status_code < 500:
+                    write_checkpoint(
+                        checkpoint_path,
+                        stage="failed",
+                        status="failed",
+                        last_error=f"create_account HTTP {status_code}",
+                    )
+                else:
+                    write_checkpoint(
+                        checkpoint_path,
+                        stage="submission_unknown",
+                        status="needs_reconcile",
+                        last_error=f"create_account HTTP {status_code}",
+                    )
+                raise RuntimeError(f"create_account HTTP {status_code}")
             write_checkpoint(checkpoint_path, stage="account_created", email=email, password=password)
 
             sso = resolve_sso(
@@ -653,8 +711,8 @@ def register_one(
         current_stage = str(current.get("stage") or "")
         write_checkpoint(
             checkpoint_path,
-            stage=current_stage if current_stage in RESUMABLE_STAGES else "failed",
-            status="retryable" if current_stage in RESUMABLE_STAGES else "failed",
+            stage=current_stage if current_stage in RESUMABLE_STAGES or current_stage == "submission_unknown" else "failed",
+            status="needs_reconcile" if current_stage == "submission_unknown" else ("retryable" if current_stage in RESUMABLE_STAGES else "failed"),
             last_error=str(exc),
         )
         log(index, f"失败: {exc}", log_file)
@@ -766,7 +824,7 @@ def main() -> int:
         *[str(value) for value in (cfg.get("email_provider_fallbacks") or [])],
     ]
     email_backends = ["tempmail" if value == "tempmail_lol" else value for value in configured_backends if value]
-    proxy = str(cfg.get("proxy") or cfg.get("browser_proxy") or "").strip()
+    proxies = proxy_pool(cfg)
     spool_dir = Path(str(cfg.get("spool_dir") or (ROOT / "cpa_auths" / "incoming")))
     spool_dir.mkdir(parents=True, exist_ok=True)
 
@@ -814,6 +872,13 @@ def main() -> int:
         if _stop.is_set():
             return {"ok": False, "error": "stopped"}
         email_backend = email_backends[(i - 1) % len(email_backends)]
+        checkpoint = read_checkpoint(checkpoint_path)
+        try:
+            proxy_index = int(checkpoint.get("proxy_index"))
+        except (TypeError, ValueError):
+            proxy_index = (i - 1) % len(proxies) if proxies else -1
+            write_checkpoint(checkpoint_path, proxy_index=proxy_index)
+        job_proxy = proxies[proxy_index % len(proxies)] if proxies and proxy_index >= 0 else ""
         result = register_one(
             i,
             cfg,
@@ -821,7 +886,7 @@ def main() -> int:
             spool_dir=spool_dir,
             yescaptcha_key=yescaptcha_key,
             email_backend=email_backend,
-            proxy=proxy,
+            proxy=job_proxy,
             checkpoint_path=checkpoint_path,
             account_type=args.account_type,
             auto_nsfw=bool(args.auto_nsfw and args.account_type == "web"),

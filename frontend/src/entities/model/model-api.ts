@@ -21,6 +21,7 @@ const modelRouteValidator = hasShape({
   capability: isOneOf("responses", "chat", "image", "image_edit", "video"),
   origin: isOneOf("catalog", "discovered", "manual"),
   enabled: isBoolean,
+  egressGroupId: isString,
   accountIds: isArrayOf(isString),
   bindingMode: isBoolean,
   supportedAccounts: isNumber,
@@ -33,7 +34,7 @@ const modelRouteValidator = hasShape({
 const decodeModelRoute = createObjectDecoder<ModelRouteDTO>("model route", {
   id: isString, publicId: isString, provider: isOneOf("grok_build", "grok_web", "grok_console"), upstreamModel: isString,
   capability: isOneOf("responses", "chat", "image", "image_edit", "video"), origin: isOneOf("catalog", "discovered", "manual"),
-  enabled: isBoolean, accountIds: isArrayOf(isString), bindingMode: isBoolean, supportedAccounts: isNumber,
+  enabled: isBoolean, egressGroupId: isString, accountIds: isArrayOf(isString), bindingMode: isBoolean, supportedAccounts: isNumber,
   syncedAccounts: isNumber, totalAccounts: isNumber, capabilityKnown: isBoolean, available: isBoolean, lastSyncedAt: isOptional(isString),
 });
 const decodeModelPage = createPaginatedDecoder<ModelRouteDTO>(modelRouteValidator);
@@ -65,6 +66,7 @@ export type CreateModelInput = {
   capability: ModelRouteDTO["capability"];
   enabled: boolean;
   accountIds: string[];
+  egressGroupId?: string;
 };
 
 export function listModelAccountOptions(provider: ModelRouteDTO["provider"]): Promise<{ items: ModelAccountOptionDTO[] }> {
@@ -75,7 +77,7 @@ export function createModel(input: CreateModelInput): Promise<ModelRouteDTO> {
   return apiRequest("/api/admin/v1/models", { method: "POST", body: input }, decodeModelRoute);
 }
 
-export function updateModel(id: string, input: { publicId: string; enabled: boolean; accountIds: string[] }): Promise<ModelRouteDTO> {
+export function updateModel(id: string, input: { publicId: string; enabled: boolean; accountIds: string[]; egressGroupId: string }): Promise<ModelRouteDTO> {
   return apiRequest(`/api/admin/v1/models/${id}`, { method: "PATCH", body: input }, decodeModelRoute);
 }
 

@@ -1,0 +1,42 @@
+name: grok2api
+
+# Optional Docker clearance. Use this file together with compose.production.yml
+# only on installations that need Docker clearance.
+services:
+  grok2api:
+    environment:
+      REGISTRATION_CAPTCHA_ENDPOINT: "http://grok-turnstile-solver:5072"
+      NO_PROXY: "${NO_PROXY:-127.0.0.1,localhost,grok-web-browser,postgres,redis,grok-turnstile-solver}"
+    depends_on:
+      grok-turnstile-solver:
+        condition: service_healthy
+
+  grok-turnstile-solver:
+    image: "${GROK2API_SOLVER_IMAGE:?set GROK2API_SOLVER_IMAGE in .env}"
+    entrypoint: ["/bin/bash", "/opt/grok2api/turnstile-solver-entrypoint.sh"]
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      TURNSTILE_HOST: "0.0.0.0"
+      TURNSTILE_PORT: "5072"
+      TURNSTILE_THREAD: "${TURNSTILE_THREAD:-1}"
+      TURNSTILE_BROWSER_TYPE: "camoufox"
+      TURNSTILE_LAZY: "0"
+      TURNSTILE_IDLE_SEC: "900"
+      TURNSTILE_DEBUG: "${TURNSTILE_DEBUG:-0}"
+      TURNSTILE_PROXY: "${REGISTRATION_SOLVER_PROXY:-}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - "./turnstile-solver-entrypoint.sh:/opt/grok2api/turnstile-solver-entrypoint.sh:ro"
+    shm_size: "1gb"
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5072/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 60s
+    security_opt:
+      - seccomp:unconfined

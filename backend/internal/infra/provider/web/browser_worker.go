@@ -105,16 +105,18 @@ func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, cred
 		}
 		var workerFailure *browserWorkerFailure
 		if errors.As(err, &workerFailure) && workerFailure.Code == "proxy_unavailable" {
+			nodeID := lease.NodeID
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
 			lease.Release()
 			if egressAttempt == 0 {
 				continue
 			}
-			return nil, nil, endpoint, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb}
+			return nil, nil, endpoint, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb, Reason: infraegress.UnavailableProxy, NodeID: nodeID}
 		}
 		if errors.As(err, &workerFailure) && (workerFailure.Code == "browser_unavailable" || workerFailure.Code == "worker_unavailable") {
+			nodeID := lease.NodeID
 			lease.Release()
-			return nil, nil, endpoint, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb}
+			return nil, nil, endpoint, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb, Reason: infraegress.UnavailableWorker, NodeID: nodeID}
 		}
 		lease.Release()
 		if looksLikeAntiBot([]byte(err.Error())) {

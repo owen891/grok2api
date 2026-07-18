@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	memoryruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -121,6 +123,21 @@ func TestAcquireIfConfiguredDoesNotChangeBuildDirectTransport(t *testing.T) {
 	if !ok || selection.NodeID != 0 || selection.NodeName != "direct" || selection.Proxied {
 		t.Fatalf("direct selection = %#v, ok=%v", selection, ok)
 	}
+}
+
+func TestAcquireIfConfiguredHonorsBuildGroupFromContext(t *testing.T) {
+	manager := newGroupManager(t, domain.Group{ID: 7, Scope: domain.ScopeBuild, Enabled: true, Strategy: domain.StrategyRoundRobin}, []domain.GroupMember{
+		{GroupID: 7, NodeID: 2, Enabled: true, Weight: 1},
+	})
+	ctx := WithGroupID(context.Background(), 7)
+	lease, configured, err := manager.AcquireIfConfigured(ctx, domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !configured || lease == nil || lease.NodeID != 2 || lease.GroupID != 7 {
+		t.Fatalf("lease=%#v configured=%v", lease, configured)
+	}
+	lease.Release()
 }
 
 func TestTraceRecordsConfiguredProxyWithoutCredentials(t *testing.T) {
@@ -277,6 +294,289 @@ func TestEgressNodeSnapshotAvoidsRepeatedRepositoryReads(t *testing.T) {
 	if repository.calls != 1 {
 		t.Fatalf("repository reads = %d, want 1", repository.calls)
 	}
+}
+
+func TestAcquireGroupRoundRobin(t *testing.T) {
+	manager := newGroupManager(t, domain.Group{ID: 1, Scope: domain.ScopeBuild, Enabled: true, Strategy: domain.StrategyRoundRobin}, []domain.GroupMember{
+		{GroupID: 1, NodeID: 1, Enabled: true, Weight: 1},
+		{GroupID: 1, NodeID: 2, Enabled: true, Weight: 1},
+	})
+	var selected []uint64
+	for range 4 {
+		lease, err := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected = append(selected, lease.NodeID)
+		lease.Release()
+	}
+	want := []uint64{1, 2, 1, 2}
+	for index := range want {
+		if selected[index] != want[index] {
+			t.Fatalf("round robin = %v, want %v", selected, want)
+		}
+	}
+}
+
+func TestAcquireGroupWeighted(t *testing.T) {
+	manager := newGroupManager(t, domain.Group{ID: 1, Scope: domain.ScopeBuild, Enabled: true, Strategy: domain.StrategyWeighted}, []domain.GroupMember{
+		{GroupID: 1, NodeID: 1, Enabled: true, Weight: 1},
+		{GroupID: 1, NodeID: 2, Enabled: true, Weight: 3},
+	})
+	counts := map[uint64]int{}
+	for range 8 {
+		lease, err := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts[lease.NodeID]++
+		lease.Release()
+	}
+	if counts[1] != 2 || counts[2] != 6 {
+		t.Fatalf("weighted counts = %v", counts)
+	}
+}
+
+func TestAcquireGroupStickyKeepsAffinity(t *testing.T) {
+	manager := newGroupManager(t, domain.Group{ID: 1, Scope: domain.ScopeBuild, Enabled: true, Strategy: domain.StrategySticky}, []domain.GroupMember{
+		{GroupID: 1, NodeID: 1, Enabled: true, Weight: 1},
+		{GroupID: 1, NodeID: 2, Enabled: true, Weight: 1},
+	})
+	first, err := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "stable-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID := first.NodeID
+	first.Release()
+	for range 3 {
+		lease, acquireErr := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "stable-account")
+		if acquireErr != nil {
+			t.Fatal(acquireErr)
+		}
+		if lease.NodeID != firstID {
+			t.Fatalf("sticky node = %d, want %d", lease.NodeID, firstID)
+		}
+		lease.Release()
+	}
+}
+
+func TestAcquireGroupFallsBackAtConcurrencyLimit(t *testing.T) {
+	fallbackID := uint64(2)
+	repository := &groupEgressRepository{
+		egressRepositoryTestStub: egressRepositoryTestStub{nodes: testGroupNodes()},
+		groups: map[uint64]domain.Group{
+			1: {ID: 1, Scope: domain.ScopeBuild, Enabled: true, Strategy: domain.StrategyLeastLoad, MaxConcurrency: 1, FallbackGroupID: &fallbackID},
+			2: {ID: 2, Scope: domain.ScopeBuild, Enabled: true, Strategy: domain.StrategyLeastLoad},
+		},
+		members: map[uint64][]domain.GroupMember{
+			1: {{GroupID: 1, NodeID: 1, Enabled: true, Weight: 1}},
+			2: {{GroupID: 2, NodeID: 2, Enabled: true, Weight: 1}},
+		},
+	}
+	manager := NewManager(repository, testCipher(t))
+	first, err := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+	second, err := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if first.NodeID != 1 || second.NodeID != 2 {
+		t.Fatalf("primary/fallback nodes = %d/%d", first.NodeID, second.NodeID)
+	}
+}
+
+func TestAcquireGroupConcurrencyReservationIsAtomic(t *testing.T) {
+	manager := newGroupManager(t, domain.Group{ID: 1, Scope: domain.ScopeBuild, Enabled: true, MaxConcurrency: 1}, []domain.GroupMember{
+		{GroupID: 1, NodeID: 1, Enabled: true, Weight: 1, MaxConcurrency: 1},
+	})
+	const callers = 32
+	start := make(chan struct{})
+	leases := make(chan *Lease, callers)
+	var wait sync.WaitGroup
+	wait.Add(callers)
+	for range callers {
+		go func() {
+			defer wait.Done()
+			<-start
+			lease, err := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "")
+			if err == nil {
+				leases <- lease
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(leases)
+	count := 0
+	for lease := range leases {
+		count++
+		lease.Release()
+	}
+	if count != 1 {
+		t.Fatalf("successful leases = %d, want exactly one", count)
+	}
+}
+
+func TestAcquireGroupMemberCapacityIsScopedToGroup(t *testing.T) {
+	repository := &groupEgressRepository{
+		egressRepositoryTestStub: egressRepositoryTestStub{nodes: testGroupNodes()},
+		groups: map[uint64]domain.Group{
+			1: {ID: 1, Scope: domain.ScopeBuild, Enabled: true, MaxConcurrency: 1},
+			2: {ID: 2, Scope: domain.ScopeBuild, Enabled: true, MaxConcurrency: 1},
+		},
+		members: map[uint64][]domain.GroupMember{
+			1: {{GroupID: 1, NodeID: 1, Enabled: true, MaxConcurrency: 1}},
+			2: {{GroupID: 2, NodeID: 1, Enabled: true, MaxConcurrency: 1}},
+		},
+	}
+	manager := NewManager(repository, testCipher(t))
+	first, err := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+	second, err := manager.AcquireGroup(context.Background(), 2, domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatalf("shared node was incorrectly counted against another group: %v", err)
+	}
+	second.Release()
+}
+
+func TestAcquireGroupUsesDistributedCapacityLimiter(t *testing.T) {
+	repository := &groupEgressRepository{
+		egressRepositoryTestStub: egressRepositoryTestStub{nodes: testGroupNodes()},
+		groups:                   map[uint64]domain.Group{1: {ID: 1, Scope: domain.ScopeBuild, Enabled: true, MaxConcurrency: 1}},
+		members:                  map[uint64][]domain.GroupMember{1: {{GroupID: 1, NodeID: 1, Enabled: true, MaxConcurrency: 1}}},
+	}
+	limiter := memoryruntime.NewConcurrencyLimiter()
+	managerOne := NewManager(repository, testCipher(t), limiter)
+	managerTwo := NewManager(repository, testCipher(t), limiter)
+	lease, err := managerOne.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	if _, err := managerTwo.AcquireGroup(context.Background(), 1, domain.ScopeBuild, ""); err == nil {
+		t.Fatal("distributed capacity limit was ignored")
+	}
+}
+
+func TestAcquireGroupDetectsFallbackCycle(t *testing.T) {
+	groupOneID, groupTwoID := uint64(1), uint64(2)
+	repository := &groupEgressRepository{
+		egressRepositoryTestStub: egressRepositoryTestStub{nodes: testGroupNodes()},
+		groups: map[uint64]domain.Group{
+			1: {ID: 1, Scope: domain.ScopeBuild, Enabled: true, MaxConcurrency: 1, FallbackGroupID: &groupTwoID},
+			2: {ID: 2, Scope: domain.ScopeBuild, Enabled: true, MaxConcurrency: 1, FallbackGroupID: &groupOneID},
+		},
+		members: map[uint64][]domain.GroupMember{
+			1: {{GroupID: 1, NodeID: 1, Enabled: true, Weight: 1}},
+			2: {{GroupID: 2, NodeID: 1, Enabled: true, Weight: 1}},
+		},
+	}
+	manager := NewManager(repository, testCipher(t))
+	lease, err := manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	fallbackLease, err := manager.AcquireGroup(context.Background(), 2, domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fallbackLease.Release()
+	if _, err = manager.AcquireGroup(context.Background(), 1, domain.ScopeBuild, ""); err == nil {
+		t.Fatal("fallback cycle was accepted")
+	}
+}
+
+func newGroupManager(t *testing.T, group domain.Group, members []domain.GroupMember) *Manager {
+	t.Helper()
+	repository := &groupEgressRepository{
+		egressRepositoryTestStub: egressRepositoryTestStub{nodes: testGroupNodes()},
+		groups:                   map[uint64]domain.Group{group.ID: group},
+		members:                  map[uint64][]domain.GroupMember{group.ID: members},
+	}
+	return NewManager(repository, testCipher(t))
+}
+
+func testGroupNodes() []domain.Node {
+	return []domain.Node{
+		{ID: 1, Name: "one", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+		{ID: 2, Name: "two", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+	}
+}
+
+func testCipher(t *testing.T) *security.Cipher {
+	t.Helper()
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cipher
+}
+
+type groupEgressRepository struct {
+	egressRepositoryTestStub
+	groups  map[uint64]domain.Group
+	members map[uint64][]domain.GroupMember
+}
+
+func (r *groupEgressRepository) ListEgressGroups(_ context.Context, scope domain.Scope) ([]domain.Group, error) {
+	values := make([]domain.Group, 0, len(r.groups))
+	for _, group := range r.groups {
+		if scope == "" || group.Scope == scope {
+			values = append(values, group)
+		}
+	}
+	return values, nil
+}
+
+func (r *groupEgressRepository) GetEgressGroup(_ context.Context, id uint64) (domain.Group, error) {
+	value, ok := r.groups[id]
+	if !ok {
+		return domain.Group{}, repository.ErrNotFound
+	}
+	return value, nil
+}
+
+func (r *groupEgressRepository) CreateEgressGroup(_ context.Context, value domain.Group) (domain.Group, error) {
+	r.groups[value.ID] = value
+	return value, nil
+}
+
+func (r *groupEgressRepository) UpdateEgressGroup(_ context.Context, value domain.Group) (domain.Group, error) {
+	r.groups[value.ID] = value
+	return value, nil
+}
+
+func (r *groupEgressRepository) DeleteEgressGroup(_ context.Context, id uint64) error {
+	delete(r.groups, id)
+	return nil
+}
+
+func (r *groupEgressRepository) ListEgressGroupMembers(_ context.Context, groupID uint64) ([]domain.GroupMember, error) {
+	return r.members[groupID], nil
+}
+
+func (r *groupEgressRepository) UpsertEgressGroupMember(_ context.Context, value domain.GroupMember) (domain.GroupMember, error) {
+	r.members[value.GroupID] = append(r.members[value.GroupID], value)
+	return value, nil
+}
+
+func (r *groupEgressRepository) DeleteEgressGroupMember(_ context.Context, groupID, nodeID uint64) error {
+	values := r.members[groupID]
+	for index, value := range values {
+		if value.NodeID == nodeID {
+			r.members[groupID] = append(values[:index], values[index+1:]...)
+			return nil
+		}
+	}
+	return repository.ErrNotFound
 }
 
 type egressRepositoryTestStub struct{ nodes []domain.Node }

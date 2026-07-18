@@ -70,3 +70,44 @@ func TestInitializeSchemaRemovesAndRejectsLegacyAllEgressNodes(t *testing.T) {
 		t.Fatal("all-scope node passed the database constraint")
 	}
 }
+
+func TestEgressRelationsAreCleanedWhenGroupsOrNodesAreDeleted(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDatabase(t)
+	nodes := NewEgressRepository(database)
+	groups := NewEgressRepository(database)
+	node, err := nodes.CreateEgressNode(ctx, egress.Node{Name: "member", Scope: egress.ScopeBuild, Enabled: true, Health: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := uint64(2)
+	if _, err := groups.CreateEgressGroup(ctx, egress.Group{ID: 1, Name: "primary", Scope: egress.ScopeBuild, Enabled: true, FallbackGroupID: &fallback}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := groups.CreateEgressGroup(ctx, egress.Group{ID: 2, Name: "fallback", Scope: egress.ScopeBuild, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := groups.UpsertEgressGroupMember(ctx, egress.GroupMember{GroupID: 1, NodeID: node.ID, Enabled: true, Weight: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := groups.DeleteEgressGroup(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	primary, err := groups.GetEgressGroup(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primary.FallbackGroupID != nil {
+		t.Fatalf("fallback reference survived delete: %#v", primary.FallbackGroupID)
+	}
+	if err := nodes.DeleteEgressNode(ctx, node.ID); err != nil {
+		t.Fatal(err)
+	}
+	members, err := groups.ListEgressGroupMembers(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 0 {
+		t.Fatalf("node membership survived delete: %#v", members)
+	}
+}

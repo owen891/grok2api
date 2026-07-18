@@ -33,6 +33,8 @@ services:
       - "${GROK2API_RELEASE_DIR:-/opt/grok2api-current}/frontend/dist:/app/frontend/dist:ro"
       - "${GROK2API_DATA_DIR:-/opt/grok2api-data}:/app/data"
       - "${GROK2API_RELEASE_DIR:-/opt/grok2api-current}/registration:/app/registration:ro"
+      - "${GROK2API_DATA_DIR:-/opt/grok2api-data}/registration/protocol_auth/oauth_output:/app/registration/protocol_auth/oauth_output"
+      - "${GROK2API_DATA_DIR:-/opt/grok2api-data}/registration/protocol_auth/sso_output:/app/registration/protocol_auth/sso_output"
     depends_on:
       grok-web-browser:
         condition: service_healthy
@@ -78,7 +80,6 @@ services:
       - no-new-privileges:true
 
   grok-turnstile-solver:
-    container_name: grok-turnstile-solver
     image: grok-turnstile-solver:0d48ecf8b4ee
     entrypoint:
       - /bin/bash
@@ -87,10 +88,12 @@ services:
       TZ: "Asia/Shanghai"
       TURNSTILE_HOST: "0.0.0.0"
       TURNSTILE_PORT: "5072"
-      TURNSTILE_THREAD: "1"
+      TURNSTILE_THREAD: "${TURNSTILE_THREAD:-1}"
       TURNSTILE_BROWSER_TYPE: "camoufox"
-      TURNSTILE_LAZY: "1"
-      TURNSTILE_IDLE_SEC: "180"
+      # Keep one Camoufox instance warm in production. Lazy startup can spend
+      # the whole 120s registration timeout downloading/initializing a browser.
+      TURNSTILE_LAZY: "0"
+      TURNSTILE_IDLE_SEC: "900"
       TURNSTILE_DEBUG: "${TURNSTILE_DEBUG:-0}"
       TURNSTILE_PROXY: "${REGISTRATION_SOLVER_PROXY:-}"
     extra_hosts:

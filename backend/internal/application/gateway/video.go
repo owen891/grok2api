@@ -56,6 +56,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	if err != nil {
 		return media.Job{}, err
 	}
+	ctx = infraegress.WithGroupID(ctx, route.EgressGroupID)
 	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 	lease, err := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
@@ -241,6 +242,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	ctx, cancel := context.WithTimeout(parent, videoJobTimeout)
 	defer cancel()
 	ctx, egressTrace := infraegress.WithTrace(ctx)
+	ctx = infraegress.WithGroupID(ctx, route.EgressGroupID)
 	startedAt := time.Now()
 	job.Progress = max(job.Progress, 1)
 	job.UpdatedAt = time.Now().UTC()

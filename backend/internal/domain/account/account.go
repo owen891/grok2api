@@ -67,6 +67,9 @@ const (
 	DefaultMaxConcurrent    = 8
 	DefaultMinimumRemaining = 0
 	MaxConcurrent           = 256
+	// EstimatedFreeTokenLimit is the rolling token ceiling used for Build Free accounts.
+	EstimatedFreeTokenLimit int64 = 1_000_000
+	FreeUsageWindow               = 24 * time.Hour
 )
 
 // AuthStatus 表示账号凭据的认证状态。
@@ -263,6 +266,8 @@ type RoutingCandidate struct {
 	QuotaWindow          *QuotaWindow
 	QuotaRecovery        *QuotaRecovery
 	ModelQuotaBlock      *ModelQuotaBlock
+	FreeQuota            bool
+	ObservedTokens       int64
 	ModelCapabilityKnown bool
 	SupportsModel        bool
 }

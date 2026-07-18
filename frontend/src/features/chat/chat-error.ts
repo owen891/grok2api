@@ -27,7 +27,7 @@ function classifyErrorClass(status: number, code: string, message: string): Chat
   if (/account_permission|permission[_ -]denied|credential_rejected|upstream_unauthorized/.test(signal)) return "account";
   if (/quota|usage[_ -]?limit|额度.*(?:不足|用完)|billing_limit|spending.limit|payment_required|insufficient.*balance/.test(signal)) return "quota";
   if (/model[_ -]not[_ -]found|model_not_allowed|model_unavailable|model_cooling|unsupported[_ -]model/.test(signal)) return "model";
-  if (/egress_unavailable|proxy|cloudflare|upstream_network_error/.test(signal)) return "egress";
+  if (/egress_unavailable|browser_worker_unavailable|proxy|cloudflare|upstream_network_error/.test(signal)) return "egress";
   if (status === 408 || status === 504 || /timeout|timed_out/.test(signal)) return "timeout";
   if (status === 429 || /rate_limit/.test(signal)) return "rate";
   if (status === 401) return "auth";
@@ -47,6 +47,7 @@ export function localizeGatewayMessage(errorClass: ChatErrorClass, message: stri
     case "model":
       return "当前模型路由不可用，请检查模型授权、映射和账号能力。";
     case "egress":
+      if (/browser[_ -]?worker|worker 容器/.test(`${message}`.toLowerCase())) return "浏览器 worker 不可用，请检查 worker 容器状态。";
       return "代理出口或 Cloudflare 会话不可用，请检查出口节点状态。";
     case "timeout":
       return /abort|cancel/i.test(raw) ? "请求已取消。" : "请求超时，上游响应过慢，请稍后重试。";

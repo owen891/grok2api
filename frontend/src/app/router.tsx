@@ -1,7 +1,7 @@
 import { Navigate, createBrowserRouter } from "react-router-dom";
 
 import { AnonymousBoundary, AuthBoundary } from "@/app/auth-boundary";
-import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredChatPage, DeferredClientKeysPage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredRegistrationPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
+import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredChatPage, DeferredClientKeysPage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredProxiesPage, DeferredRegistrationPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
 import { LoginPage } from "@/features/auth/login-page";
 
 export const router = createBrowserRouter([
@@ -25,6 +25,7 @@ export const router = createBrowserRouter([
           { path: "/gallery", element: <DeferredGalleryPage /> },
           { path: "/video-gallery", element: <DeferredVideoGalleryPage /> },
           { path: "/request-audits", element: <DeferredRequestAuditsPage /> },
+          { path: "/proxies", element: <DeferredProxiesPage /> },
           { path: "/docs", element: <Navigate to="/docs/chat/completions" replace /> },
           { path: "/docs/:category/:endpoint", element: <DeferredApiDocsPage /> },
           { path: "/settings", element: <DeferredSettingsPage /> },

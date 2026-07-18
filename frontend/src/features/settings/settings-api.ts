@@ -34,6 +34,10 @@ export type EgressNodeInput = {
 
 export type EgressScope = "grok_build" | "grok_web" | "grok_console" | "grok_web_asset";
 export type EgressNodeListDTO = { items: EgressNodeDTO[]; defaultUserAgents: Record<EgressScope, string> };
+export type EgressGroupStrategy = "least_load" | "weighted" | "sticky" | "round_robin";
+export type EgressGroupDTO = { id: string; name: string; scope: EgressScope; enabled: boolean; strategy: EgressGroupStrategy; maxConcurrency: number; fallbackGroupId?: string; memberCount: number; enabledMembers: number; createdAt: string; updatedAt: string };
+export type EgressGroupInput = { name: string; scope: EgressScope; enabled: boolean; strategy: EgressGroupStrategy; maxConcurrency: number; fallbackGroupId?: string };
+export type EgressGroupImportResultDTO = { line: number; proxyConfigured: boolean; nodeId?: string; created: boolean; reused: boolean; error?: string };
 
 export type SettingsSnapshotDTO = {
   config: SettingsConfigDTO;
@@ -77,6 +81,19 @@ const decodeEgressNodeList = createObjectDecoder<EgressNodeListDTO>("egress node
   items: isArrayOf(egressNodeValidator),
   defaultUserAgents: hasShape({ grok_build: isString, grok_web: isString, grok_console: isString, grok_web_asset: isString }),
 });
+const egressGroupValidator = hasShape({
+  id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset"), enabled: isBoolean,
+  strategy: isOneOf("least_load", "weighted", "sticky", "round_robin"), maxConcurrency: isNumber,
+  fallbackGroupId: isOptional(isString), memberCount: isNumber, enabledMembers: isNumber, createdAt: isString, updatedAt: isString,
+});
+const decodeEgressGroup = createObjectDecoder<EgressGroupDTO>("egress group", {
+  id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset"), enabled: isBoolean,
+  strategy: isOneOf("least_load", "weighted", "sticky", "round_robin"), maxConcurrency: isNumber,
+  fallbackGroupId: isOptional(isString), memberCount: isNumber, enabledMembers: isNumber, createdAt: isString, updatedAt: isString,
+});
+const decodeEgressGroupList = createObjectDecoder<{ items: EgressGroupDTO[] }>("egress group list", { items: isArrayOf(egressGroupValidator) });
+const importResultValidator = hasShape({ line: isNumber, proxyConfigured: isBoolean, nodeId: isOptional(isString), created: isBoolean, reused: isBoolean, error: isOptional(isString) });
+const decodeEgressGroupImport = createObjectDecoder<{ items: EgressGroupImportResultDTO[] }>("egress group import", { items: isArrayOf(importResultValidator) });
 
 export function getSettings(): Promise<SettingsSnapshotDTO> {
   return apiRequest("/api/admin/v1/settings", {}, decodeSettingsSnapshot);
@@ -106,4 +123,25 @@ export function updateEgressNode(id: string, input: EgressNodeInput): Promise<Eg
 
 export function deleteEgressNode(id: string): Promise<{ deleted: boolean }> {
   return apiRequest(`/api/admin/v1/egress-nodes/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
+}
+
+export function listEgressGroups(scope?: EgressScope): Promise<{ items: EgressGroupDTO[] }> {
+  const suffix = scope ? `?scope=${encodeURIComponent(scope)}` : "";
+  return apiRequest(`/api/admin/v1/egress-groups${suffix}`, {}, decodeEgressGroupList);
+}
+
+export function createEgressGroup(input: EgressGroupInput): Promise<EgressGroupDTO> {
+  return apiRequest("/api/admin/v1/egress-groups", { method: "POST", body: input }, decodeEgressGroup);
+}
+
+export function updateEgressGroup(id: string, input: EgressGroupInput): Promise<EgressGroupDTO> {
+  return apiRequest(`/api/admin/v1/egress-groups/${id}`, { method: "PUT", body: input }, decodeEgressGroup);
+}
+
+export function deleteEgressGroup(id: string): Promise<{ deleted: boolean }> {
+  return apiRequest(`/api/admin/v1/egress-groups/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
+}
+
+export function importEgressGroup(id: string, content: string, dryRun = false): Promise<{ items: EgressGroupImportResultDTO[] }> {
+  return apiRequest(`/api/admin/v1/egress-groups/${id}/import`, { method: "POST", body: { content, dryRun, defaults: { enabled: true, weight: 1, maxConcurrency: 0, priority: 0 } } }, decodeEgressGroupImport);
 }

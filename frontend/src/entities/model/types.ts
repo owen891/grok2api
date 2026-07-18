@@ -6,6 +6,7 @@ export type ModelRouteDTO = {
   capability: "responses" | "chat" | "image" | "image_edit" | "video";
   origin: "catalog" | "discovered" | "manual";
   enabled: boolean;
+  egressGroupId: string;
   accountIds: string[];
   bindingMode: boolean;
   supportedAccounts: number;

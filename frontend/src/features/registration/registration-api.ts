@@ -62,6 +62,7 @@ export type RegistrationSettingsDTO = {
   tempmailLolDomain: string;
   tempmailLolPrefix: string;
   proxy: string;
+  proxyGroupId: string;
   cpaBaseURL: string;
   cpaProxy: string;
   cpaHeadless: boolean;
@@ -148,6 +149,7 @@ const settingsShape = {
   tempmailLolDomain: isString,
   tempmailLolPrefix: isString,
   proxy: isString,
+  proxyGroupId: isString,
   cpaBaseURL: isString,
   cpaProxy: isString,
   cpaHeadless: isBoolean,

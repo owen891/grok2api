@@ -14,15 +14,16 @@ import (
 )
 
 const (
-	startupRecoveryBudget    = 20 * time.Second
-	startupCriticalWindow    = 2 * time.Minute
-	startupCriticalLimit     = 100
-	statsigWarmupTimeout     = 90 * time.Second
-	statsigWarmupInterval    = 15 * time.Minute
-	webQuotaStaleAfter       = 30 * time.Minute
-	webQuotaCatchupEvery     = 30 * time.Minute
-	modelCatalogStaleAfter   = 24 * time.Hour
-	modelCatalogCatchupEvery = 6 * time.Hour
+	startupRecoveryBudget      = 20 * time.Second
+	startupCriticalWindow      = 2 * time.Minute
+	startupCriticalLimit       = 100
+	statsigWarmupTimeout       = 90 * time.Second
+	statsigWarmupInterval      = 15 * time.Minute
+	statsigWarmupRetryInterval = 15 * time.Second
+	webQuotaStaleAfter         = 30 * time.Minute
+	webQuotaCatchupEvery       = 30 * time.Minute
+	modelCatalogStaleAfter     = 24 * time.Hour
+	modelCatalogCatchupEvery   = 6 * time.Hour
 )
 
 type startupReport struct {
@@ -341,7 +342,11 @@ func (a *Application) runStatsigWarmup(ctx context.Context) {
 			a.logger.Warn("web_statsig_warmup_failed", "error", err)
 			a.startup.setStatsig("unavailable", "预热失败，将由请求按需重试", 0)
 		}
-		resetTimer(timer, statsigWarmupInterval)
+		if err != nil {
+			resetTimer(timer, statsigWarmupRetryInterval)
+		} else {
+			resetTimer(timer, statsigWarmupInterval)
+		}
 	}
 }
 

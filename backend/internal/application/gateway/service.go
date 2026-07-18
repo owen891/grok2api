@@ -291,6 +291,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if routeErr != nil && !errors.Is(routeErr, clientkeyapp.ErrModelNotAllowed) {
 		return nil, routeErr
 	}
+	ctx = infraegress.WithGroupID(ctx, route.EgressGroupID)
 	timing := newGenerationTiming(publicModel, route.Provider)
 	timingHandedOff := false
 	defer func() {
@@ -731,6 +732,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 	if err != nil {
 		return nil, err
 	}
+	ctx = infraegress.WithGroupID(ctx, route.EgressGroupID)
 	externalModel := modeldomain.ExternalPublicID(route.Provider, route.PublicID)
 	adapter, ok := s.providers.Images(route.Provider)
 	if !ok {
@@ -829,11 +831,17 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			var egressUnavailable *infraegress.UnavailableError
 			if errors.As(err, &egressUnavailable) {
 				lease.Release()
-				writeFailureAudit(http.StatusServiceUnavailable, "egress_unavailable", &credential)
+				errorCode := "egress_unavailable"
+				publicMessage := "Grok Web 出口节点或浏览器 worker 暂不可用，请检查代理、worker 与 Cloudflare Cookie"
+				if egressUnavailable.Reason == infraegress.UnavailableWorker {
+					errorCode = "browser_worker_unavailable"
+					publicMessage = "Grok Web 浏览器 worker 不可用，请检查 worker 容器健康状态"
+				}
+				writeFailureAudit(http.StatusServiceUnavailable, errorCode, &credential)
 				return nil, &UpstreamFailure{
 					HTTPStatus:    http.StatusServiceUnavailable,
-					Code:          "egress_unavailable",
-					PublicMessage: "Grok Web 出口节点或浏览器 worker 暂不可用，请检查代理、worker 与 Cloudflare Cookie",
+					Code:          errorCode,
+					PublicMessage: publicMessage,
 					Cause:         err,
 				}
 			}

@@ -707,6 +707,22 @@ export function AccountsPage() {
                   {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets([...selected])}>{t("accounts.convertToBuild")}</Button> : null}
                   {provider === "grok_web" ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets([...selected])}>{t("webConsoleSync.action")}</Button> : null}
                   {provider === "grok_build" ? <Button variant="secondary" size="sm" onClick={() => batchBillingMutation.mutate()}>{t("accounts.refreshBilling")}</Button> : null}
+                  {hasProviderAccounts ? <Button variant="secondary" size="sm" onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild><Button size="sm">{t("accounts.connectAccount")}</Button></DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      {provider === "grok_build" ? <DropdownMenuItem onClick={() => void startDeviceLogin()}><ExternalLink />{t("accounts.deviceLogin")}</DropdownMenuItem> : null}
+                      {provider !== "grok_build" ? <DropdownMenuItem disabled={importMutation.isPending} onClick={() => setQuickImportOpen(true)}><ClipboardPaste />{t("accounts.quickImportSSO")}</DropdownMenuItem> : null}
+                      <DropdownMenuItem disabled={importMutation.isPending} onClick={() => fileInputRef.current?.click()}><FileUp />{provider === "grok_build" ? t("accounts.importAuth") : provider === "grok_console" ? t("console.importFile") : t("accounts.importWebFile")}</DropdownMenuItem>
+                      {provider === "grok_web" ? <DropdownMenuItem onClick={() => setAutoNSFWImport((value) => !value)}><Checkbox checked={autoNSFWImport} />{t("accounts.autoNSFWImport")}</DropdownMenuItem> : null}
+                      {hasProviderAccounts && provider === "grok_build" ? (
+                        <>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => setExportOpen(true)}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
+                        </>
+                      ) : null}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <div className="ml-1 border-l border-border/70 pl-2">
                     <Button variant="destructive" size="sm" onClick={() => setBatchDeleteOpen(true)}><Trash2 />{t("common.delete")}</Button>
                   </div>

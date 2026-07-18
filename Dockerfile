@@ -92,7 +92,7 @@ WORKDIR /app
 COPY --from=backend-builder --chmod=0755 /out/grok2api /app/grok2api
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
 COPY --from=registration-builder /opt/registration-venv /opt/registration-venv
-COPY registration/protocol_register_cli.py registration/protocol_spool.py registration/yyds_mail.py registration/local_turnstile.py /app/registration/
+COPY registration/protocol_register_cli.py registration/protocol_spool.py registration/yyds_mail.py registration/local_turnstile.py registration/clearance_provider.py /app/registration/
 COPY registration/config.protocol.example.json /app/registration/config.example.json
 COPY registration/cpa_xai/__init__.py registration/cpa_xai/schema.py registration/cpa_xai/writer.py /app/registration/cpa_xai/
 COPY registration/protocol_auth/*.py /app/registration/protocol_auth/

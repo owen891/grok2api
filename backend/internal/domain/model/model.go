@@ -39,6 +39,7 @@ type Route struct {
 	Capability        Capability
 	Origin            Origin
 	Enabled           bool
+	EgressGroupID     uint64
 	BoundAccountIDs   []uint64
 	SupportedAccounts int
 	SyncedAccounts    int

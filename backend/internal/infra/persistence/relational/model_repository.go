@@ -470,7 +470,7 @@ func (r *ModelRepository) Create(ctx context.Context, value model.Route, account
 	value.PublicID = publicID
 	row := modelRouteModel{
 		PublicID: value.PublicID, Provider: string(value.Provider), UpstreamModel: value.UpstreamModel,
-		Capability: string(value.Capability), Origin: string(model.OriginManual), Enabled: value.Enabled,
+		Capability: string(value.Capability), Origin: string(model.OriginManual), Enabled: value.Enabled, EgressGroupID: value.EgressGroupID,
 	}
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := ensureModelPublicIDNotAlias(tx, value.PublicID, 0); err != nil {
@@ -510,8 +510,9 @@ func (r *ModelRepository) Update(ctx context.Context, value model.Route, account
 			}
 		}
 		result := tx.Model(&modelRouteModel{}).Where("id = ?", value.ID).Updates(map[string]any{
-			"public_id": value.PublicID,
-			"enabled":   value.Enabled,
+			"public_id":       value.PublicID,
+			"enabled":         value.Enabled,
+			"egress_group_id": value.EgressGroupID,
 		})
 		if result.Error != nil {
 			return mapError(result.Error)

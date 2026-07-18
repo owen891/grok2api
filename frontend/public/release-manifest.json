@@ -1,7 +1,38 @@
 {
-  "latest": "v3.0.8",
+  "latest": "v3.0.9",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.0.9",
+      "date": "2026-07-18",
+      "entries": [
+        {
+          "type": "feature",
+          "zh": "新增代理分组左侧导航、代理节点与代理组管理，并支持为模型路由绑定或清除代理组。",
+          "en": "Added proxy-group navigation, proxy node and group management, plus model-route binding and clearing."
+        },
+        {
+          "type": "feature",
+          "zh": "Build、Web、Console、图片和视频请求支持按代理组路由，并增加注册代理组 scope 校验与 fallback。",
+          "en": "Added proxy-group routing for Build, Web, Console, image, and video requests, with registration scope validation and fallback handling."
+        },
+        {
+          "type": "improvement",
+          "zh": "完善代理组与成员并发限制；Redis 运行时使用分布式租约，跨实例共享容量并避免共享节点被重复限流。",
+          "en": "Improved group and member concurrency limits; Redis runtime now uses distributed leases to share capacity across instances without double-limiting shared nodes."
+        },
+        {
+          "type": "fix",
+          "zh": "删除代理组时自动解绑模型路由，修复 Console、图片下载和 WebSocket 生图的代理 scope 反馈。",
+          "en": "Deleting a proxy group now unbinds model routes automatically; fixed proxy-scope feedback for Console, image downloads, and WebSocket image generation."
+        },
+        {
+          "type": "ops",
+          "zh": "调整 Docker、Compose 和清障服务部署配置，补充生产部署示例与稳定性检查。",
+          "en": "Adjusted Docker, Compose, and clearance-service deployment configuration, with production examples and stability checks."
+        }
+      ]
+    },
     {
       "version": "v3.0.8",
       "date": "2026-07-18",

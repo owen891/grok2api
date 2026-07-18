@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CheckCircle2, CircleAlert, Clock3, Mail, Play, Plus, RefreshCw, RotateCcw, Save, Square, Terminal, Trash2, XCircle } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -28,6 +28,7 @@ import {
   type RegistrationSettingsDTO,
   type RegistrationStartInput,
 } from "@/features/registration/registration-api";
+import { listEgressGroups } from "@/features/settings/settings-api";
 
 export function RegistrationPage() {
   const { t, i18n } = useTranslation();
@@ -60,7 +61,13 @@ export function RegistrationPage() {
     queryFn: ({ signal }) => getRegistrationSettings(signal),
     enabled: Boolean(statusQuery.data?.configured),
   });
+  const proxyGroupsQuery = useQuery({ queryKey: ["egress-groups", "registration"], queryFn: () => listEgressGroups() });
   const preflightMutation = useMutation({ mutationFn: getRegistrationPreflight });
+  useEffect(() => {
+    if (preflightMutation.data) {
+      void queryClient.invalidateQueries({ queryKey: ["registration", "logs"] });
+    }
+  }, [preflightMutation.data, queryClient]);
   const saveMutation = useMutation({
     mutationFn: (value: RegistrationSettingsDTO) => updateRegistrationSettings(value),
     onSuccess: (value) => {
@@ -147,7 +154,6 @@ export function RegistrationPage() {
   const successRate = attempted > 0 ? Math.min(100, (succeeded / attempted) * 100) : null;
   const running = status?.running ?? false;
   const busy = running || startMutation.isPending || stopMutation.isPending;
-  const checkResult = preflightMutation.data;
   const displayError = status?.lastError;
   const logItems = logsQuery.data?.items ?? [];
   const formattedProgress = useMemo(() => {
@@ -336,7 +342,8 @@ export function RegistrationPage() {
                   ) : (
                     <SecretField label={t("registration.yescaptchaApiKey")} value={settings.yescaptchaApiKey} configured={settings.yescaptchaApiKeyConfigured} disabled={busy} onChange={(value) => updateDraft("yescaptchaApiKey", value)} />
                   )}
-                  <TextField className="sm:col-span-2" label={t("registration.proxy")} value={settings.proxy} disabled={busy} placeholder={t("registration.direct")} onChange={(value) => updateDraft("proxy", value)} />
+                  <SelectField label={t("registration.proxyGroup")} value={settings.proxyGroupId || "direct"} disabled={busy} options={[{ value: "direct", label: t("registration.direct") }, ...(proxyGroupsQuery.data?.items ?? []).filter((group) => group.enabled && group.scope === (startInput.accountType === "web" ? "grok_web" : "grok_build")).map((group) => ({ value: group.id, label: `${group.name} (${group.enabledMembers}/${group.memberCount})` }))]} onChange={(value) => updateDraft("proxyGroupId", value === "direct" ? "" : value)} />
+                  <TextField label={t("registration.proxy")} value={settings.proxy} disabled={busy || Boolean(settings.proxyGroupId)} placeholder={settings.proxyGroupId ? t("registration.proxyFromGroup") : t("registration.direct")} onChange={(value) => updateDraft("proxy", value)} />
                 </div>
               </div>
             ) : <Spinner />}
@@ -348,22 +355,6 @@ export function RegistrationPage() {
             </section>
           ) : null}
 
-          {checkResult ? (
-            <section className="space-y-4 border-t pt-8">
-              <div className="flex items-center gap-2">
-                {checkResult.ok ? <CheckCircle2 className="size-4 text-emerald-600" /> : <XCircle className="size-4 text-destructive" />}
-                <h2 className="text-sm font-medium">{t("registration.preflightResult")}</h2>
-              </div>
-              <div className="divide-y border-y text-xs">
-                {checkResult.checks.map((check) => (
-                  <div key={check.name} className="grid gap-2 py-2.5 sm:grid-cols-[160px_minmax(0,1fr)]">
-                    <span className={check.ok ? "text-foreground" : "text-destructive"}>{check.name}</span>
-                    <span className="break-all text-muted-foreground">{check.detail}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-          ) : null}
         </div>
 
         <section className="min-w-0 space-y-4 xl:sticky xl:top-6">
@@ -376,7 +367,7 @@ export function RegistrationPage() {
             {logsQuery.isPending ? <div className="flex min-h-40 items-center justify-center"><Spinner /></div> : null}
             {!logsQuery.isPending && logItems.length === 0 ? <div className="flex min-h-40 items-center justify-center text-xs text-muted-foreground">{t("registration.noLogs")}</div> : null}
             <div className="space-y-1 font-mono text-[11px] leading-5">
-              {logItems.map((entry) => <div key={entry.id} className="break-words text-muted-foreground"><span className="mr-2 select-none text-foreground/35">{entry.id}</span>{localizeRegistrationLog(entry.text, locale)}</div>)}
+              {logItems.map((entry) => <div key={entry.id} className="break-words text-muted-foreground"><span className="mr-2 select-none text-foreground/35">{entry.id}</span>{renderRegistrationLog(entry.text, locale)}</div>)}
             </div>
           </div>
         </section>
@@ -396,6 +387,18 @@ export function RegistrationPage() {
       </AlertDialog>
     </div>
   );
+}
+
+function renderRegistrationLog(text: string, locale: string) {
+  const value = localizeRegistrationLog(text, locale);
+  const passed = /（通过）$/.test(value);
+  const failed = /（失败）$/.test(value);
+  if (!passed && !failed) return value;
+  const detail = value.replace(/（(?:通过|失败)）$/, "");
+  return <span className={passed ? "inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400" : "inline-flex items-center gap-1 text-destructive"}>
+    {passed ? <CheckCircle2 className="size-3.5 shrink-0" /> : <XCircle className="size-3.5 shrink-0" />}
+    <span>{detail}</span>
+  </span>;
 }
 
 function EmailSourceCard({ source, index, disabled, canDisable, canDelete, usedTypes, onChange, onDelete }: {

@@ -150,6 +150,22 @@ func TestProcessOnceMovesInitialSyncFailureToFailed(t *testing.T) {
 	}
 }
 
+func TestProcessOncePersistsInitialSyncFailureDetails(t *testing.T) {
+	root := t.TempDir()
+	importer := &importerStub{result: accountapp.ImportResult{Created: 1, AccountIDs: []uint64{7}}}
+	syncer := &syncerStub{result: accountsyncapp.Result{Failed: 1, Failures: []accountsyncapp.Failure{{AccountID: 7, Error: "Grok Web browser worker unavailable"}}}}
+	service := newTestService(root, importer, syncer)
+	writeIncoming(t, root, "account.json", []byte(`{"provider":"grok_web"}`))
+
+	if err := service.processOnce(context.Background()); err != nil {
+		t.Fatalf("processOnce() error = %v", err)
+	}
+	result := readResult(t, filepath.Join(root, "failed", "account.result.json"))
+	if len(result.SyncErrors) != 1 || result.SyncErrors[0].AccountID != 7 || result.SyncErrors[0].Error == "" {
+		t.Fatalf("sync errors = %+v", result.SyncErrors)
+	}
+}
+
 func TestProcessOnceClaimsCredentialAcrossServiceInstances(t *testing.T) {
 	root := t.TempDir()
 	importer := &blockingImporter{entered: make(chan struct{}), release: make(chan struct{})}

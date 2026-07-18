@@ -67,3 +67,10 @@ func TestNewQuotaViewUsesConfirmedExhaustion(t *testing.T) {
 		t.Fatalf("quota = %#v", quota)
 	}
 }
+
+func TestNewQuotaViewMarksObservedFreeLimitAsWaitingReset(t *testing.T) {
+	quota := newQuotaView(&accountdomain.Billing{}, accountdomain.EstimatedFreeTokenLimit+17, nil, "grok-test-build-free")
+	if quota.Type != QuotaTypeFree || quota.Status != QuotaStatusWaitingReset || quota.Remaining != 0 || quota.NextProbeAt == nil || quota.ExhaustedAt == nil {
+		t.Fatalf("quota = %#v", quota)
+	}
+}

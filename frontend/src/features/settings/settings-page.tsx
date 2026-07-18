@@ -11,6 +11,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EgressNodes } from "@/features/settings/egress-nodes";
+import { EgressGroups } from "@/features/settings/egress-groups";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { isByteSizeUnit, isDurationUnit, type ByteSizeValue, type DurationValue } from "@/features/settings/settings-model";
 import { useSettings } from "@/features/settings/use-settings";
@@ -157,6 +158,9 @@ export function SettingsPage() {
 
           <SettingsSection title={t("settings.egress.title")} wide>
             <EgressNodes />
+          </SettingsSection>
+          <SettingsSection title={t("settings.egressGroups.title")} wide>
+            <EgressGroups />
           </SettingsSection>
           </SettingsPane>
 

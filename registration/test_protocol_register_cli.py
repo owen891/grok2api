@@ -17,6 +17,24 @@ from protocol_register_cli import (
 
 
 class ProtocolCheckpointTests(unittest.TestCase):
+    def test_proxy_pool_deduplicates_and_appends_fallback(self):
+        self.assertEqual(
+            worker.proxy_pool({"proxy_pool": ["socks5://a:1", "socks5://a:1", "http://b:2"], "proxy": "http://fallback:3"}),
+            ["socks5://a:1", "http://b:2", "http://fallback:3"],
+        )
+
+    def test_proxy_pool_uses_direct_when_empty(self):
+        self.assertEqual(worker.proxy_pool({}), [])
+
+    def test_checkpoint_contains_attempt_identity_and_email_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "job.json"
+            value = write_checkpoint(path, stage="pending_email", email="User@Example.invalid", proxy_group_id="7")
+            self.assertEqual(value["state_stage"], "pending_email")
+            self.assertEqual(value["proxy_group_id"], "7")
+            self.assertEqual(len(value["attempt_id"]), 32)
+            self.assertEqual(value["email_hash"], worker.hashlib.sha256(b"user@example.invalid").hexdigest())
+
     def test_resolve_sso_falls_back_to_password_session_with_fresh_token(self):
         class FakeClient:
             def fetch_sso_token(self, **_kwargs):
@@ -81,6 +99,12 @@ class ProtocolCheckpointTests(unittest.TestCase):
             )
 
             self.assertEqual([], resumable_checkpoints(root, max_attempts=2))
+
+    def test_submission_unknown_is_not_resumed_automatically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs" / "unknown.json"
+            write_checkpoint(path, stage="submission_unknown", email="unknown@example.invalid", password="secret")
+            self.assertEqual([], resumable_checkpoints(Path(directory)))
 
     def test_resumable_jobs_are_isolated_by_account_type(self):
         with tempfile.TemporaryDirectory() as directory:

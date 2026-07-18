@@ -1,0 +1,47 @@
+# Standard production config. Copy to config.production.yaml.
+# Database and Redis are Compose service names, not localhost.
+server:
+  listen: "0.0.0.0:8000"
+
+frontend:
+  publicApiBaseURL: "https://api.example.com"
+  staticPath: "/app/frontend/dist"
+
+secrets:
+  jwtSecret: "replace-with-at-least-32-characters"
+  credentialEncryptionKey: "replace-with-base64-key"
+
+bootstrapAdmin:
+  username: "admin"
+  password: "replace-with-a-strong-password"
+
+database:
+  driver: postgres
+  postgres:
+    dsn: "postgres://grok2api:change-me@postgres:5432/grok2api?sslmode=disable"
+    maxOpenConns: 20
+    maxIdleConns: 10
+
+runtimeStore:
+  driver: redis
+  redis:
+    address: "redis:6379"
+    password: ""
+    database: 0
+    keyPrefix: "grok2api:"
+
+registration:
+  enabled: true
+  spoolPath: "/app/data/registration/spool"
+  workDir: "/app/registration"
+  configPath: "/app/data/registration/config.json"
+  command: ["grok2api-registration"]
+
+provider:
+  web:
+    browserWorkerURL: "http://grok-web-browser:8192"
+
+media:
+  driver: local
+  local:
+    path: "/app/data/media"

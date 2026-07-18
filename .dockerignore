@@ -29,6 +29,13 @@ backend/**/*_test.go
 !docker/
 !docker/entrypoint.sh
 !docker/registration-entrypoint.sh
+!docker/turnstile-solver.Dockerfile
+!docker/turnstile-solver.requirements.txt
+!docker/patch-turnstile-solver.py
+!docker/turnstile-solver-entrypoint.sh
+
+!turnstile-solver/
+!turnstile-solver/**
 
 !registration/
 !registration/**

@@ -570,7 +570,7 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 		if response != nil {
 			status = response.StatusCode
 		}
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, status, err)
+		a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWeb, lease.NodeID, status, err)
 		return nil, fmt.Errorf("连接 Imagine WebSocket: %w", err)
 	}
 	connectionOwned := true
@@ -584,11 +584,11 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 	_ = connection.SetReadDeadline(deadline)
 	_ = connection.SetWriteDeadline(deadline)
 	if err := connection.WriteJSON(imagineResetMessage()); err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWeb, lease.NodeID, 0, err)
 		return nil, err
 	}
 	if err := connection.WriteJSON(imagineRequestMessage(newWebID("img"), request.Prompt, ratio, cfg.AllowNSFW, modelConfig.Pro, modelConfig.NativeBatchSize)); err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWeb, lease.NodeID, 0, err)
 		return nil, err
 	}
 	if request.Streaming {
@@ -1313,12 +1313,12 @@ func (a *Adapter) downloadImageAttempt(ctx context.Context, accountID uint64, to
 	request.Header.Del("Content-Type")
 	response, err := lease.Do(request)
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWebAsset, lease.NodeID, 0, err)
 		return nil, ctx.Err() == nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWebAsset, lease.NodeID, response.StatusCode, nil)
 		retryable := response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooEarly || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
 		return nil, retryable, fmt.Errorf("下载图片返回 %d", response.StatusCode)
 	}
@@ -1328,13 +1328,13 @@ func (a *Adapter) downloadImageAttempt(ctx context.Context, accountID uint64, to
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, (32<<20)+1))
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWebAsset, lease.NodeID, 0, err)
 		return nil, ctx.Err() == nil, fmt.Errorf("读取图片内容: %w", err)
 	}
 	if len(raw) > 32<<20 {
 		return nil, false, fmt.Errorf("图片下载超过 32 MiB")
 	}
-	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+	a.egress.FeedbackForScope(context.WithoutCancel(ctx), domainegress.ScopeWebAsset, lease.NodeID, response.StatusCode, nil)
 	return raw, false, nil
 }
 

@@ -27,26 +27,51 @@ const coolingRecoveryProbeInterval = 5 * time.Second
 const coolingRecoveryDialTimeout = 500 * time.Millisecond
 
 type Lease struct {
-	NodeID    uint64
-	NodeName  string
-	Scope     domain.Scope
-	ProxyURL  string
-	UserAgent string
-	CFCookies string
-	client    requestClient
-	browser   *browserClient
-	release   func()
+	NodeID             uint64
+	NodeName           string
+	Scope              domain.Scope
+	GroupID            uint64
+	AccountKey         string
+	StickyKey          string
+	CurrentConcurrency int
+	ProxyURL           string
+	UserAgent          string
+	CFCookies          string
+	client             requestClient
+	browser            *browserClient
+	release            func()
 }
 
 // UnavailableError means at least one enabled node is configured for the
 // requested scope, but every configured node is currently cooling down.
+type UnavailableReason string
+
+const (
+	UnavailableCooling  UnavailableReason = "cooling"
+	UnavailableProxy    UnavailableReason = "proxy_unavailable"
+	UnavailableWorker   UnavailableReason = "browser_worker_unavailable"
+	UnavailableCapacity UnavailableReason = "capacity"
+)
+
+// UnavailableError keeps the failure class so callers can distinguish a dead
+// proxy from a shared browser-worker outage.
 type UnavailableError struct {
-	Scope domain.Scope
+	Scope  domain.Scope
+	Reason UnavailableReason
+	NodeID uint64
 }
 
 func (e *UnavailableError) Error() string {
 	if e == nil {
 		return "当前没有可用的出口节点"
+	}
+	switch e.Reason {
+	case UnavailableProxy:
+		return fmt.Sprintf("%s proxy unavailable", e.Scope)
+	case UnavailableWorker:
+		return "Grok Web browser worker unavailable"
+	case UnavailableCapacity:
+		return "出口组并发容量已满"
 	}
 	return fmt.Sprintf("当前没有可用的 %s 出口节点", e.Scope)
 }
@@ -69,15 +94,28 @@ func (l *Lease) Release() {
 	}
 }
 
+// Release is the manager-shaped counterpart used by schedulers that keep
+// lease ownership outside request handlers.
+func (m *Manager) Release(lease *Lease) {
+	if lease != nil {
+		lease.Release()
+	}
+}
+
 type Manager struct {
-	repository repository.EgressRepository
-	cipher     *security.Cipher
-	mu         sync.Mutex
-	clients    map[uint64]cachedClient
-	inflight   map[uint64]int
-	nodes      map[domain.Scope]cachedNodeSnapshot
-	recovery   map[uint64]time.Time
-	nodeLoads  singleflight.Group
+	repository  repository.EgressRepository
+	groups      repository.EgressGroupRepository
+	cipher      *security.Cipher
+	mu          sync.Mutex
+	clients     map[uint64]cachedClient
+	inflight    map[uint64]int
+	groupLoad   map[uint64]int
+	memberLoad  map[groupMemberKey]int
+	nodes       map[domain.Scope]cachedNodeSnapshot
+	recovery    map[uint64]time.Time
+	roundRobin  map[uint64]uint64
+	nodeLoads   singleflight.Group
+	distributed repository.ConcurrencyLimiter
 }
 
 type cachedClient struct {
@@ -91,16 +129,215 @@ type cachedNodeSnapshot struct {
 	expiresAt time.Time
 }
 
-func NewManager(repository repository.EgressRepository, cipher *security.Cipher) *Manager {
-	return &Manager{repository: repository, cipher: cipher, clients: make(map[uint64]cachedClient), inflight: make(map[uint64]int), nodes: make(map[domain.Scope]cachedNodeSnapshot), recovery: make(map[uint64]time.Time)}
+type nodeReservation struct {
+	nodeID              uint64
+	groupID             uint64
+	current             int
+	distributedReleases []func()
+}
+
+type groupMemberKey struct {
+	groupID uint64
+	nodeID  uint64
+}
+
+func NewManager(egressRepository repository.EgressRepository, cipher *security.Cipher, distributed ...repository.ConcurrencyLimiter) *Manager {
+	groups, _ := egressRepository.(repository.EgressGroupRepository)
+	var limiter repository.ConcurrencyLimiter
+	if len(distributed) > 0 {
+		limiter = distributed[0]
+	}
+	return &Manager{repository: egressRepository, groups: groups, cipher: cipher, clients: make(map[uint64]cachedClient), inflight: make(map[uint64]int), groupLoad: make(map[uint64]int), memberLoad: make(map[groupMemberKey]int), nodes: make(map[domain.Scope]cachedNodeSnapshot), recovery: make(map[uint64]time.Time), roundRobin: make(map[uint64]uint64), distributed: limiter}
+}
+
+// AcquireGroup selects from an explicitly configured proxy group. A missing
+// group repository or an empty group falls back to the legacy scope pool.
+func (m *Manager) AcquireGroup(ctx context.Context, groupID uint64, scope domain.Scope, affinity string) (*Lease, error) {
+	return m.acquireGroup(ctx, groupID, scope, affinity, make(map[uint64]struct{}))
+}
+
+func (m *Manager) acquireScope(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
+	lease, _, err := m.acquire(ctx, scope, affinity, true)
+	return lease, err
+}
+
+func (m *Manager) acquireGroup(ctx context.Context, groupID uint64, scope domain.Scope, affinity string, visited map[uint64]struct{}) (*Lease, error) {
+	if groupID == 0 || m.groups == nil {
+		return m.acquireScope(ctx, scope, affinity)
+	}
+	if _, exists := visited[groupID]; exists {
+		return nil, fmt.Errorf("出口组备用链存在循环")
+	}
+	visited[groupID] = struct{}{}
+	group, err := m.groups.GetEgressGroup(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if group.Scope != scope && !(scope == domain.ScopeWebAsset && group.Scope == domain.ScopeWeb) {
+		return nil, fmt.Errorf("出口组作用域与请求不匹配")
+	}
+	if !group.Enabled {
+		if group.FallbackGroupID != nil {
+			return m.acquireGroup(ctx, *group.FallbackGroupID, scope, affinity, visited)
+		}
+		return m.acquireScope(ctx, scope, affinity)
+	}
+	members, err := m.groups.ListEgressGroupMembers(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if len(members) == 0 {
+		if group.FallbackGroupID != nil {
+			return m.acquireGroup(ctx, *group.FallbackGroupID, scope, affinity, visited)
+		}
+		return m.acquireScope(ctx, scope, affinity)
+	}
+	allowed := make(map[uint64]domain.GroupMember, len(members))
+	for _, member := range members {
+		if member.Enabled {
+			allowed[member.NodeID] = member
+		}
+	}
+	if len(allowed) == 0 {
+		if group.FallbackGroupID != nil {
+			return m.acquireGroup(ctx, *group.FallbackGroupID, scope, affinity, visited)
+		}
+		return m.acquireScope(ctx, scope, affinity)
+	}
+	now := time.Now().UTC()
+	nodes, err := m.listNodes(ctx, group.Scope, now)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	groupLoad := m.groupLoad[group.ID]
+	m.mu.Unlock()
+	if group.MaxConcurrency > 0 && groupLoad >= group.MaxConcurrency {
+		if group.FallbackGroupID != nil {
+			return m.acquireGroup(ctx, *group.FallbackGroupID, scope, affinity, visited)
+		}
+		return nil, &UnavailableError{Scope: scope, Reason: UnavailableCapacity}
+	}
+	available := make([]domain.Node, 0, len(nodes))
+	highestPriority := -int(^uint(0)>>1) - 1
+	for _, node := range nodes {
+		limit, ok := allowed[node.ID]
+		if !ok || !node.Enabled || (node.CooldownUntil != nil && now.Before(*node.CooldownUntil)) {
+			continue
+		}
+		m.mu.Lock()
+		load := m.memberLoad[groupMemberKey{groupID: group.ID, nodeID: node.ID}]
+		m.mu.Unlock()
+		if limit.MaxConcurrency > 0 && load >= limit.MaxConcurrency {
+			continue
+		}
+		if limit.Priority > highestPriority {
+			highestPriority = limit.Priority
+			available = available[:0]
+		}
+		if limit.Priority < highestPriority {
+			continue
+		}
+		available = append(available, node)
+	}
+	if len(available) == 0 {
+		if group.FallbackGroupID != nil {
+			return m.acquireGroup(ctx, *group.FallbackGroupID, scope, affinity, visited)
+		}
+		return m.acquireScope(ctx, scope, affinity)
+	}
+	selected := m.selectGroupNode(group, available, allowed, affinity)
+	reservation, ok, reserveErr := m.reserveGroupNode(ctx, group, selected, allowed)
+	if reserveErr != nil {
+		return nil, reserveErr
+	}
+	if !ok {
+		// Another request may have claimed the preferred node after the
+		// snapshot was read. Try the remaining members under the same atomic
+		// reservation check before using the fallback group.
+		for _, candidate := range available {
+			if candidate.ID == selected.ID {
+				continue
+			}
+			reservation, ok, reserveErr = m.reserveGroupNode(ctx, group, candidate, allowed)
+			if reserveErr != nil {
+				return nil, reserveErr
+			}
+			if ok {
+				selected = candidate
+				break
+			}
+		}
+	}
+	if !ok {
+		if group.FallbackGroupID != nil {
+			return m.acquireGroup(ctx, *group.FallbackGroupID, scope, affinity, visited)
+		}
+		return nil, &UnavailableError{Scope: scope, Reason: UnavailableCapacity}
+	}
+	lease, _, err := m.acquireFromNodes(ctx, scope, affinity, []domain.Node{selected}, reservation)
+	if lease != nil {
+		lease.GroupID = group.ID
+		lease.StickyKey = affinity
+	}
+	return lease, err
+}
+
+func (m *Manager) selectGroupNode(group domain.Group, nodes []domain.Node, members map[uint64]domain.GroupMember, affinity string) domain.Node {
+	sort.SliceStable(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	switch group.Strategy {
+	case domain.StrategySticky:
+		return m.selectNode(nodes, affinity)
+	case domain.StrategyWeighted:
+		total := uint64(0)
+		for _, node := range nodes {
+			total += uint64(max(1, members[node.ID].Weight))
+		}
+		var slot uint64
+		if affinity != "" {
+			digest := sha256.Sum256([]byte(affinity))
+			slot = binary.BigEndian.Uint64(digest[:8]) % total
+		} else {
+			m.mu.Lock()
+			slot = m.roundRobin[group.ID] % total
+			m.roundRobin[group.ID]++
+			m.mu.Unlock()
+		}
+		for _, node := range nodes {
+			weight := uint64(max(1, members[node.ID].Weight))
+			if slot < weight {
+				return node
+			}
+			slot -= weight
+		}
+		return nodes[0]
+	case domain.StrategyRoundRobin:
+		m.mu.Lock()
+		slot := m.roundRobin[group.ID] % uint64(len(nodes))
+		m.roundRobin[group.ID]++
+		m.mu.Unlock()
+		return nodes[slot]
+	default:
+		return m.selectNode(nodes, "")
+	}
 }
 
 func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
+	if groupID := groupIDFromContext(ctx); groupID != 0 {
+		return m.AcquireGroup(ctx, groupID, scope, affinity)
+	}
 	lease, _, err := m.acquire(ctx, scope, affinity, true)
 	return lease, err
 }
 
 func (m *Manager) AcquireIfConfigured(ctx context.Context, scope domain.Scope, affinity string) (*Lease, bool, error) {
+	if groupID := groupIDFromContext(ctx); groupID != 0 {
+		lease, err := m.AcquireGroup(ctx, groupID, scope, affinity)
+		if err != nil {
+			return nil, false, err
+		}
+		return lease, true, nil
+	}
 	return m.acquire(ctx, scope, affinity, false)
 }
 
@@ -134,7 +371,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	}
 	if len(available) == 0 {
 		if configured {
-			return nil, false, &UnavailableError{Scope: scope}
+			return nil, false, &UnavailableError{Scope: scope, Reason: UnavailableCooling}
 		}
 		if !allowDirect {
 			recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
@@ -143,19 +380,100 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		available = []domain.Node{{ID: 0, Name: "direct", Scope: scope, Enabled: true, Health: 1}}
 	}
 	sort.SliceStable(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+	return m.acquireFromNodes(ctx, scope, affinity, available, nil)
+}
+
+func (m *Manager) reserveGroupNode(ctx context.Context, group domain.Group, selected domain.Node, members map[uint64]domain.GroupMember) (*nodeReservation, bool, error) {
+	m.mu.Lock()
+	if m.groupLoad == nil {
+		m.groupLoad = make(map[uint64]int)
+	}
+	if m.memberLoad == nil {
+		m.memberLoad = make(map[groupMemberKey]int)
+	}
+	if group.MaxConcurrency > 0 && m.groupLoad[group.ID] >= group.MaxConcurrency {
+		m.mu.Unlock()
+		return nil, false, nil
+	}
+	member := members[selected.ID]
+	memberKey := groupMemberKey{groupID: group.ID, nodeID: selected.ID}
+	if member.MaxConcurrency > 0 && m.memberLoad[memberKey] >= member.MaxConcurrency {
+		m.mu.Unlock()
+		return nil, false, nil
+	}
+	m.inflight[selected.ID]++
+	m.groupLoad[group.ID]++
+	m.memberLoad[memberKey]++
+	reservation := &nodeReservation{nodeID: selected.ID, groupID: group.ID, current: m.inflight[selected.ID]}
+	m.mu.Unlock()
+
+	if m.distributed != nil {
+		if group.MaxConcurrency > 0 {
+			release, acquired, err := m.distributed.Acquire(ctx, fmt.Sprintf("egress-group:%d", group.ID), group.MaxConcurrency)
+			if err != nil || !acquired {
+				m.releaseNodeReservation(reservation)
+				return nil, false, err
+			}
+			reservation.distributedReleases = append(reservation.distributedReleases, release)
+		}
+		if member.MaxConcurrency > 0 {
+			release, acquired, err := m.distributed.Acquire(ctx, fmt.Sprintf("egress-member:%d:%d", group.ID, selected.ID), member.MaxConcurrency)
+			if err != nil || !acquired {
+				m.releaseNodeReservation(reservation)
+				return nil, false, err
+			}
+			reservation.distributedReleases = append(reservation.distributedReleases, release)
+		}
+	}
+	return reservation, true, nil
+}
+
+func (m *Manager) releaseNodeReservation(reservation *nodeReservation) {
+	if reservation == nil {
+		return
+	}
+	m.mu.Lock()
+	m.inflight[reservation.nodeID]--
+	if m.inflight[reservation.nodeID] <= 0 {
+		delete(m.inflight, reservation.nodeID)
+	}
+	if reservation.groupID != 0 {
+		m.groupLoad[reservation.groupID]--
+		if m.groupLoad[reservation.groupID] <= 0 {
+			delete(m.groupLoad, reservation.groupID)
+		}
+		key := groupMemberKey{groupID: reservation.groupID, nodeID: reservation.nodeID}
+		m.memberLoad[key]--
+		if m.memberLoad[key] <= 0 {
+			delete(m.memberLoad, key)
+		}
+	}
+	m.mu.Unlock()
+	for _, release := range reservation.distributedReleases {
+		if release != nil {
+			release()
+		}
+	}
+	reservation.distributedReleases = nil
+}
+
+func (m *Manager) acquireFromNodes(ctx context.Context, scope domain.Scope, affinity string, available []domain.Node, reservation *nodeReservation) (*Lease, bool, error) {
 	selected := m.selectNode(available, affinity)
 	proxyURL, err := m.cipher.Decrypt(selected.EncryptedProxyURL)
 	if err != nil {
+		m.releaseNodeReservation(reservation)
 		return nil, false, err
 	}
 	proxyURL, err = application.NormalizeProxyURL(proxyURL)
 	if err != nil {
+		m.releaseNodeReservation(reservation)
 		return nil, false, err
 	}
 	cookies := ""
 	if scope != domain.ScopeBuild {
 		cookies, err = m.cipher.Decrypt(selected.EncryptedCloudflareCookie)
 		if err != nil {
+			m.releaseNodeReservation(reservation)
 			return nil, false, err
 		}
 		cookies = application.SanitizeCloudflareCookies(cookies)
@@ -169,15 +487,34 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	}
 	client, err := m.clientFor(selected.ID, scope, proxyURL, userAgent, cookies)
 	if err != nil {
+		m.releaseNodeReservation(reservation)
 		return nil, false, err
 	}
-	m.mu.Lock()
-	m.inflight[selected.ID]++
-	m.mu.Unlock()
+	currentConcurrency := 0
+	if reservation != nil {
+		if reservation.nodeID != selected.ID {
+			m.releaseNodeReservation(reservation)
+			return nil, false, errors.New("出口节点预占与选择结果不一致")
+		}
+		currentConcurrency = reservation.current
+	} else {
+		m.mu.Lock()
+		m.inflight[selected.ID]++
+		currentConcurrency = m.inflight[selected.ID]
+		m.mu.Unlock()
+	}
 	recordSelection(ctx, Selection{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, Proxied: proxyURL != ""})
 	var once sync.Once
-	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, release: func() {
+	groupID := uint64(0)
+	if reservation != nil {
+		groupID = reservation.groupID
+	}
+	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, GroupID: groupID, AccountKey: affinity, StickyKey: affinity, CurrentConcurrency: currentConcurrency, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, release: func() {
 		once.Do(func() {
+			if reservation != nil {
+				m.releaseNodeReservation(reservation)
+				return
+			}
 			m.mu.Lock()
 			m.inflight[selected.ID]--
 			if m.inflight[selected.ID] <= 0 {
@@ -367,6 +704,15 @@ func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, 
 
 func (m *Manager) Feedback(ctx context.Context, nodeID uint64, status int, transportErr error) {
 	m.FeedbackForScope(ctx, domain.ScopeWeb, nodeID, status, transportErr)
+}
+
+// FeedbackLease preserves the group/lease call shape for registration and
+// other schedulers while keeping the existing node feedback implementation.
+func (m *Manager) FeedbackLease(ctx context.Context, lease *Lease, status int, transportErr error) {
+	if lease == nil {
+		return
+	}
+	m.FeedbackForScope(ctx, lease.Scope, lease.NodeID, status, transportErr)
 }
 
 func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error) {

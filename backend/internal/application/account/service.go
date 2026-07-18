@@ -33,8 +33,8 @@ var (
 )
 
 const (
-	estimatedFreeTokenLimit     int64         = 1_000_000
-	freeUsageWindow             time.Duration = 24 * time.Hour
+	estimatedFreeTokenLimit     int64         = accountdomain.EstimatedFreeTokenLimit
+	freeUsageWindow             time.Duration = accountdomain.FreeUsageWindow
 	forcedRefreshMinInterval    time.Duration = 30 * time.Second
 	paidProbeRetryInterval      time.Duration = 15 * time.Minute
 	credentialRefreshAdvance    time.Duration = 3 * time.Minute
@@ -536,6 +536,15 @@ func newQuotaView(billing *accountdomain.Billing, observedTokens int64, recovery
 	if remaining < 0 {
 		remaining = 0
 	}
+	status := QuotaStatusActive
+	var exhaustedAt, nextProbeAt *time.Time
+	if observedTokens >= estimatedFreeTokenLimit {
+		now := time.Now().UTC()
+		next := now.Add(freeUsageWindow)
+		status = QuotaStatusWaitingReset
+		exhaustedAt = &now
+		nextProbeAt = &next
+	}
 	return QuotaView{
 		Type:         QuotaTypeFree,
 		Source:       freeSource,
@@ -548,7 +557,9 @@ func newQuotaView(billing *accountdomain.Billing, observedTokens int64, recovery
 		LimitKnown:   false,
 		WindowHours:  int(freeUsageWindow / time.Hour),
 		Observed:     true,
-		Status:       QuotaStatusActive,
+		Status:       status,
+		ExhaustedAt:  exhaustedAt,
+		NextProbeAt:  nextProbeAt,
 	}
 }
 

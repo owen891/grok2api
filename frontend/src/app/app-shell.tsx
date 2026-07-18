@@ -1,10 +1,10 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Box, ChevronDown, Eye, Image, KeyRound, Languages, LayoutDashboard, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreHorizontal, Settings, Sun, Terminal, Users, Video } from "lucide-react";
+import { Box, ChevronDown, Eye, Image, KeyRound, Languages, LayoutDashboard, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreHorizontal, Network, Settings, Sun, Terminal, Users, Video } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
-import { Link, NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { z } from "zod";
 
@@ -30,6 +30,15 @@ const navigation = [
   { href: "/gallery", label: "nav.gallery", icon: Image },
   { href: "/video-gallery", label: "nav.videoGallery", icon: Video },
   { href: "/request-audits", label: "nav.audits", icon: Eye },
+] as const;
+
+const navigationGroups = [
+  {
+    key: "proxies",
+    label: "nav.proxies",
+    icon: Network,
+    items: [{ href: "/proxies", label: "nav.proxy" }],
+  },
 ] as const;
 
 const documentation = [
@@ -63,10 +72,12 @@ const documentation = [
 
 export function AppShell() {
   const { t, i18n } = useTranslation();
+  const location = useLocation();
   const { admin, logout, changePassword } = useAuth();
   const { setTheme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
+  const [navigationGroupsOpen, setNavigationGroupsOpen] = useState<Record<string, boolean>>({ proxies: true });
   const [documentationOpen, setDocumentationOpen] = useState<Record<string, boolean>>({});
 
   const passwordSchema = z.object({
@@ -165,9 +176,56 @@ export function AppShell() {
     });
   }
 
+  function navigationGroupLinks(): ReactNode {
+    return navigationGroups.map(({ key, label, icon: Icon, items }) => {
+      const open = (key === "proxies" && location.pathname.startsWith("/proxies")) || (navigationGroupsOpen[key] ?? false);
+      return (
+        <div key={key}>
+          <button
+            type="button"
+            className="flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-xs font-normal text-muted-foreground transition-colors hover:bg-secondary/55 hover:text-foreground"
+            aria-expanded={open}
+            onClick={() => setNavigationGroupsOpen((current) => ({ ...current, [key]: !open }))}
+          >
+            <span className="flex size-5 shrink-0 items-center justify-center">
+              <Icon className="size-[15px] text-muted-foreground" strokeWidth={1.7} />
+            </span>
+            <span className="flex-1 text-left">{t(label)}</span>
+            <ChevronDown className={cn("size-3 text-muted-foreground transition-transform", !open && "-rotate-90")} />
+          </button>
+          <div className={cn(
+            "grid transition-[grid-template-rows,opacity] duration-200 ease-out",
+            open ? "grid-rows-[1fr] opacity-100" : "pointer-events-none grid-rows-[0fr] opacity-0",
+          )} aria-hidden={!open}>
+            <div className="overflow-hidden">
+              <div className="space-y-1 pt-1">
+                {items.map((item) => (
+                  <NavLink
+                    key={item.href}
+                    to={item.href}
+                    end
+                    tabIndex={open ? 0 : -1}
+                    onClick={() => setMobileOpen(false)}
+                    className={({ isActive }) => cn(
+                      "group flex h-7 min-w-0 items-center gap-2 rounded-md pl-[38px] pr-2.5 text-xs text-muted-foreground transition-colors hover:bg-secondary/55 hover:text-foreground",
+                      isActive && "bg-secondary/60 text-foreground",
+                    )}
+                  >
+                    {t(item.label)}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    });
+  }
+
   const navigationContent = (
     <nav className="mt-7 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-2 pb-2" aria-label={t("shell.navigation")}>
       <div className="space-y-1">{navigationLinks()}</div>
+      <div className="mt-4 space-y-1">{navigationGroupLinks()}</div>
       <div className="mt-7">
         <div className="px-2.5 pb-2 text-xs font-normal text-foreground">{t("nav.docs")}</div>
         <div className="space-y-1">{documentationLinks()}</div>

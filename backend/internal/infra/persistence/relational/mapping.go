@@ -11,8 +11,25 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/admin"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	"github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
 )
+
+func toEgressGroupDomain(row egressGroupModel) egress.Group {
+	return egress.Group{ID: row.ID, Name: row.Name, Scope: egress.Scope(row.Scope), Enabled: row.Enabled, Strategy: egress.GroupStrategy(row.Strategy), MaxConcurrency: row.MaxConcurrency, FallbackGroupID: row.FallbackGroupID, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+}
+
+func fromEgressGroupDomain(value egress.Group) egressGroupModel {
+	return egressGroupModel{ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled, Strategy: string(value.Strategy), MaxConcurrency: value.MaxConcurrency, FallbackGroupID: value.FallbackGroupID, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+}
+
+func toEgressGroupMemberDomain(row egressGroupMemberModel) egress.GroupMember {
+	return egress.GroupMember{GroupID: row.GroupID, NodeID: row.NodeID, Weight: row.Weight, MaxConcurrency: row.MaxConcurrency, Enabled: row.Enabled, Priority: row.Priority, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+}
+
+func fromEgressGroupMemberDomain(value egress.GroupMember) egressGroupMemberModel {
+	return egressGroupMemberModel{GroupID: value.GroupID, NodeID: value.NodeID, Weight: value.Weight, MaxConcurrency: value.MaxConcurrency, Enabled: value.Enabled, Priority: value.Priority, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+}
 
 func toAdminDomain(value adminModel) admin.Admin {
 	return admin.Admin{ID: value.ID, Username: value.Username, PasswordHash: value.PasswordHash, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
@@ -135,7 +152,7 @@ func toBillingDomain(value billingModel) account.Billing {
 }
 
 func toModelDomain(value modelRouteModel) model.Route {
-	return model.Route{ID: value.ID, PublicID: value.PublicID, Provider: account.Provider(value.Provider), UpstreamModel: value.UpstreamModel, Capability: model.Capability(value.Capability), Origin: model.Origin(value.Origin), Enabled: value.Enabled, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	return model.Route{ID: value.ID, PublicID: value.PublicID, Provider: account.Provider(value.Provider), UpstreamModel: value.UpstreamModel, Capability: model.Capability(value.Capability), Origin: model.Origin(value.Origin), Enabled: value.Enabled, EgressGroupID: value.EgressGroupID, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
 }
 
 func toClientKeyDomain(value clientKeyModel, allowedModels []uint64) clientkey.Key {

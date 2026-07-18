@@ -8,10 +8,42 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
+
+func TestSelectorBlocksObservedFreeRollingUsageWithoutRecoveryRow(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "selector-free-usage.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	audits := relational.NewAuditRepository(database)
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "over-limit", SourceKey: "over-limit", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1, ObservedModel: "grok-test-build-free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID := value.ID
+	if err := audits.Create(ctx, audit.Record{RequestID: "over-limit", ClientKeyID: 1, ModelRouteID: 1, AccountID: &accountID, StatusCode: 200, TotalTokens: account.EstimatedFreeTokenLimit + 17, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	_, err = selector.Acquire(ctx, account.ProviderBuild, "grok-test", "", "", nil, false)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionQuotaExhausted {
+		t.Fatalf("error = %v, want quota exhausted", err)
+	}
+}
 
 func TestSelectorPrioritizesDueQuotaProbeOnce(t *testing.T) {
 	ctx := context.Background()
@@ -105,6 +137,44 @@ func TestSelectorSkipsQuotaProbeBeforeDue(t *testing.T) {
 	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
 	if _, err := selector.Acquire(ctx, account.ProviderBuild, "grok-test", "", "", map[uint64]bool{}, true); err == nil {
 		t.Fatal("expected no account before next probe time")
+	}
+}
+
+func TestSelectorSkipsWaitingResetAccountEvenWhenModeWindowHasRemaining(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "selector-recovery-window.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierSuper,
+		Name: "waiting-reset", SourceKey: "waiting-reset", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	next := now.Add(24 * time.Hour)
+	if err := accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{
+		AccountID: value.ID, Kind: account.QuotaRecoveryKindFree, Status: account.QuotaRecoveryStatusExhausted,
+		NextProbeAt: &next, ExhaustedAt: &now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+		AccountID: value.ID, Mode: "fast", Remaining: 30, Total: 30, ResetAt: &next, SyncedAt: &now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	if _, err := selector.Acquire(ctx, account.ProviderWeb, "grok-chat-fast", "fast", "", nil, false); err == nil {
+		t.Fatal("waiting-reset account with a positive mode window must not be selected")
 	}
 }
 

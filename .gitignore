@@ -11,6 +11,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+!/deploy_artifact/.env.production.example
 /config.yaml
 /config.local.yaml
 /config.*.local.yaml
@@ -64,6 +65,7 @@ __pycache__/
 
 # Local release/build artifacts
 /build/
+/dist/
 /backend/deploy_artifact/
 /deploy_artifact/app/
 /deploy_artifact/app-release/

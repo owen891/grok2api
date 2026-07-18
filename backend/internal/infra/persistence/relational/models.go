@@ -44,7 +44,7 @@ type accountModel struct {
 	LastUsedAt       *time.Time
 	ObservedModel    string `gorm:"size:255;check:chk_accounts_observed_model,length(observed_model) <= 255"`
 	ObservedModelAt  *time.Time
-	NSFWEnabled      bool    `gorm:"not null;default:false"`
+	NSFWEnabled      bool                    `gorm:"not null;default:false"`
 	CreatedAt        time.Time               `gorm:"not null"`
 	UpdatedAt        time.Time               `gorm:"not null"`
 	Credential       *accountCredentialModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
@@ -153,6 +153,7 @@ type modelRouteModel struct {
 	Capability    string    `gorm:"size:32;not null;check:chk_model_routes_capability,capability IN ('responses','chat','image','image_edit','video')"`
 	Origin        string    `gorm:"size:32;not null;default:discovered;check:chk_model_routes_origin,origin IN ('catalog','discovered','manual')"`
 	Enabled       bool      `gorm:"not null"`
+	EgressGroupID uint64    `gorm:"not null;default:0;index"`
 	CreatedAt     time.Time `gorm:"not null"`
 	UpdatedAt     time.Time `gorm:"not null"`
 }
@@ -397,3 +398,30 @@ type egressNodeModel struct {
 }
 
 func (egressNodeModel) TableName() string { return "egress_nodes" }
+
+type egressGroupModel struct {
+	ID              uint64    `gorm:"primaryKey;autoIncrement"`
+	Name            string    `gorm:"size:160;not null;uniqueIndex:uidx_egress_groups_scope_name,priority:2;check:chk_egress_groups_name,length(trim(name)) BETWEEN 1 AND 160"`
+	Scope           string    `gorm:"size:32;not null;uniqueIndex:uidx_egress_groups_scope_name,priority:1;check:chk_egress_groups_scope,scope IN ('grok_build','grok_web','grok_console','grok_web_asset')"`
+	Enabled         bool      `gorm:"not null;default:true"`
+	Strategy        string    `gorm:"size:24;not null;default:'least_load';check:chk_egress_groups_strategy,strategy IN ('least_load','weighted','sticky','round_robin')"`
+	MaxConcurrency  int       `gorm:"not null;default:0;check:chk_egress_groups_concurrency,max_concurrency >= 0 AND max_concurrency <= 100000"`
+	FallbackGroupID *uint64   `gorm:"index"`
+	CreatedAt       time.Time `gorm:"not null"`
+	UpdatedAt       time.Time `gorm:"not null"`
+}
+
+func (egressGroupModel) TableName() string { return "egress_groups" }
+
+type egressGroupMemberModel struct {
+	GroupID        uint64    `gorm:"primaryKey"`
+	NodeID         uint64    `gorm:"primaryKey"`
+	Weight         int       `gorm:"not null;default:1;check:chk_egress_group_members_weight,weight > 0 AND weight <= 10000"`
+	MaxConcurrency int       `gorm:"not null;default:0;check:chk_egress_group_members_concurrency,max_concurrency >= 0 AND max_concurrency <= 100000"`
+	Enabled        bool      `gorm:"not null;default:true"`
+	Priority       int       `gorm:"not null;default:0"`
+	CreatedAt      time.Time `gorm:"not null"`
+	UpdatedAt      time.Time `gorm:"not null"`
+}
+
+func (egressGroupMemberModel) TableName() string { return "egress_group_members" }

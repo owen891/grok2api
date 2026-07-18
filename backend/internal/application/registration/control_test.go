@@ -259,6 +259,47 @@ func TestEmailSourcesRejectDuplicateTypesAndAllDisabled(t *testing.T) {
 	}
 }
 
+func TestResolveProxyGroupPersistsWorkerProxyPool(t *testing.T) {
+	controller := newControllerTest(t, 0)
+	controller.config.ResolveProxyGroup = func(_ context.Context, id uint64, _ string) ([]string, error) {
+		if id != 7 {
+			t.Fatalf("resolved group id = %d", id)
+		}
+		return []string{"http://proxy-a:8080", "socks5://proxy-b:1080"}, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(controller.config.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controller.config.ConfigPath, []byte(`{"proxy_group_id":"7","proxy":"legacy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.resolveProxyGroupLocked(context.Background(), "grok_build"); err != nil {
+		t.Fatal(err)
+	}
+	value, err := readJSONMap(controller.config.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := stringSlice(value["proxy_pool"])
+	if len(pool) != 2 || pool[0] != "http://proxy-a:8080" || value["proxy"] != "legacy" {
+		t.Fatalf("resolved config = %#v", value)
+	}
+	value["proxy_group_id"] = ""
+	if err := writeJSONAtomic(controller.config.ConfigPath, value, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.resolveProxyGroupLocked(context.Background(), "grok_build"); err != nil {
+		t.Fatal(err)
+	}
+	value, err = readJSONMap(controller.config.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := value["proxy_pool"]; exists {
+		t.Fatalf("proxy pool was not removed: %#v", value)
+	}
+}
+
 func mustLogs(t *testing.T, controller *Controller) LogResult {
 	t.Helper()
 	logs, err := controller.Logs(20)
