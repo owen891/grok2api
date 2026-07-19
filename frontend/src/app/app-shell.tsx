@@ -19,6 +19,7 @@ import { GitHubMark } from "@/shared/components/github-mark";
 import { SiteFooter } from "@/shared/components/site-footer";
 import { cn } from "@/shared/lib/cn";
 import { VersionUpdateControl } from "@/shared/version/version-update-control";
+import { VersionUpdateBanner } from "@/features/system/version-update";
 
 const navigation = [
   { href: "/dashboard", label: "nav.dashboard", icon: LayoutDashboard },
@@ -312,6 +313,7 @@ export function AppShell() {
           </header>
 
           <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col px-3 py-3 sm:px-4 lg:px-5 lg:py-4">
+            <VersionUpdateBanner />
             <Outlet />
           </main>
           <SiteFooter />

@@ -79,8 +79,14 @@ export function AccountInspectionDialog({ provider, selectedIds }: Props) {
   });
 
   const startMutation = useMutation({
-    mutationFn: () => {
-      if (!effectiveModelRouteId) throw new Error(t("accountInspection.noModel"));
+    mutationFn: async () => {
+      // Capabilities can change while the dialog is open. Re-read routes
+      // immediately before enqueueing so a stale route cannot be submitted.
+      const refreshed = await modelsQuery.refetch();
+      if (refreshed.isError || !refreshed.data) throw new Error(t("accountInspection.modelsLoadFailed"));
+      const currentProbeModels = refreshed.data.items.filter((model) => model.enabled && model.available && (model.capability === "responses" || model.capability === "chat"));
+      const currentModelRouteId = currentProbeModels.some((model) => model.id === modelRouteId) ? modelRouteId : (currentProbeModels[0]?.id ?? "");
+      if (!currentModelRouteId) throw new Error(t("accountInspection.noModel"));
       const parsedConcurrency = Number(concurrency);
       if (!Number.isInteger(parsedConcurrency) || parsedConcurrency < 1 || parsedConcurrency > 8) {
         throw new Error(t("accountInspection.invalidConcurrency"));
@@ -88,7 +94,7 @@ export function AccountInspectionDialog({ provider, selectedIds }: Props) {
       if (mode === "selected" && selectedIds.length === 0) throw new Error(t("accountInspection.noSelectedAccounts"));
       if (mode === "recheck" && classifications.size === 0) throw new Error(t("accountInspection.noClassifications"));
       return startAccountInspection({
-        provider, modelRouteId: effectiveModelRouteId, mode,
+        provider, modelRouteId: currentModelRouteId, mode,
         accountIds: mode === "selected" ? selectedIds : undefined,
         classifications: mode === "recheck" ? [...classifications] : undefined,
         includeDisabled, concurrency: parsedConcurrency,

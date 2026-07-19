@@ -78,8 +78,10 @@ func (s *Service) Snapshot() Snapshot {
 }
 
 func (s *Service) Check(ctx context.Context) Snapshot {
+	// A single canceled caller should not abort the shared refresh for every
+	// waiter. The service timeout still bounds the outbound request.
 	result, err, _ := s.checks.Do("latest", func() (any, error) {
-		return s.fetchLatest(ctx)
+		return s.fetchLatest(context.Background())
 	})
 	s.mu.Lock()
 	defer s.mu.Unlock()

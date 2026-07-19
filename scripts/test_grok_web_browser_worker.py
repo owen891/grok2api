@@ -217,6 +217,30 @@ class BrowserWorkerValidationTests(unittest.TestCase):
         self.assertEqual(frames[1]["result"]["response"]["userResponse"]["responseId"], "response-1")
         self.assertEqual(frames[1]["result"]["response"]["token"], "hello")
 
+    def test_composer_submit_retries_intercepted_native_click(self):
+        button = Mock()
+        button.is_displayed.return_value = True
+        button.is_enabled.return_value = True
+        button.click.side_effect = [RuntimeError("element click intercepted by overlay"), None]
+        driver = Mock()
+        driver.find_elements.return_value = [button]
+        driver.execute_script.side_effect = [None, True, None, True]
+        BrowserSession._click_composer_submit(driver, 1e12)
+        self.assertEqual(button.click.call_count, 2)
+        self.assertNotIn("arguments[0].click();", str(driver.execute_script.call_args_list))
+
+    def test_composer_submit_uses_dom_click_after_overlay_timeout(self):
+        button = Mock()
+        button.is_displayed.return_value = True
+        button.is_enabled.return_value = True
+        button.click.side_effect = RuntimeError("intercepted")
+        driver = Mock()
+        driver.find_elements.return_value = [button]
+        driver.execute_script.side_effect = [None, True, None]
+        with patch("scripts.grok_web_browser_worker.time.monotonic", side_effect=[0.0, 0.0, 1.0]):
+            BrowserSession._click_composer_submit(driver, 2.0)
+        self.assertTrue(any("arguments[0].click();" in str(call) for call in driver.execute_script.call_args_list))
+
 
 if __name__ == "__main__":
     unittest.main()

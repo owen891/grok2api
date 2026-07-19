@@ -466,6 +466,55 @@ class BrowserSession:
             return
 
     @staticmethod
+    def _click_composer_submit(driver, deadline: float) -> None:
+        """Click the composer submit control across hydration/overlay races."""
+        selector = "button[data-testid='chat-submit'], button[type='submit'], button[aria-label*='Send' i], button[aria-label*='Submit' i]"
+        last_intercepted = None
+        js_fallback_at = time.monotonic() + 0.75
+        while time.monotonic() < deadline:
+            for candidate in driver.find_elements("css selector", selector):
+                try:
+                    if not candidate.is_displayed() or not candidate.is_enabled():
+                        continue
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+                        candidate,
+                    )
+                    unobstructed = driver.execute_script(
+                        """
+                        const el = arguments[0];
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) return false;
+                        const top = document.elementFromPoint(
+                          rect.left + rect.width / 2,
+                          rect.top + rect.height / 2
+                        );
+                        return top === el || el.contains(top);
+                        """,
+                        candidate,
+                    )
+                    if unobstructed:
+                        try:
+                            candidate.click()
+                            return
+                        except Exception as error:
+                            # Chromium can report a transient not-interactable
+                            # state while the React shell finishes hydration.
+                            last_intercepted = error
+                    if time.monotonic() >= js_fallback_at:
+                        driver.execute_script("arguments[0].click();", candidate)
+                        return
+                except Exception as error:
+                    if "stale" in error.__class__.__name__.lower():
+                        continue
+                    last_intercepted = error
+                    continue
+            time.sleep(0.1)
+        if last_intercepted is not None:
+            raise RuntimeError("Grok composer submit control remained blocked") from last_intercepted
+        raise RuntimeError("Grok composer submit control was not clickable")
+
+    @staticmethod
     def _synthetic_composer_response(conversation_id: str, parent_id: str, message: str) -> bytes:
         """Adapt an already-completed native composer turn to Grok's NDJSON shape.
 
@@ -554,7 +603,7 @@ class BrowserSession:
                 time.sleep(0.15)
         if submit is None:
             raise RuntimeError("Grok composer submit control was not available")
-        submit.click()
+        self._click_composer_submit(driver, deadline)
 
         latest = None
         latest_text = ""

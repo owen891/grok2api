@@ -22,6 +22,7 @@ import (
 	operationsapp "github.com/chenyme/grok2api/backend/internal/application/operations"
 	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	inspectionhttp "github.com/chenyme/grok2api/backend/internal/transport/http/accountinspection"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
@@ -67,6 +68,7 @@ type Dependencies struct {
 	Gateway            *gateway.Service
 	Media              *mediaapp.Service
 	Settings           *settingsapp.Service
+	UpdateCheck        *updatecheckapp.Service
 	Egress             *egressapp.Service
 	EgressGroups       *egressgroupapp.Service
 	Registration       *registrationapp.Controller
@@ -171,7 +173,7 @@ func New(deps Dependencies) *gin.Engine {
 	if deps.Registration != nil {
 		registrationhttp.NewHandler(deps.Registration).Register(adminProtected)
 	}
-	systemhttp.NewHandler(deps.PublicAPIBaseURL).Register(adminProtected)
+	systemhttp.NewHandler(deps.PublicAPIBaseURL, deps.UpdateCheck).Register(adminProtected)
 
 	v1 := router.Group("/v1")
 	if deps.TrafficReady != nil {

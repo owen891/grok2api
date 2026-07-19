@@ -48,6 +48,21 @@ var (
 	ErrStaleEvidence = errors.New("账号在巡检后已变化，请复检后再应用")
 )
 
+// InvalidInputError preserves the validation reason for transport-specific
+// error codes while remaining compatible with errors.Is(ErrInvalidInput).
+type InvalidInputError struct {
+	Reason string
+}
+
+func (e *InvalidInputError) Error() string {
+	if e == nil || e.Reason == "" {
+		return ErrInvalidInput.Error()
+	}
+	return fmt.Sprintf("%s: %s", ErrInvalidInput, e.Reason)
+}
+
+func (e *InvalidInputError) Unwrap() error { return ErrInvalidInput }
+
 type StartInput struct {
 	Provider        account.Provider
 	ModelRouteID    uint64
@@ -205,7 +220,7 @@ func (s *Service) invalidStartInput(input *StartInput, reason string) error {
 	s.logger.Warn("account_inspection_invalid_start_input", "reason", reason, "provider", providerValue,
 		"model_route_id", modelRouteID, "mode", mode, "account_count", accountCount,
 		"classification_count", classificationCount, "concurrency", concurrency)
-	return fmt.Errorf("%w: %s", ErrInvalidInput, reason)
+	return &InvalidInputError{Reason: reason}
 }
 
 func (s *Service) resolveTargets(ctx context.Context, input StartInput) ([]account.Credential, error) {

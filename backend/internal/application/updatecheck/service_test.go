@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -49,6 +50,30 @@ func TestCheckFailureKeepsLastSuccessfulRelease(t *testing.T) {
 	second := service.Check(context.Background())
 	if first.Status != StatusUpToDate || second.Status != StatusCheckFailed || second.LatestVersion != "v3.0.0" || second.CheckedAt == nil || second.Error == "" {
 		t.Fatalf("first=%#v second=%#v", first, second)
+	}
+}
+
+func TestCheckIgnoresCallerCancellationForSharedRefresh(t *testing.T) {
+	requests := 0
+	var mu sync.Mutex
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Context().Err() != nil {
+			t.Fatalf("request context should not be cancelled")
+		}
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.1","body":"Release notes"}`)), Header: make(http.Header)}, nil
+	})}
+	service := NewService("v3.0.0", client)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	snapshot := service.Check(cancelled)
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if snapshot.Status != StatusUpdateAvailable || snapshot.LatestVersion != "v3.0.1" || !snapshot.UpdateAvailable {
+		t.Fatalf("snapshot=%#v", snapshot)
 	}
 }
 

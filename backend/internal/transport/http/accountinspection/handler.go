@@ -216,7 +216,15 @@ func newResultResponse(value inspectiondomain.Result) resultResponse {
 func (h *Handler) writeError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, inspectionapp.ErrInvalidInput):
-		response.Error(c, http.StatusBadRequest, "accountInspectionInvalidInput", err.Error())
+		var validation *inspectionapp.InvalidInputError
+		if errors.As(err, &validation) {
+			switch validation.Reason {
+			case "model_route_has_no_supported_accounts", "model_route_is_not_an_enabled_chat_route_for_provider", "provider_does_not_support_responses":
+				response.Error(c, http.StatusConflict, "accountInspectionModelUnavailable", "所选探测模型当前没有可用账号，请选择可用的文本模型或先同步账号")
+				return
+			}
+		}
+		response.Error(c, http.StatusBadRequest, "accountInspectionInvalidInput", "巡检范围或参数无效，请重新选择")
 	case errors.Is(err, inspectionapp.ErrNoTargets):
 		response.Error(c, http.StatusBadRequest, "accountInspectionNoTargets", err.Error())
 	case errors.Is(err, inspectionapp.ErrConflict), errors.Is(err, repository.ErrConflict):

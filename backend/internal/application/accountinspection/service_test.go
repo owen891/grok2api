@@ -114,6 +114,10 @@ func TestInspectionRejectsRouteWithNoSupportedAccounts(t *testing.T) {
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("error = %v", err)
 	}
+	var validation *InvalidInputError
+	if !errors.As(err, &validation) || validation.Reason != "model_route_has_no_supported_accounts" {
+		t.Fatalf("validation = %#v", err)
+	}
 }
 
 func TestInspectionRenewsRunLeaseWhileAutomaticActionIsBlocked(t *testing.T) {

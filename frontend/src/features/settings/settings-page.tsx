@@ -14,6 +14,7 @@ import { EgressNodes } from "@/features/settings/egress-nodes";
 import { EgressGroups } from "@/features/settings/egress-groups";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { isByteSizeUnit, isDurationUnit, type ByteSizeValue, type DurationValue } from "@/features/settings/settings-model";
+import { VersionUpdateSection } from "@/features/system/version-update";
 import { useSettings } from "@/features/settings/use-settings";
 import { ErrorState } from "@/shared/components/data-state";
 
@@ -202,6 +203,7 @@ export function SettingsPage() {
           </SettingsPane>
         </Tabs>
       ) : null}
+      <VersionUpdateSection />
     </form>
   );
 }

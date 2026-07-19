@@ -27,6 +27,8 @@ import (
 	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
 	replenishmentapp "github.com/chenyme/grok2api/backend/internal/application/replenishment"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
+	"github.com/chenyme/grok2api/backend/internal/buildinfo"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
@@ -388,6 +390,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		auditService.UpdateConfig(next.Audit.BatchSize, next.Audit.FlushInterval.Value())
 		clientKeyService.UpdateDefaults(next.ClientKeyDefaults.RPMLimit, next.ClientKeyDefaults.MaxConcurrent)
 	})
+	versionCheckService := updatecheckapp.NewService(buildinfo.CurrentVersion(), nil)
 
 	startup := newStartupState(len(windows))
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
@@ -397,7 +400,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	if cfg.Server.MetricsEnabled {
 		metricsHandler = observability.Handler()
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountInspections: accountInspectionService, AccountSync: accountSyncService, Models: modelService, Operations: operationsService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, EgressGroups: egressGroupService, Registration: registrationController, Metrics: metricsHandler})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountInspections: accountInspectionService, AccountSync: accountSyncService, Models: modelService, Operations: operationsService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, UpdateCheck: versionCheckService, Egress: egressService, EgressGroups: egressGroupService, Registration: registrationController, Metrics: metricsHandler})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
