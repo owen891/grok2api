@@ -19,6 +19,10 @@ import (
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
+func jsonResponse(status int, body string, request *http.Request) *http.Response {
+	return &http.Response{StatusCode: status, Status: http.StatusText(status), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}
+}
+
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
 }

@@ -128,3 +128,22 @@ func stringValue(value any) string {
 	result, _ := value.(string)
 	return result
 }
+
+func mergeBillingSnapshots(monthly, credits account.Billing) account.Billing {
+	if monthly.PlanCode == "" {
+		monthly.PlanCode = credits.PlanCode
+	}
+	if monthly.PlanName == "" {
+		monthly.PlanName = credits.PlanName
+	}
+	monthly.OnDemandCap = credits.OnDemandCap
+	monthly.OnDemandUsed = credits.OnDemandUsed
+	monthly.PrepaidBalance = credits.PrepaidBalance
+	monthly.CreditUsagePercent = credits.CreditUsagePercent
+	monthly.IsUnifiedBillingUser = credits.IsUnifiedBillingUser
+	monthly.TopUpMethod = credits.TopUpMethod
+	monthly.UsagePeriodType = credits.UsagePeriodType
+	monthly.UsagePeriodStart = credits.UsagePeriodStart
+	monthly.UsagePeriodEnd = credits.UsagePeriodEnd
+	return monthly
+}

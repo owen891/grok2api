@@ -61,6 +61,13 @@ func (a *Adapter) fallbackBaseURL() string {
 	return strings.TrimRight(config.NormalizeBuildFallbackBaseURL(a.config().FallbackBaseURL), "/")
 }
 
+func normalizedBuildRouteMode(credential account.Credential) account.BuildRouteMode {
+	if credential.Provider == account.ProviderBuild && credential.BuildRouteMode.IsValid() {
+		return credential.BuildRouteMode
+	}
+	return account.BuildRouteAuto
+}
+
 // isXAIInferenceFallbackCapable 判断该 Build API 操作是否可走 XAI 推理回退。
 // 生产探针（账号 954 / api.x.ai/v1）已验证：
 //

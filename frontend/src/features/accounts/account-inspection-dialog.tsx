@@ -79,12 +79,21 @@ export function AccountInspectionDialog({ provider, selectedIds }: Props) {
   });
 
   const startMutation = useMutation({
-    mutationFn: () => startAccountInspection({
-      provider, modelRouteId: effectiveModelRouteId, mode,
-      accountIds: mode === "selected" ? selectedIds : undefined,
-      classifications: mode === "recheck" ? [...classifications] : undefined,
-      includeDisabled, concurrency: Number(concurrency),
-    }),
+    mutationFn: () => {
+      if (!effectiveModelRouteId) throw new Error(t("accountInspection.noModel"));
+      const parsedConcurrency = Number(concurrency);
+      if (!Number.isInteger(parsedConcurrency) || parsedConcurrency < 1 || parsedConcurrency > 8) {
+        throw new Error(t("accountInspection.invalidConcurrency"));
+      }
+      if (mode === "selected" && selectedIds.length === 0) throw new Error(t("accountInspection.noSelectedAccounts"));
+      if (mode === "recheck" && classifications.size === 0) throw new Error(t("accountInspection.noClassifications"));
+      return startAccountInspection({
+        provider, modelRouteId: effectiveModelRouteId, mode,
+        accountIds: mode === "selected" ? selectedIds : undefined,
+        classifications: mode === "recheck" ? [...classifications] : undefined,
+        includeDisabled, concurrency: parsedConcurrency,
+      });
+    },
     onSuccess: (run) => {
       setRunId(run.id);
       setPage(1);
@@ -110,7 +119,7 @@ export function AccountInspectionDialog({ provider, selectedIds }: Props) {
   const run = detail?.run ?? runsQuery.data?.items.find((item) => item.id === effectiveRunId);
   const active = run?.status === "queued" || run?.status === "running";
   const pageCount = Math.max(1, Math.ceil((detail?.total ?? 0) / 100));
-  const canStart = effectiveModelRouteId !== "" && !(mode === "selected" && selectedIds.length === 0) && !(mode === "recheck" && classifications.size === 0);
+  const canStart = !modelsQuery.isPending && !modelsQuery.isError && effectiveModelRouteId !== "" && !(mode === "selected" && selectedIds.length === 0) && !(mode === "recheck" && classifications.size === 0);
 
   function openDialog() {
     setOpen(true);
@@ -158,8 +167,8 @@ export function AccountInspectionDialog({ provider, selectedIds }: Props) {
                 <div className="grid gap-5 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label>{t("accountInspection.model")}</Label>
-                    <Select value={effectiveModelRouteId} onValueChange={setModelRouteId} disabled={modelsQuery.isPending || probeModels.length === 0}>
-                      <SelectTrigger><SelectValue placeholder={modelsQuery.isPending ? t("common.loading") : t("accountInspection.noModel")} /></SelectTrigger>
+                    <Select value={effectiveModelRouteId} onValueChange={setModelRouteId} disabled={modelsQuery.isPending || modelsQuery.isError || probeModels.length === 0}>
+                      <SelectTrigger><SelectValue placeholder={modelsQuery.isPending ? t("common.loading") : modelsQuery.isError ? t("accountInspection.modelsLoadFailed") : t("accountInspection.noModel")} /></SelectTrigger>
                       <SelectContent>{probeModels.map((model) => <SelectItem key={model.id} value={model.id}>{model.publicId}</SelectItem>)}</SelectContent>
                     </Select>
                   </div>

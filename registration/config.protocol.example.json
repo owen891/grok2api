@@ -1,8 +1,11 @@
 {
   "//_readme": "Pure protocol registration worker configuration. Runtime paths are managed by Grok2API.",
   "engine": "protocol",
-  "email_provider": "yyds",
+  "email_provider": "tempmail_lol",
   "email_provider_fallbacks": [],
+  "tempmail_lol_api_base": "https://api.tempmail.lol/v2",
+  "tempmail_lol_domain": "",
+  "tempmail_lol_prefix": "xai",
   "yyds_api_key": "",
   "yyds_jwt": "",
   "tempmail_api_key": "",

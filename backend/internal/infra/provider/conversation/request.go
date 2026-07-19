@@ -249,6 +249,7 @@ func convertChatToolChoice(raw json.RawMessage) (json.RawMessage, error) {
 	return mustJSON(map[string]any{"type": "function", "name": function.Name}), nil
 }
 
+/*
 func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions, error) {
 	var request anthropicRequest
 	if err := json.Unmarshal(body, &request); err != nil {
@@ -853,6 +854,7 @@ func convertAnthropicToolChoice(choice anthropicToolChoice) (any, bool, error) {
 	}
 }
 
+*/
 func convertResponseFormat(raw json.RawMessage) (json.RawMessage, error) {
 	var format map[string]json.RawMessage
 	if json.Unmarshal(raw, &format) != nil {

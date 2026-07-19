@@ -54,8 +54,11 @@ func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, MaxConnsPerHost: 256, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
 	httpClient := &http.Client{Transport: transport}
 	// 官方 CLI 使用持久化机器身份。网关不采集机器指纹，改为每个后端
-	// 进程生成一个随机 UUID，在进程生命周期内作为统一 Agent 身份。
-	agentID := uuid.NewString()
+	// 进程生成一个随机 128-bit hex 身份，在进程生命周期内保持稳定。
+	agentID, err := randomHex(16)
+	if err != nil {
+		agentID = uuid.NewString()
+	}
 	return &Adapter{
 		cfg: cfg, http: httpClient, oauth: newOAuthClient(httpClient), cipher: cipher, base: transport,
 		agentID: agentID, modelsETags: make(map[uint64]string),
@@ -69,6 +72,18 @@ func (a *Adapter) SetEgress(manager *infraegress.Manager) {
 }
 
 func (a *Adapter) Provider() account.Provider { return account.ProviderBuild }
+
+func (a *Adapter) CredentialMetadata(credential account.Credential) provider.CredentialMetadata {
+	if credential.Provider != account.ProviderBuild || a.cipher == nil || credential.EncryptedAccessToken == "" {
+		return provider.CredentialMetadata{}
+	}
+	accessToken, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
+	if err != nil {
+		return provider.CredentialMetadata{}
+	}
+	value, ok := decodeJWTClaims(accessToken)["bot_flag_source"].(float64)
+	return provider.CredentialMetadata{BuildBotFlagged: ok && value == 1}
+}
 
 func (a *Adapter) UpdateConfig(cfg Config) {
 	a.cfgMu.Lock()
@@ -336,7 +351,7 @@ func (a *Adapter) NormalizeAccountModelCapabilities(models []string, billing *ac
 		if _, exists := seen[model]; exists {
 			continue
 		}
-		if model == buildVideoModel {
+		if model == "grok-imagine-video" {
 			if !paid {
 				continue
 			}
@@ -346,7 +361,7 @@ func (a *Adapter) NormalizeAccountModelCapabilities(models []string, billing *ac
 		result = append(result, model)
 	}
 	if paid && !hasVideo15 {
-		result = append(result, buildVideoModel)
+		result = append(result, "grok-imagine-video")
 	}
 	return result
 }
@@ -495,7 +510,10 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 	req.Header.Set("x-grok-client-mode", "headless")
 
 	if trace {
-		requestID := uuid.NewString()
+		requestID, err := randomHex(16)
+		if err != nil {
+			return err
+		}
 		sessionID, err := grokSessionID(promptCacheKey)
 		if err != nil {
 			return err
@@ -503,12 +521,23 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 		req.Header.Set("x-authenticateresponse", "authenticate-response")
 		req.Header.Set("x-grok-agent-id", a.agentID)
 		req.Header.Set("x-grok-session-id", sessionID)
-		req.Header.Set("x-grok-conv-id", sessionID)
+		conversationID := strings.TrimSpace(promptCacheKey)
+		if conversationID == "" {
+			conversationID = sessionID
+		}
+		req.Header.Set("x-grok-conv-id", conversationID)
 		req.Header.Set("x-grok-req-id", requestID)
+		req.Header.Set("x-grok-client-surface", "tui")
+		req.Header.Set("x-grok-client-name", cfg.ClientIdentifier)
+		req.Header.Set("x-grok-conversation-id", conversationID)
+		req.Header.Set("x-grok-request-id", requestID)
+		req.Header.Set("x-grok-session-id-legacy", sessionID)
+		req.Header.Set("tracestate", "")
 		// 网关无法从无状态 API 请求可靠恢复 CLI prompt index；该字段在
 		// 官方协议中可选，因此不伪造 x-grok-turn-idx。
 		if credential.UserID != "" {
 			req.Header.Set("x-grok-user-id", credential.UserID)
+			req.Header.Set("x-userid", credential.UserID)
 		}
 		traceID, traceErr := randomHex(16)
 		if traceErr != nil {

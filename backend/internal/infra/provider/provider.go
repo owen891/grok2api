@@ -19,7 +19,24 @@ var (
 	ErrAuthorizationDenied  = errors.New("authorization denied")
 	ErrCredentialLimit      = errors.New("credential count exceeds limit")
 	ErrUnauthorized         = errors.New("upstream credential unauthorized")
+	ErrBirthDateAlreadySet  = errors.New("upstream birth date is already set")
 )
+
+// HTTPStatusError preserves an upstream HTTP status when no Response is available.
+type HTTPStatusError interface {
+	error
+	HTTPStatusCode() int
+}
+
+// ErrorHTTPStatus extracts an upstream HTTP status from an error chain.
+func ErrorHTTPStatus(err error) (int, bool) {
+	var statusError HTTPStatusError
+	if !errors.As(err, &statusError) {
+		return 0, false
+	}
+	status := statusError.HTTPStatusCode()
+	return status, status > 0
+}
 
 // MediaPostProcessingStage 标识媒体已经生成后失败的本地处理阶段。
 type MediaPostProcessingStage string
@@ -132,6 +149,7 @@ func (e *CredentialRefreshError) Unwrap() error {
 // ResponseResourceRequest 表示对 Responses 资源端点的通用上游请求。
 type ResponseResourceRequest struct {
 	Credential     account.Credential
+	Billing        *account.Billing
 	Method         string
 	Path           string
 	Body           []byte
@@ -145,11 +163,35 @@ type ResponseResourceRequest struct {
 
 // Response 表示尚未写入下游的上游响应。
 type Response struct {
-	StatusCode int
-	Status     string
-	Header     http.Header
-	Body       io.ReadCloser
-	QuotaUnits int
+	StatusCode          int
+	Status              string
+	Header              http.Header
+	Body                io.ReadCloser
+	QuotaUnits          int
+	UpstreamURL         string
+	Diagnostic          *DiagnosticResponse
+	ModelCatalogChanged bool
+}
+
+const MaxDiagnosticBodyBytes = 64 << 10
+
+type DiagnosticResponse struct {
+	StatusCode    int
+	Status        string
+	Header        http.Header
+	Body          []byte
+	BodyTruncated bool
+}
+
+func ReadDiagnosticBody(body io.Reader) ([]byte, bool, error) {
+	if body == nil {
+		return nil, false, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(body, MaxDiagnosticBodyBytes+1))
+	if len(data) <= MaxDiagnosticBodyBytes {
+		return data, false, err
+	}
+	return data[:MaxDiagnosticBodyBytes], true, err
 }
 
 // DeviceAuthorization 表示 Device OAuth 启动结果。
@@ -215,6 +257,8 @@ type ImageEditRequest struct {
 
 type VideoRequest struct {
 	Credential    account.Credential
+	Billing       *account.Billing
+	JobID         string
 	Prompt        string
 	Duration      int
 	AspectRatio   string
@@ -226,6 +270,16 @@ type VideoRequest struct {
 type VideoResult struct {
 	URL         string
 	ContentType string
+	AssetID     string
+}
+
+type CredentialMetadata struct {
+	BuildBotFlagged bool
+}
+
+type CredentialMetadataAdapter interface {
+	Adapter
+	CredentialMetadata(credential account.Credential) CredentialMetadata
 }
 
 // RefreshedCredential 表示 OAuth 刷新后的旋转凭据。

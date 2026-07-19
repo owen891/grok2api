@@ -388,14 +388,19 @@ class BrowserSession:
         parts = [part for part in endpoint.path.split("/") if part]
         # /rest/app-chat/conversations/new starts a clean, temporary chat.
         if parts[-1] == "new":
-            new_chat = self._first_visible(
-                driver,
-                "a[data-testid='new-chat'], a[href='/'], a[href='/chat'], "
-                "[aria-label*='New chat' i], [aria-label*='New conversation' i]",
-            )
-            if new_chat is not None:
-                new_chat.click()
-                time.sleep(0.6)
+            # The shell may still have a full-page hydration layer over the
+            # Home/New Chat link. Selenium's native click then raises
+            # ElementClickInterceptedException and blocks the whole worker
+            # request until the Go-side probe timeout. Navigating to the
+            # canonical root is equivalent for a new temporary conversation
+            # and lets the page finish its own routing without a fragile DOM
+            # click.
+            root = str(value["baseURL"]).rstrip("/") + "/"
+            if str(driver.current_url or "") != root:
+                driver.get(root)
+                self._wait_for_challenge(driver, 45)
+            self._dismiss_tos_gate(driver)
+            time.sleep(0.6)
             return
         # A response resource names the upstream conversation directly.  Grok's
         # normal conversation route preserves the visible context before typing.

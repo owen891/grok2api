@@ -320,7 +320,7 @@ func (c *streamConverter) start() error {
 		"type": "message_start", "message": map[string]any{
 			"id": anthropicMessageID(c.id), "type": "message", "role": "assistant",
 			"model": c.model, "content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-			"usage": anthropicUsage(c.usage),
+			"usage": anthropicUsage(c.usage, 0),
 		},
 	})
 }
@@ -347,52 +347,53 @@ func (c *streamConverter) textDelta(delta string) error {
 	return c.writeEvent("content_block_delta", map[string]any{"type": "content_block_delta", "index": c.textIndex, "delta": map[string]any{"type": "text_delta", "text": emit}})
 }
 
-func (c *streamConverter) thinkingStart(itemID string) error {
-	if !c.options.AnthropicThinking || c.thinkingStarted {
-		return nil
-	}
-	if err := c.start(); err != nil {
-		return err
-	}
-	c.thinkingStarted = true
-	c.thinkingIndex = c.nextIndex
-	c.nextIndex++
-	c.thinkingItemID = itemID
-	return c.writeEvent("content_block_start", map[string]any{
-		"type": "content_block_start", "index": c.thinkingIndex,
-		"content_block": map[string]any{"type": "thinking", "thinking": ""},
-	})
-}
-
-func (c *streamConverter) thinkingDelta(delta string) error {
-	if c.operation != OperationMessages || !c.options.AnthropicThinking {
-		return nil
-	}
-	if err := c.thinkingStart(""); err != nil {
-		return err
-	}
-	return c.writeEvent("content_block_delta", map[string]any{
-		"type": "content_block_delta", "index": c.thinkingIndex,
-		"delta": map[string]any{"type": "thinking_delta", "thinking": delta},
-	})
-}
-
-func (c *streamConverter) thinkingDone(item responseItem) error {
-	if c.operation != OperationMessages || !c.options.AnthropicThinking || !c.thinkingStarted || c.thinkingClosed {
-		return nil
-	}
-	if item.Encrypted != "" {
-		if err := c.writeEvent("content_block_delta", map[string]any{
-			"type": "content_block_delta", "index": c.thinkingIndex,
-			"delta": map[string]any{"type": "signature_delta", "signature": item.Encrypted},
-		}); err != nil {
+/*
+	func (c *streamConverter) thinkingStart(itemID string) error {
+		if !c.options.AnthropicThinking || c.thinkingStarted {
+			return nil
+		}
+		if err := c.start(); err != nil {
 			return err
 		}
+		c.thinkingStarted = true
+		c.thinkingIndex = c.nextIndex
+		c.nextIndex++
+		c.thinkingItemID = itemID
+		return c.writeEvent("content_block_start", map[string]any{
+			"type": "content_block_start", "index": c.thinkingIndex,
+			"content_block": map[string]any{"type": "thinking", "thinking": ""},
+		})
 	}
-	c.thinkingClosed = true
-	return c.writeEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": c.thinkingIndex})
-}
 
+	func (c *streamConverter) thinkingDelta(delta string) error {
+		if c.operation != OperationMessages || !c.options.AnthropicThinking {
+			return nil
+		}
+		if err := c.thinkingStart(""); err != nil {
+			return err
+		}
+		return c.writeEvent("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": c.thinkingIndex,
+			"delta": map[string]any{"type": "thinking_delta", "thinking": delta},
+		})
+	}
+
+	func (c *streamConverter) thinkingDone(item responseItem) error {
+		if c.operation != OperationMessages || !c.options.AnthropicThinking || !c.thinkingStarted || c.thinkingClosed {
+			return nil
+		}
+		if item.Encrypted != "" {
+			if err := c.writeEvent("content_block_delta", map[string]any{
+				"type": "content_block_delta", "index": c.thinkingIndex,
+				"delta": map[string]any{"type": "signature_delta", "signature": item.Encrypted},
+			}); err != nil {
+				return err
+			}
+		}
+		c.thinkingClosed = true
+		return c.writeEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": c.thinkingIndex})
+	}
+*/
 func (c *streamConverter) chatDelta(delta map[string]any) error {
 	if err := c.start(); err != nil {
 		return err
@@ -480,6 +481,9 @@ func (c *streamConverter) done(status string) error {
 	if err := c.start(); err != nil {
 		return err
 	}
+	if c.operation == OperationMessages {
+		return c.doneMessages(status)
+	}
 	if c.operation == OperationChat {
 		finishReason := "stop"
 		if len(c.tools) > 0 {
@@ -547,6 +551,7 @@ func (c *streamConverter) done(status string) error {
 	return c.writeEvent("message_stop", map[string]any{"type": "message_stop"})
 }
 
+/*
 func (c *streamConverter) textDeltaWithoutFilter(delta string) error {
 	if delta == "" {
 		return nil
@@ -561,6 +566,7 @@ func (c *streamConverter) textDeltaWithoutFilter(delta string) error {
 	}
 	return c.writeEvent("content_block_delta", map[string]any{"type": "content_block_delta", "index": c.textIndex, "delta": map[string]any{"type": "text_delta", "text": delta}})
 }
+*/
 
 func (c *streamConverter) streamError(data []byte) error {
 	c.finished = true
@@ -599,6 +605,7 @@ func (c *streamConverter) writeEvent(event string, value any) error {
 	return err
 }
 
+/*
 type anthropicStreamStopFilter struct {
 	sequences []string
 	pending   string
@@ -661,6 +668,7 @@ func (f *anthropicStreamStopFilter) Flush() string {
 	f.pending = ""
 	return value
 }
+*/
 
 func consumeSSE(source io.Reader, handle func(string, []byte) error) error {
 	reader := bufio.NewReaderSize(source, 64<<10)

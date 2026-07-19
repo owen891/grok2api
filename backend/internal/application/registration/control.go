@@ -1196,8 +1196,9 @@ func (c *Controller) forceSafeWorkerSettings(value map[string]any) {
 	}
 	value["engine"] = engine
 	delete(value, "protocol_fallback_browser")
+	delete(value, "protocol_email_backend")
 	if !isSupportedEmailProvider(stringValue(value["email_provider"], "")) {
-		value["email_provider"] = "yyds"
+		value["email_provider"] = "tempmail_lol"
 	}
 	fallbacks := make([]string, 0)
 	for _, provider := range stringSlice(value["email_provider_fallbacks"]) {
@@ -1468,7 +1469,7 @@ func settingsView(value map[string]any) WorkerSettings {
 	return WorkerSettings{
 		Engine:                 normalizedRegistrationEngine(stringValue(value["engine"], registrationEngineProtocol)),
 		EmailSources:           emailSourcesView(value),
-		EmailProvider:          stringValue(value["email_provider"], "yyds"),
+		EmailProvider:          stringValue(value["email_provider"], "tempmail_lol"),
 		EmailProviderFallbacks: stringSlice(value["email_provider_fallbacks"]),
 		TempmailLolAPIBase:     stringValue(value["tempmail_lol_api_base"], "https://api.tempmail.lol/v2"),
 		TempmailLolDomain:      stringValue(value["tempmail_lol_domain"], ""),
@@ -1618,7 +1619,7 @@ func readStoredEmailSources(value map[string]any) []storedEmailSource {
 		}
 	}
 
-	providers := append([]string{stringValue(value["email_provider"], "yyds")}, stringSlice(value["email_provider_fallbacks"])...)
+	providers := append([]string{stringValue(value["email_provider"], "tempmail_lol")}, stringSlice(value["email_provider_fallbacks"])...)
 	sources := make([]storedEmailSource, 0, len(providers))
 	for index, provider := range providers {
 		provider = strings.TrimSpace(provider)
@@ -1643,7 +1644,7 @@ func readStoredEmailSources(value map[string]any) []storedEmailSource {
 		sources = append(sources, source)
 	}
 	if len(sources) == 0 {
-		sources = append(sources, storedEmailSource{ID: "source-1", Type: "yyds", Enabled: true, APIBase: defaultEmailAPIBase("yyds")})
+		sources = append(sources, storedEmailSource{ID: "source-1", Type: "tempmail_lol", Enabled: true, APIBase: defaultEmailAPIBase("tempmail_lol")})
 	}
 	return sources
 }

@@ -178,6 +178,7 @@ func chatResponse(value parsedResponse) map[string]any {
 	}
 }
 
+/*
 func messagesResponse(value parsedResponse, options ResponseOptions) map[string]any {
 	content := make([]any, 0, len(value.Calls)+2)
 	if options.AnthropicThinking && (value.Reasoning != "" || value.Signature != "") {
@@ -266,6 +267,7 @@ func nullableAnthropicString(value string) any {
 	return value
 }
 
+*/
 func chatUsage(value responseUsage) map[string]any {
 	return map[string]any{
 		"prompt_tokens": value.InputTokens, "completion_tokens": value.OutputTokens,
@@ -275,6 +277,7 @@ func chatUsage(value responseUsage) map[string]any {
 	}
 }
 
+/*
 func anthropicUsage(value responseUsage) map[string]any {
 	return map[string]any{
 		"input_tokens": value.InputTokens, "output_tokens": value.OutputTokens,
@@ -282,6 +285,8 @@ func anthropicUsage(value responseUsage) map[string]any {
 	}
 }
 
+*/
+/*
 func anthropicErrorJSON(value any) []byte {
 	message := "Upstream request failed"
 	errorType := "api_error"
@@ -324,3 +329,4 @@ func normalizeAnthropicErrorType(object map[string]any) string {
 	}
 	return "api_error"
 }
+*/

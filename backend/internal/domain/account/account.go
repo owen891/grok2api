@@ -62,6 +62,18 @@ const (
 	WebTierHeavy WebTier = "heavy"
 )
 
+type BuildRouteMode string
+
+const (
+	BuildRouteAuto  BuildRouteMode = "auto"
+	BuildRouteBuild BuildRouteMode = "build"
+	BuildRouteXAI   BuildRouteMode = "xai"
+)
+
+func (m BuildRouteMode) IsValid() bool {
+	return m == BuildRouteAuto || m == BuildRouteBuild || m == BuildRouteXAI
+}
+
 const (
 	DefaultPriority         = 1
 	DefaultMaxConcurrent    = 8
@@ -115,6 +127,9 @@ type Credential struct {
 	LinkedAccountID       uint64
 	LinkedAccountName     string
 	LinkedProvider        Provider
+	BuildAPIFallback      bool
+	BuildSuperEntitled    bool
+	BuildRouteMode        BuildRouteMode
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 }
@@ -206,6 +221,17 @@ type Billing struct {
 	BillingPeriodEnd     string
 	History              []BillingHistoryEntry
 	SyncedAt             time.Time
+}
+
+func (b Billing) IsPaid() bool {
+	return b.PlanCode != "" || b.PlanName != "" || b.MonthlyLimit > 0 || b.OnDemandCap > 0 || b.OnDemandUsed > 0 || b.PrepaidBalance > 0
+}
+
+func IsBuildSuper(credential Credential, billing *Billing) bool {
+	if credential.Provider != ProviderBuild {
+		return false
+	}
+	return credential.BuildSuperEntitled || (billing != nil && billing.IsPaid())
 }
 
 // PeriodEnd 返回上游账期结束时间，无法解析时返回 false。

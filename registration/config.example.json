@@ -4,9 +4,7 @@
   "// ===== 邮箱：注册验证码来源 =====": "",
   "// email_provider": "cloudmail | cloudflare | duckmail | yyds。推荐自建 cloudmail。",
   "email_provider": "tempmail_lol",
-  "email_provider_fallbacks": [
-    "yyds"
-  ],
+  "email_provider_fallbacks": [],
   "// tempmail_lol_api_base": "TempMail.lol API base，免费接口无需 API key",
   "tempmail_lol_api_base": "https://api.tempmail.lol/v2",
   "// tempmail_lol_domain": "留空使用 TempMail.lol 随机域名；自定义域名需要账户权限",

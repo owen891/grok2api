@@ -244,7 +244,7 @@ class YydsCodeReceiver:
         raise TimeoutError("YYDS 邮箱验证码超时（未找到有效 xAI 验证码）")
 
 def make_email(cfg: dict[str, Any], backend: str):
-    backend = (backend or "yyds").strip().lower()
+    backend = (backend or "tempmail_lol").strip().lower()
     if backend in {"yyds", "mail_yyds"}:
         if not cfg.get("yyds_api_key") and not cfg.get("yyds_jwt"):
             raise RuntimeError("config 缺少 yyds_api_key / yyds_jwt")

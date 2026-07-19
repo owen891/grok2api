@@ -115,7 +115,8 @@ export function RegistrationPage() {
 
   function addEmailSource(): void {
     if (!settings || settings.emailSources.length >= 2) return;
-    const type: EmailSourceDTO["type"] = settings.emailSources.some((source) => source.type === "tempmail_lol") ? "yyds" : "tempmail_lol";
+    if (settings.emailSources.some((source) => source.type === "tempmail_lol")) return;
+    const type: EmailSourceDTO["type"] = "tempmail_lol";
     const nextID = Array.from({ length: 10 }, (_, index) => `source-new-${index + 1}`).find((id) => !settings.emailSources.some((source) => source.id === id)) ?? "source-new";
     const source: EmailSourceDTO = {
       id: nextID,

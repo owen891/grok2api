@@ -24,6 +24,7 @@ const (
 	DefaultStatsigSignerURL       = "https://grok.wodf.de/sign"
 	RecommendedBuildClientVersion = "0.2.99"
 	RecommendedBuildUserAgent     = "grok-shell/0.2.99 (linux; x86_64)"
+	DefaultBuildFallbackBaseURL   = "https://api.x.ai/v1"
 
 	maxServerBodyBytes    = 256 << 20
 	maxRequestTimeout     = 24 * time.Hour
@@ -35,6 +36,14 @@ const (
 	maxAuditBufferSize    = 262144
 	maxAuditBatchSize     = 4096
 )
+
+func NormalizeBuildFallbackBaseURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return DefaultBuildFallbackBaseURL
+	}
+	return strings.TrimRight(value, "/")
+}
 
 // Config 表示后端运行配置。
 type Config struct {
