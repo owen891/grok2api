@@ -7,6 +7,36 @@
       "date": "2026-07-19",
       "entries": [
         {
+          "type": "feature",
+          "zh": "完成内置版本更新中心：新增后端版本查询与手动检查接口，首页横幅和设置页均可展示当前版本、最新版本和发布说明。",
+          "en": "Completed the built-in update center with backend version/check endpoints plus dashboard and Settings UI for current/latest versions and release notes."
+        },
+        {
+          "type": "improvement",
+          "zh": "账号巡检启动前会重新读取可用模型；后端区分模型不可用、参数无效和任务冲突，避免使用过期模型路由导致失败。",
+          "en": "Account inspection now refreshes available models before starting and distinguishes unavailable models, invalid input, and active-task conflicts."
+        },
+        {
+          "type": "fix",
+          "zh": "修复 Grok Web 浏览器 worker 在页面水合、遮罩或元素失效时发送按钮偶发无法点击的问题，增加可见性检测、重试和 JavaScript 回退。",
+          "en": "Fixed intermittent Grok Web browser-worker send failures during hydration, overlays, or stale elements with visibility checks, retries, and a JavaScript fallback."
+        },
+        {
+          "type": "fix",
+          "zh": "修复 TLS 出口响应 Trailer 延迟填充丢失，以及 Web Provider 错误响应缺少 Request 时可能触发空指针的问题。",
+          "en": "Fixed deferred TLS egress trailer propagation and prevented a nil request panic when building Web Provider error response URLs."
+        },
+        {
+          "type": "fix",
+          "zh": "改进本地媒体临时文件清理：失败时保留已提交图片、再次尝试清理并记录可诊断日志。",
+          "en": "Improved local-media temporary-file cleanup by preserving committed images, retrying cleanup, and logging actionable failures."
+        },
+        {
+          "type": "fix",
+          "zh": "修复不安全 HTTP 环境下复制失败的问题，并修复客户端密钥再次查看时未显示实际密钥的界面问题。",
+          "en": "Fixed clipboard fallback in insecure HTTP contexts and restored the actual client key value when viewing a created key again."
+        },
+        {
           "type": "security",
           "zh": "升级 quic-go 与 pgx 到官方修复版本，消除 HTTP/3 QPACK 内存耗尽和 PostgreSQL 占位符 SQL 注入风险。",
           "en": "Updated quic-go and pgx to patched releases, eliminating the HTTP/3 QPACK memory exhaustion and PostgreSQL placeholder SQL injection risks."
@@ -18,8 +48,8 @@
         },
         {
           "type": "improvement",
-          "zh": "合入低风险上游稳定性修复，增强账号检查、浏览器操作、上游请求头隔离、媒体清理和剪贴板回退的可靠性。",
-          "en": "Integrated low-risk upstream stability fixes for account inspection, browser interactions, upstream header isolation, media cleanup, and clipboard fallback behavior."
+          "zh": "完善版本检查共享请求的取消隔离、前端中英文错误提示和发布信息展示，降低网络波动或旧数据造成的误报。",
+          "en": "Improved cancellation isolation for shared version checks plus Chinese/English error messaging and release display to reduce false failures from network or stale data."
         },
         {
           "type": "feature",
