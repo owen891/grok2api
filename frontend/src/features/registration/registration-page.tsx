@@ -333,15 +333,25 @@ export function RegistrationPage() {
                 </div>
 
                 <div className="grid gap-4 border-t pt-5 sm:grid-cols-2">
-                  <SelectField label={t("registration.captchaSolver")} value={settings.captchaSolver} disabled={busy} options={[
-                    { value: "local", label: t("registration.captchaLocal") },
-                    { value: "yescaptcha", label: t("registration.captchaYes") },
-                  ]} onChange={(value) => updateDraft("captchaSolver", value)} />
-                  {settings.captchaSolver === "local" ? (
-                    <TextField label={t("registration.captchaEndpoint")} value={settings.captchaEndpoint} disabled={busy} placeholder="docker://grokcli-2api:5072" onChange={(value) => updateDraft("captchaEndpoint", value)} />
-                  ) : (
-                    <SecretField label={t("registration.yescaptchaApiKey")} value={settings.yescaptchaApiKey} configured={settings.yescaptchaApiKeyConfigured} disabled={busy} onChange={(value) => updateDraft("yescaptchaApiKey", value)} />
-                  )}
+                  <SelectField label={t("registration.engine")} value={settings.engine} disabled={busy} options={[
+                    { value: "protocol", label: t("registration.engineProtocol") },
+                    { value: "browser", label: t("registration.engineBrowser") },
+                  ]} onChange={(value) => {
+                    updateDraft("engine", value);
+                  }} />
+                  {settings.engine === "protocol" ? (
+                    <>
+                      <SelectField label={t("registration.captchaSolver")} value={settings.captchaSolver} disabled={busy} options={[
+                        { value: "local", label: t("registration.captchaLocal") },
+                        { value: "yescaptcha", label: t("registration.captchaYes") },
+                      ]} onChange={(value) => updateDraft("captchaSolver", value)} />
+                      {settings.captchaSolver === "local" ? (
+                        <TextField label={t("registration.captchaEndpoint")} value={settings.captchaEndpoint} disabled={busy} placeholder="docker://grokcli-2api:5072" onChange={(value) => updateDraft("captchaEndpoint", value)} />
+                      ) : (
+                        <SecretField label={t("registration.yescaptchaApiKey")} value={settings.yescaptchaApiKey} configured={settings.yescaptchaApiKeyConfigured} disabled={busy} onChange={(value) => updateDraft("yescaptchaApiKey", value)} />
+                      )}
+                    </>
+                  ) : null}
                   <SelectField label={t("registration.proxyGroup")} value={settings.proxyGroupId || "direct"} disabled={busy} options={[{ value: "direct", label: t("registration.direct") }, ...(proxyGroupsQuery.data?.items ?? []).filter((group) => group.enabled && group.scope === (startInput.accountType === "web" ? "grok_web" : "grok_build")).map((group) => ({ value: group.id, label: `${group.name} (${group.enabledMembers}/${group.memberCount})` }))]} onChange={(value) => updateDraft("proxyGroupId", value === "direct" ? "" : value)} />
                   <TextField label={t("registration.proxy")} value={settings.proxy} disabled={busy || Boolean(settings.proxyGroupId)} placeholder={settings.proxyGroupId ? t("registration.proxyFromGroup") : t("registration.direct")} onChange={(value) => updateDraft("proxy", value)} />
                 </div>

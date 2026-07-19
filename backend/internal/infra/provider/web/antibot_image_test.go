@@ -42,6 +42,9 @@ func TestExtractCapturedImageCandidatesFromUUID(t *testing.T) {
 	if !strings.Contains(joined, "img_abc123") {
 		t.Fatalf("candidates missing uuid: %v", candidates)
 	}
+	if candidates[0] != "https://imagine-public.x.ai/imagine-public/images/img_abc123.jpg" {
+		t.Fatalf("preferred UUID candidate = %q", candidates[0])
+	}
 }
 
 func TestCollectCapturedImageURLsAcceptsFinalAsset(t *testing.T) {
@@ -68,5 +71,34 @@ func TestCollectCapturedImageURLsRejectsPartFrames(t *testing.T) {
 	collectCapturedImageURLs(payload, &results)
 	if len(results) != 0 {
 		t.Fatalf("part frame should be rejected: %v", results)
+	}
+}
+
+func TestInspectLiteCaptureDetectsModeratedFinalImage(t *testing.T) {
+	payload := []byte(`{"result":{"response":{"cardAttachment":{"jsonData":"{\"image_chunk\":{\"imageUuid\":\"img_blocked\",\"imageUrl\":\"users/test/generated/blocked/image.jpg\",\"progress\":100,\"moderated\":true}}"}}}}`)
+	diagnostics := inspectLiteCapture(payload)
+	if !diagnostics.Moderated || diagnostics.MaxProgress != 100 || diagnostics.ImageURLs != 1 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestLiteImagePolicyRefusalRequiresTerminalTextOnlyResponse(t *testing.T) {
+	terminal := liteCaptureDiagnostics{SoftStop: true}
+	for _, text := range []string{
+		"I can't assist with that request because it violates the content policy.",
+		"抱歉，无法生成这张图片。",
+	} {
+		if !isLiteImagePolicyRefusal(terminal, text) {
+			t.Fatalf("expected policy refusal for %q", text)
+		}
+	}
+	if isLiteImagePolicyRefusal(liteCaptureDiagnostics{}, "I can't assist with that request") {
+		t.Fatal("non-terminal response must remain retryable")
+	}
+	if isLiteImagePolicyRefusal(liteCaptureDiagnostics{SoftStop: true, ImageChunks: 1}, "content policy") {
+		t.Fatal("response containing image chunks must use image moderation metadata")
+	}
+	if isLiteImagePolicyRefusal(terminal, "The image service returned no artifact") {
+		t.Fatal("generic incomplete response must remain retryable")
 	}
 }

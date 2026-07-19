@@ -45,6 +45,16 @@ func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
 		if !ok {
 			raw = strings.TrimSpace(c.GetHeader("X-API-Key"))
 		}
+		if isImageJobPoll(c.Request) {
+			value, err := service.AuthenticateForPolling(c.Request.Context(), raw)
+			if err != nil {
+				writeOpenAIError(c, clientErrorStatus(err), clientErrorCode(err), clientErrorMessage(err))
+				return
+			}
+			c.Set(ClientKey, value)
+			c.Next()
+			return
+		}
 		value, release, err := service.Authenticate(c.Request.Context(), raw)
 		if err != nil {
 			writeOpenAIError(c, clientErrorStatus(err), clientErrorCode(err), clientErrorMessage(err))
@@ -54,6 +64,10 @@ func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
 		c.Set(ClientKey, value)
 		c.Next()
 	}
+}
+
+func isImageJobPoll(request *http.Request) bool {
+	return request != nil && request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/v1/images/image_")
 }
 
 func bearerToken(header string) (string, bool) {

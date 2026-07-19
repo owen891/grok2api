@@ -27,7 +27,7 @@ Grok2API 是一个纯 Go 实现的 Grok API 网关。本二开版本在原有多
 - **标准兼容接口**：Responses、Chat Completions、Images、异步 Videos、Anthropic Messages
 - **多账号调度**：优先级、并发限制、额度门控、会话粘滞、冷却、恢复与故障切换
 - **账号接入与转换**：Device OAuth、OAuth JSON、SSO JSON、逐行 SSO Token，以及 Web SSO 到 Build 的转换链路
-- **注册体系**：内置注册控制器、协议注册流程、CPA/OIDC 导出、结果接管和后台管理入口
+- **注册体系**：内置协议/浏览器双引擎注册控制器、CPA/OIDC 导出、结果接管和后台管理入口
 - **聊天与操作台**：前端内置 Chat 工作区、注册页、图库页、视频图库页和 API 文档页
 - **媒体能力**：图片生成、图片编辑、视频生成、图片任务归档与 URL/Base64 返回
 - **Web 浏览器链路**：持久 Chromium 会话、browser worker、Statsig 预热与签名缓存、辅助校验适配
@@ -117,6 +117,17 @@ docker compose up -d
 `docker compose pull` 使用官方镜像；`docker compose build` 才会包含当前工作树的后端、前端和注册 worker 改动。
 
 注册 worker 的服务器代理通过 Compose 环境变量配置：直连时保持 `REGISTRATION_PROXY=`；宿主机代理使用 `http://host.docker.internal:PORT`；Compose 内代理使用服务名。也可以设置 `REGISTRATION_PROXY=system`，并提供 `REGISTRATION_HTTPS_PROXY`、`REGISTRATION_HTTP_PROXY` 或 `REGISTRATION_ALL_PROXY`。这些注册专用变量不会改变其他 Provider 的出口。容器内的 `127.0.0.1` 指向容器自身，不代表服务器宿主机。
+
+浏览器注册使用单独的 `browser-runtime` 镜像 target，默认 API 镜像仍只包含协议注册依赖。Linux 本地构建时运行：
+
+```bash
+docker compose -f docker-compose.yml -f compose.browser-registration.yml build grok2api
+docker compose -f docker-compose.yml -f compose.browser-registration.yml up -d
+```
+
+然后在注册设置中将 `engine` 切为 `browser`。容器以 `DISPLAY=:99` 启动 Xvfb，并用非 headless Chromium 后台运行。HTTP(S) 认证代理由临时 MV3 扩展处理；认证 SOCKS 代理必须先经本地 relay 转成无认证端口。Browser preflight 会通过同一注册代理检查出口 IP、注册页和邮箱 API；出口检查默认使用 `https://api64.ipify.org?format=json`，可用 `REGISTRATION_PREFLIGHT_EGRESS_URL` 覆盖。回滚只需把 `engine` 改回 `protocol`，标准镜像不需要 Chromium。
+
+Browser 注册支持与 Protocol 相同的账号类型选择。`Build` 在同一注册线程内完成 OAuth、CPA hotload 和首次同步；`Web` 读取 SSO 后写入 `grok_web` 凭据、导入并完成首次同步，可选 `autoNSFW`。每个已拿到 SSO 的账号最多按 `cpa_mint_retry_attempts` 重试；耗尽后凭据写入数据目录下权限受限的 `browser_pending_oauth.json`，下次相同账号类型的 browser run 会优先 resume，不会重新注册替代账号。收到 `SIGINT`/`SIGTERM` 后 worker 会停止领取新账号、保留已注册账号的 pending 凭据状态并回收浏览器。`browser_state.json` 的 `resumable` 表示当前账号类型待恢复数量；`browser_metrics.json` 只保存阶段和资源统计，不写密码、SSO 或 Cookie。
 
 官方镜像已经包含前端构建产物，管理端与 API 由同一个 Go 服务提供。Compose 默认将 `config.yaml` 只读挂载到容器，并使用 `grok2api-data` 命名卷保存 SQLite 数据库和本地媒体。
 

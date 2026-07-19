@@ -115,6 +115,7 @@ function testGatewayErrorClassificationUsesStableCodes(): void {
   assert.equal(classifyGatewayError(403, { error: { code: "model_not_allowed" } }, "failed").class, "model");
   assert.equal(classifyGatewayError(429, { error: { code: "upstream_quota_exhausted" } }, "failed").class, "quota");
   assert.equal(classifyGatewayError(429, { error: { code: "usage_limit_reached" } }, "failed").class, "quota");
+  assert.equal(classifyGatewayError(400, { error: { code: "image_moderated" } }, "failed").class, "moderation");
   assert.equal(classifyGatewayError(503, { error: { code: "egress_unavailable" } }, "failed").class, "egress");
   assert.equal(classifyGatewayError(401, { error: { code: "invalid_api_key" } }, "failed").class, "auth");
   assert.equal(classifyGatewayError(403, { error: { code: "upstream_forbidden" } }, "failed").class, "upstream");

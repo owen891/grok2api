@@ -14,11 +14,13 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/media"
 	"github.com/chenyme/grok2api/backend/internal/domain/model"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
 const (
 	imageJobTimeout        = 30 * time.Minute
+	imageJobLease          = media.ImageJobRecoveryTimeout
 	maxImageJobOutputBytes = int64(128 << 20)
 )
 
@@ -59,8 +61,11 @@ func (s *Service) CreateImageJob(ctx context.Context, input AsyncImageInput) (me
 		return media.Job{}, err
 	}
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+	routingTrace := newRoutingTrace(route.ID, route.Provider, route.UpstreamModel, quotaMode)
+	ctx = withRoutingTrace(ctx, routingTrace)
 	lease, err := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
 	if err != nil {
+		s.requestCapacityReplenishment(ctx, route.Provider, route.UpstreamModel, quotaMode, err)
 		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
 	}
 	credential := lease.Credential
@@ -95,7 +100,7 @@ func (s *Service) CreateImageJob(ctx context.Context, input AsyncImageInput) (me
 		Provider: string(route.Provider), Model: model.ExternalPublicID(route.Provider, route.PublicID),
 		ModelRouteID: route.ID, UpstreamModel: model.DisplayUpstreamModel(route.Provider, route.UpstreamModel),
 		Prompt: input.Prompt, Seconds: 1, Size: spec, Quality: quality,
-		Status: media.StatusQueued, Progress: 0, InputJSON: string(payload), CreatedAt: now, UpdatedAt: now,
+		Status: media.StatusQueued, Progress: 0, InputJSON: string(payload), RoutingTraceJSON: routingTrace.JSON(), CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.mediaJobs.CreateMediaJob(ctx, job); err != nil {
 		return media.Job{}, err
@@ -135,6 +140,11 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 		s.failImageJob(ctx, job, "model_not_allowed", errors.New("客户端 Key 未获准使用该模型"))
 		return
 	}
+	route, err := s.models.Get(ctx, job.ModelRouteID)
+	if err != nil || !route.Enabled || route.Capability != model.CapabilityImage {
+		s.failImageJob(ctx, job, "model_not_found", errors.New("模型路由不存在或已停用"))
+		return
+	}
 	var payload asyncImagePayload
 	if err := json.Unmarshal([]byte(job.InputJSON), &payload); err != nil {
 		s.failImageJob(ctx, job, "invalid_job_input", err)
@@ -147,12 +157,30 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 	}
 	workCtx, cancel := context.WithTimeout(ctx, imageJobTimeout)
 	defer cancel()
+	routingTrace := routingTraceFromJSON(job.RoutingTraceJSON)
+	if routingTrace != nil {
+		workCtx = withRoutingTrace(workCtx, routingTrace)
+	}
+	workCtx, egressTrace := infraegress.WithTrace(workCtx)
 	result, err := s.GenerateImage(workCtx, ImageGenerationInput{
 		RequestID: job.RequestID, ClientKey: key, PublicModel: payload.PublicModel, Prompt: job.Prompt,
 		Count: payload.Count, Size: payload.Size, AspectRatio: payload.AspectRatio,
 		Resolution: payload.Resolution, ResponseFormat: payload.ResponseFormat,
+		execution: imageExecutionOptions{
+			RouteID: route.ID, PreferredAccountID: job.AccountID,
+			OnAttempt: func(credential account.Credential, attempt int) {
+				job.AccountID, job.AccountName = credential.ID, credential.Name
+				job.UpdatedAt = time.Now().UTC()
+				if updateErr := s.mediaJobs.UpdateMediaJob(workCtx, job); updateErr != nil {
+					s.logger.Warn("image_job_attempt_write_failed", "job_id", job.ID, "attempt", attempt, "account_id", credential.ID, "error", updateErr)
+				}
+			},
+		},
 	})
 	if err != nil {
+		if routingTrace != nil {
+			job.RoutingTraceJSON = routingTrace.JSON()
+		}
 		if ctx.Err() != nil {
 			s.deferVideoJob(ctx, job)
 			return
@@ -162,12 +190,16 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 		if errors.As(err, &failure) {
 			code, message = failure.Code, failure.PublicMessage
 		}
+		applyMediaJobEgress(&job, egressTrace, route.Provider)
 		s.failImageJob(ctx, job, code, errors.New(message))
 		return
 	}
 	body, readErr := io.ReadAll(io.LimitReader(result.Body, maxImageJobOutputBytes+1))
 	errorCode := ""
 	if readErr != nil {
+		if routingTrace != nil {
+			job.RoutingTraceJSON = routingTrace.JSON()
+		}
 		errorCode = "response_read_failed"
 	} else if int64(len(body)) > maxImageJobOutputBytes {
 		readErr = errors.New("图片响应超过 128 MiB 持久化上限")
@@ -182,12 +214,17 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 	result.Finalize(Usage{}, "", errorCode)
 	_ = result.Body.Close()
 	if readErr != nil {
+		applyMediaJobEgress(&job, egressTrace, route.Provider)
 		s.failImageJob(ctx, job, errorCode, readErr)
 		return
 	}
 	now := time.Now().UTC()
 	job.Status, job.Progress = media.StatusCompleted, 100
 	job.OutputJSON, job.ContentType = string(body), "application/json"
+	if routingTrace != nil {
+		job.RoutingTraceJSON = routingTrace.JSON()
+	}
+	applyMediaJobEgress(&job, egressTrace, route.Provider)
 	job.LeaseUntil, job.UpdatedAt, job.CompletedAt, job.UsageRecordedAt = nil, now, &now, &now
 	if err := s.persistVideoJobWithRetry(ctx, job); err != nil {
 		s.logger.Error("image_job_terminal_write_failed", "job_id", job.ID, "error", err)

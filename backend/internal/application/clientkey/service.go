@@ -28,6 +28,8 @@ var (
 	ErrSecretUnavailable  = errors.New("客户端 Key 明文不可用")
 )
 
+const pollingRPMLimit = 600
+
 type CreateInput struct {
 	Name                 string
 	Enabled              bool
@@ -262,11 +264,10 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 	return deleted, err
 }
 
-// Authenticate 校验 API Key、RPM 和并发限制，并返回请求结束时必须调用的 release。
-func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain.Key, func(), error) {
+func (s *Service) authenticateIdentity(ctx context.Context, raw string) (clientkeydomain.Key, error) {
 	prefix, ok := security.SplitClientKey(raw)
 	if !ok {
-		return clientkeydomain.Key{}, nil, ErrInvalidKey
+		return clientkeydomain.Key{}, ErrInvalidKey
 	}
 	now := time.Now().UTC()
 	value, cached := s.authCache.get(prefix, now)
@@ -275,18 +276,27 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 		value, err = s.keys.GetByPrefix(ctx, prefix)
 		if err != nil {
 			if !errors.Is(err, repository.ErrNotFound) {
-				return clientkeydomain.Key{}, nil, fmt.Errorf("%w: 客户端 Key 仓储: %v", ErrRuntimeUnavailable, err)
+				return clientkeydomain.Key{}, fmt.Errorf("%w: 客户端 Key 仓储: %v", ErrRuntimeUnavailable, err)
 			}
-			return clientkeydomain.Key{}, nil, ErrInvalidKey
+			return clientkeydomain.Key{}, ErrInvalidKey
 		}
 		s.authCache.put(prefix, value, now)
 	}
 	if !value.IsAvailable(now) {
-		return clientkeydomain.Key{}, nil, ErrInvalidKey
+		return clientkeydomain.Key{}, ErrInvalidKey
 	}
 	want := security.HashToken(raw)
 	if subtle.ConstantTimeCompare([]byte(want), []byte(value.SecretHash)) != 1 {
-		return clientkeydomain.Key{}, nil, ErrInvalidKey
+		return clientkeydomain.Key{}, ErrInvalidKey
+	}
+	return value, nil
+}
+
+// Authenticate 校验 API Key、RPM 和并发限制，并返回请求结束时必须调用的 release。
+func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain.Key, func(), error) {
+	value, err := s.authenticateIdentity(ctx, raw)
+	if err != nil {
+		return clientkeydomain.Key{}, nil, err
 	}
 	if value.BillingLimitUSDTicks > 0 {
 		remaining := value.BillingLimitUSDTicks - value.BilledUsageUSDTicks
@@ -294,6 +304,7 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 			return clientkeydomain.Key{}, nil, ErrBillingLimit
 		}
 	}
+	now := time.Now().UTC()
 	allowed, err := s.rateLimiter.Allow(ctx, fmt.Sprintf("client:%d", value.ID), value.RPMLimit, now)
 	if err != nil {
 		return clientkeydomain.Key{}, nil, fmt.Errorf("%w: RPM 限流器: %v", ErrRuntimeUnavailable, err)
@@ -312,6 +323,23 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 		_ = s.keys.Touch(ctx, value.ID)
 	}
 	return value, release, nil
+}
+
+// AuthenticateForPolling authenticates a durable job status read against a
+// separate read-only RPM bucket without charging inference RPM or concurrency.
+func (s *Service) AuthenticateForPolling(ctx context.Context, raw string) (clientkeydomain.Key, error) {
+	value, err := s.authenticateIdentity(ctx, raw)
+	if err != nil {
+		return clientkeydomain.Key{}, err
+	}
+	allowed, err := s.rateLimiter.Allow(ctx, fmt.Sprintf("client-poll:%d", value.ID), pollingRPMLimit, time.Now().UTC())
+	if err != nil {
+		return clientkeydomain.Key{}, fmt.Errorf("%w: 轮询限流器: %v", ErrRuntimeUnavailable, err)
+	}
+	if !allowed {
+		return clientkeydomain.Key{}, ErrRateLimited
+	}
+	return value, nil
 }
 
 // CanUseModel 判断空权限列表代表全部模型，否则要求显式授权。

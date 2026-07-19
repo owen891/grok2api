@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/observability"
 )
 
 func TestReadinessEndpointReturnsStructuredDegradedStateAsReady(t *testing.T) {
@@ -39,6 +41,17 @@ func TestReadinessEndpointReturnsStructuredDegradedStateAsReady(t *testing.T) {
 	}
 	if !body.Ready || body.State != "degraded" || body.Components["grok_build"].State != "ready" {
 		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestMetricsEndpointExportsRegisteredMetrics(t *testing.T) {
+	router := New(Dependencies{RequestTimeout: time.Second, MaxBodyBytes: 1024, Metrics: observability.Handler()})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	metrics := httptest.NewRecorder()
+	router.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "grok2api_http_requests_total") {
+		t.Fatalf("metrics status=%d body=%q", metrics.Code, metrics.Body.String()[:min(200, len(metrics.Body.String()))])
 	}
 }
 

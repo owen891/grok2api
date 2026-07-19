@@ -232,6 +232,7 @@ export async function waitForImageJob(options: {
 }): Promise<GeneratedImage[]> {
   const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000;
+  let pollCount = 0;
   for (;;) {
     const job = await getImageJob(options);
     if (job.status === "done") return job.images;
@@ -240,7 +241,9 @@ export async function waitForImageJob(options: {
     if (Date.now() - startedAt >= timeoutMs) {
       throw { class: "timeout", message: "图片任务轮询超时", code: "image_job_timeout", requestId: options.requestId } satisfies ClassifiedError;
     }
-    await pollDelay(options.pollIntervalMs ?? 1000, options.signal);
+    pollCount += 1;
+    const defaultDelay = pollCount < 10 ? 1000 : pollCount < 30 ? 2000 : 3000;
+    await pollDelay(options.pollIntervalMs ?? defaultDelay, options.signal);
   }
 }
 

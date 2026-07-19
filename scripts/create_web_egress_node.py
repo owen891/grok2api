@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Create a grok_web egress node for Cloudflare-bypass image generation.
 
-Fill PROXY_URL / CF_COOKIES / USER_AGENT below, then run:
-  python scripts/create_web_egress_node.py
+Fill PROXY_URL / CF_COOKIES / USER_AGENT below, set
+GROK2API_ADMIN_PASSWORD or enter it when prompted, then run the script.
 """
 
 from __future__ import annotations
 
+import getpass
 import json
+import os
 import urllib.request
 
 BASE = "http://127.0.0.1:8002"
 ADMIN_USER = "admin"
-ADMIN_PASSWORD = "local-v3-preview-password-20260714"
 
 # ---- fill these ----
 PROXY_URL = "http://user:pass@host:port"  # stable residential/proxy URL
@@ -23,9 +24,12 @@ NODE_NAME = "web-cf-1"
 
 
 def login() -> str:
+    password = os.environ.get("GROK2API_ADMIN_PASSWORD", "") or getpass.getpass("Grok2API admin password: ")
+    if not password:
+        raise RuntimeError("GROK2API admin password is required")
     req = urllib.request.Request(
         f"{BASE}/api/admin/v1/auth/login",
-        data=json.dumps({"username": ADMIN_USER, "password": ADMIN_PASSWORD}).encode(),
+        data=json.dumps({"username": ADMIN_USER, "password": password}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )

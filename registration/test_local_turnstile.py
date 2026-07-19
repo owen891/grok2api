@@ -2,7 +2,14 @@ import unittest
 from itertools import chain, repeat
 from unittest.mock import patch
 
-from local_turnstile import _dockerize_loopback_proxy, _ensure_docker_container_running, _pin_http_endpoint, solve_turnstile_local
+from local_turnstile import (
+    _dockerize_loopback_proxy,
+    _ensure_docker_container_running,
+    _http_solve_with_retries,
+    _pin_http_endpoint,
+    check_turnstile_endpoint,
+    solve_turnstile_local,
+)
 
 
 class DockerProxyMappingTests(unittest.TestCase):
@@ -52,7 +59,85 @@ class DockerContainerRecoveryTests(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
 
+class SolverHealthTests(unittest.TestCase):
+    @staticmethod
+    def response(payload, *, status_code=200, text=""):
+        return type(
+            "Response",
+            (),
+            {
+                "status_code": status_code,
+                "text": text,
+                "json": lambda self: payload,
+            },
+        )()
+
+    @patch("local_turnstile.requests.get")
+    def test_healthy_http_solver_is_ready(self, get):
+        get.return_value = self.response(
+            {"ok": True, "lazy": False, "pool_ready": True, "thread": 2}
+        )
+
+        ready, detail = check_turnstile_endpoint("https://solver.example:5072", timeout=2)
+
+        self.assertTrue(ready)
+        self.assertIn('"pool_ready":true', detail)
+        get.assert_called_once_with("https://solver.example:5072/health", timeout=2.0)
+
+    @patch("local_turnstile.requests.get")
+    def test_eager_solver_requires_browser_pool(self, get):
+        get.return_value = self.response(
+            {"ok": True, "lazy": False, "pool_ready": False, "thread": 1}
+        )
+
+        ready, detail = check_turnstile_endpoint("https://solver.example:5072")
+
+        self.assertFalse(ready)
+        self.assertIn("browser pool not ready", detail)
+
+    @patch("local_turnstile.requests.get")
+    def test_lazy_solver_may_be_idle_during_preflight(self, get):
+        get.return_value = self.response(
+            {"ok": True, "lazy": True, "pool_ready": False, "thread": 1}
+        )
+
+        ready, detail = check_turnstile_endpoint("https://solver.example:5072")
+
+        self.assertTrue(ready)
+        self.assertIn('"lazy":true', detail)
+
+    @patch("local_turnstile.requests.get")
+    def test_http_error_is_not_ready(self, get):
+        get.return_value = self.response({}, status_code=503)
+
+        self.assertEqual(
+            check_turnstile_endpoint("https://solver.example:5072"),
+            (False, "health HTTP 503"),
+        )
+
+    @patch("local_turnstile.requests.get")
+    def test_invalid_health_json_is_not_ready(self, get):
+        response = self.response({}, text="not-json")
+        response.json = lambda: (_ for _ in ()).throw(ValueError("invalid JSON"))
+        get.return_value = response
+
+        self.assertEqual(
+            check_turnstile_endpoint("https://solver.example:5072"),
+            (False, "invalid health JSON: not-json"),
+        )
+
+
 class DockerFallbackTests(unittest.TestCase):
+    @patch("local_turnstile._http_solve", side_effect=RuntimeError("transient"))
+    @patch.dict("local_turnstile.os.environ", {"LOCAL_CAPTCHA_RETRIES": "1"}, clear=False)
+    def test_explicit_retries_share_one_total_timeout(self, http_solve):
+        with patch("local_turnstile.time.monotonic", side_effect=[0.0, 0.0, 4.0, 6.0]), patch(
+            "local_turnstile.time.sleep"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "attempt 2/2"):
+                _http_solve_with_retries("http://solver:5072", {}, 10)
+        self.assertEqual([call.args[2] for call in http_solve.call_args_list], [10.0, 4.0])
+
     @patch("local_turnstile._http_solve", side_effect=TimeoutError("solver timed out"))
     @patch("local_turnstile._docker_cli_available", return_value=False)
     @patch.dict("local_turnstile.os.environ", {"LOCAL_CAPTCHA_RETRIES": "0"}, clear=False)
@@ -81,7 +166,7 @@ class DockerFallbackTests(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, r"taskId=task-1.*pool_ready.*in_flight"):
             # Patch the clock/sleep indirectly by using the minimum timeout and
             # make the poll response consume the deadline immediately.
-            with patch("local_turnstile.time.monotonic", side_effect=chain([0.0, 0.0, 0.0], repeat(31.0))), patch(
+            with patch("local_turnstile.time.monotonic", side_effect=chain(repeat(0.0, 8), repeat(31.0))), patch(
                 "local_turnstile.time.sleep"
             ):
                 solve_turnstile_local(

@@ -1,0 +1,15 @@
+name: grok2api
+
+# Optional browser registration runtime. The default image remains protocol-only.
+services:
+  grok2api:
+    image: "${GROK2API_BROWSER_IMAGE:-grok2api:browser-runtime}"
+    build:
+      target: browser-runtime
+    environment:
+      DISPLAY: ":99"
+      REGISTRATION_BROWSER_MODE: "xvfb"
+      REGISTRATION_BROWSER_PATH: "/usr/bin/chromium"
+      REGISTRATION_BROWSER_WINDOW: "${REGISTRATION_BROWSER_WINDOW:-1280,900}"
+      REGISTRATION_XVFB_SCREEN: "${REGISTRATION_XVFB_SCREEN:-1280x900x24}"
+    shm_size: "2gb"

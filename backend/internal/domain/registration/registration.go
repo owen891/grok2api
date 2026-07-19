@@ -30,6 +30,31 @@ type Attempt struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+type ReplenishmentStatus string
+
+const (
+	ReplenishmentIdle      ReplenishmentStatus = "idle"
+	ReplenishmentStarting  ReplenishmentStatus = "starting"
+	ReplenishmentRunning   ReplenishmentStatus = "running"
+	ReplenishmentVerifying ReplenishmentStatus = "verifying"
+	ReplenishmentCooling   ReplenishmentStatus = "cooling"
+	ReplenishmentFailed    ReplenishmentStatus = "failed"
+)
+
+type ReplenishmentState struct {
+	Scope            string
+	Status           ReplenishmentStatus
+	ClaimToken       string
+	LeaseUntil       *time.Time
+	LastTriggerAt    *time.Time
+	NextAttemptAt    *time.Time
+	CounterDate      time.Time
+	DailyStarts      int
+	BaselineEligible int
+	LastError        string
+	UpdatedAt        time.Time
+}
+
 func (a Attempt) Terminal() bool {
 	return a.Stage == StageSucceeded || a.Stage == StageFailed
 }

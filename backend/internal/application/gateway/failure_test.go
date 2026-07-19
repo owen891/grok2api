@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"testing"
 )
@@ -48,7 +49,7 @@ func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 		},
 		{
 			name: "ambiguous numeric rate limit", status: http.StatusTooManyRequests, body: `{"error":{"code":8,"message":"rate limited"}}`,
-			accountScoped: true, code: "upstream_rate_limited",
+			code: "upstream_rate_limited",
 		},
 	}
 	for _, test := range tests {
@@ -58,5 +59,26 @@ func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 				t.Fatalf("failure = %#v", failure)
 			}
 		})
+	}
+}
+
+func TestBareRateLimitDoesNotPenalizeAccount(t *testing.T) {
+	failure := ClassifyHTTPFailure(http.StatusTooManyRequests, []byte(`{"error":{"code":8,"message":"rate limited"}}`), 42, "account")
+	decision := DecideFailure(failure)
+	if failure.AccountScoped || failure.Scope != FailureScopeProvider || decision.PenalizeAccount || decision.Action != FailureActionRetryProvider {
+		t.Fatalf("failure=%#v decision=%#v", failure, decision)
+	}
+}
+
+func TestDecideFailureSeparatesQuotaAndNetworkActions(t *testing.T) {
+	quota := newHTTPUpstreamFailure(429, []byte(`{"error":{"code":"usage_limit_reached"}}`), 42, "account")
+	quotaDecision := DecideFailure(quota)
+	if quota.Scope != FailureScopeQuota || quotaDecision.Scope != FailureScopeQuota || quotaDecision.Action != FailureActionUpdateQuota || quotaDecision.PenalizeAccount {
+		t.Fatalf("quota failure = %#v decision = %#v", quota, quotaDecision)
+	}
+	network := newTransportUpstreamFailure(context.DeadlineExceeded, 42, "account")
+	networkDecision := DecideFailure(network)
+	if network.Scope != FailureScopeNetwork || networkDecision.Scope != FailureScopeNetwork || networkDecision.Action != FailureActionRetryProvider || networkDecision.PenalizeAccount {
+		t.Fatalf("network failure = %#v decision = %#v", network, networkDecision)
 	}
 }

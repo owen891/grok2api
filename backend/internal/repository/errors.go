@@ -6,4 +6,5 @@ var (
 	ErrNotFound      = errors.New("repository: not found")
 	ErrConflict      = errors.New("repository: conflict")
 	ErrLimitExceeded = errors.New("repository: limit exceeded")
+	ErrInvalid       = errors.New("repository: invalid")
 )

@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -23,43 +24,44 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 type auditResponse struct {
-	ID                      uint64    `json:"id,string"`
-	RequestID               string    `json:"requestId"`
-	ClientKeyID             uint64    `json:"clientKeyId,string"`
-	ClientKeyName           string    `json:"clientKeyName,omitempty"`
-	ModelRouteID            uint64    `json:"modelRouteId,string"`
-	ModelPublicID           string    `json:"modelPublicId,omitempty"`
-	ModelUpstreamModel      string    `json:"modelUpstreamModel,omitempty"`
-	Provider                string    `json:"provider"`
-	Operation               string    `json:"operation"`
-	UsageSource             string    `json:"usageSource"`
-	AccountID               *uint64   `json:"accountId,string,omitempty"`
-	AccountName             string    `json:"accountName,omitempty"`
-	EgressNodeID            *uint64   `json:"egressNodeId,string,omitempty"`
-	EgressNodeName          string    `json:"egressNodeName,omitempty"`
-	EgressScope             string    `json:"egressScope,omitempty"`
-	EgressMode              string    `json:"egressMode,omitempty"`
-	StatusCode              int       `json:"statusCode"`
-	Streaming               bool      `json:"streaming"`
-	MediaInputImages        int64     `json:"mediaInputImages"`
-	MediaOutputImages       int64     `json:"mediaOutputImages"`
-	MediaOutputSeconds      int64     `json:"mediaOutputSeconds"`
-	InputTokens             int64     `json:"inputTokens"`
-	CachedInputTokens       int64     `json:"cachedInputTokens"`
-	OutputTokens            int64     `json:"outputTokens"`
-	ReasoningTokens         int64     `json:"reasoningTokens"`
-	TotalTokens             int64     `json:"totalTokens"`
-	CostInUSDTicks          int64     `json:"costInUsdTicks"`
-	EstimatedCostInUSDTicks int64     `json:"estimatedCostInUsdTicks"`
-	PricingModel            string    `json:"pricingModel,omitempty"`
-	PricingVersion          string    `json:"pricingVersion,omitempty"`
-	NumSourcesUsed          int64     `json:"numSourcesUsed"`
-	NumServerSideToolsUsed  int64     `json:"numServerSideToolsUsed"`
-	ContextInputTokens      int64     `json:"contextInputTokens"`
-	ContextOutputTokens     int64     `json:"contextOutputTokens"`
-	DurationMS              int64     `json:"durationMs"`
-	ErrorCode               string    `json:"errorCode,omitempty"`
-	CreatedAt               time.Time `json:"createdAt"`
+	ID                      uint64          `json:"id,string"`
+	RequestID               string          `json:"requestId"`
+	ClientKeyID             uint64          `json:"clientKeyId,string"`
+	ClientKeyName           string          `json:"clientKeyName,omitempty"`
+	ModelRouteID            uint64          `json:"modelRouteId,string"`
+	ModelPublicID           string          `json:"modelPublicId,omitempty"`
+	ModelUpstreamModel      string          `json:"modelUpstreamModel,omitempty"`
+	Provider                string          `json:"provider"`
+	Operation               string          `json:"operation"`
+	UsageSource             string          `json:"usageSource"`
+	AccountID               *uint64         `json:"accountId,string,omitempty"`
+	AccountName             string          `json:"accountName,omitempty"`
+	EgressNodeID            *uint64         `json:"egressNodeId,string,omitempty"`
+	EgressNodeName          string          `json:"egressNodeName,omitempty"`
+	EgressScope             string          `json:"egressScope,omitempty"`
+	EgressMode              string          `json:"egressMode,omitempty"`
+	StatusCode              int             `json:"statusCode"`
+	Streaming               bool            `json:"streaming"`
+	MediaInputImages        int64           `json:"mediaInputImages"`
+	MediaOutputImages       int64           `json:"mediaOutputImages"`
+	MediaOutputSeconds      int64           `json:"mediaOutputSeconds"`
+	InputTokens             int64           `json:"inputTokens"`
+	CachedInputTokens       int64           `json:"cachedInputTokens"`
+	OutputTokens            int64           `json:"outputTokens"`
+	ReasoningTokens         int64           `json:"reasoningTokens"`
+	TotalTokens             int64           `json:"totalTokens"`
+	CostInUSDTicks          int64           `json:"costInUsdTicks"`
+	EstimatedCostInUSDTicks int64           `json:"estimatedCostInUsdTicks"`
+	PricingModel            string          `json:"pricingModel,omitempty"`
+	PricingVersion          string          `json:"pricingVersion,omitempty"`
+	NumSourcesUsed          int64           `json:"numSourcesUsed"`
+	NumServerSideToolsUsed  int64           `json:"numServerSideToolsUsed"`
+	ContextInputTokens      int64           `json:"contextInputTokens"`
+	ContextOutputTokens     int64           `json:"contextOutputTokens"`
+	DurationMS              int64           `json:"durationMs"`
+	ErrorCode               string          `json:"errorCode,omitempty"`
+	RoutingTrace            json.RawMessage `json:"routingTrace,omitempty"`
+	CreatedAt               time.Time       `json:"createdAt"`
 }
 
 func (h *Handler) list(c *gin.Context) {
@@ -195,7 +197,7 @@ func newListFilter(c *gin.Context) auditapp.ListFilter {
 }
 
 func newAuditResponse(value auditdomain.Record) auditResponse {
-	return auditResponse{
+	result := auditResponse{
 		ID: value.ID, RequestID: value.RequestID, ClientKeyID: value.ClientKeyID, ClientKeyName: value.ClientKeyName,
 		ModelRouteID: value.ModelRouteID, ModelPublicID: value.ModelPublicID, ModelUpstreamModel: value.ModelUpstreamModel,
 		Provider: value.Provider, Operation: string(value.Operation), UsageSource: string(value.UsageSource),
@@ -210,4 +212,8 @@ func newAuditResponse(value auditdomain.Record) auditResponse {
 		ContextInputTokens: value.ContextInputTokens, ContextOutputTokens: value.ContextOutputTokens, DurationMS: value.DurationMS,
 		ErrorCode: value.ErrorCode, CreatedAt: value.CreatedAt,
 	}
+	if value.RoutingTraceJSON != "" && json.Valid([]byte(value.RoutingTraceJSON)) {
+		result.RoutingTrace = json.RawMessage(value.RoutingTraceJSON)
+	}
+	return result
 }

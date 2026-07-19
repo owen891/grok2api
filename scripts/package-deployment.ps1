@@ -20,6 +20,7 @@ New-Item -ItemType Directory -Path (Join-Path $outputPath 'images') -Force | Out
 $files = @(
     '.env.production.example',
     'compose.production.yml',
+    'compose.browser-registration.yml',
     'compose.registration.yml',
     'config.production.example.yaml',
     'install.ps1',
@@ -46,9 +47,11 @@ if ($Offline) {
     $envFile = Join-Path $repo 'deploy_artifact\.env.production.example'
     $solverImage = ((Get-Content $envFile | Where-Object { $_ -match '^GROK2API_SOLVER_IMAGE=' }) -split '=', 2)[1]
     $appImage = ((Get-Content $envFile | Where-Object { $_ -match '^GROK2API_IMAGE=' }) -split '=', 2)[1]
+    $browserRegistrationImage = ((Get-Content $envFile | Where-Object { $_ -match '^GROK2API_BROWSER_IMAGE=' }) -split '=', 2)[1]
     $browserImage = 'flaresolverr:offline'
     $images = @(
         $appImage,
+        $browserRegistrationImage,
         $solverImage,
         $browserImage,
         'postgres:16-alpine',

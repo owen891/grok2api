@@ -15,6 +15,8 @@ import os
 import threading
 from urllib.parse import urlparse
 
+from browser_proxy import chromium_proxy_server
+
 _thread = threading.local()
 
 
@@ -44,16 +46,7 @@ def resolve_proxy(explicit: str | None = None) -> str:
 
 def proxy_for_chromium(proxy: str) -> str:
     """Chromium --proxy-server cannot embed user:pass; host:port only."""
-    p = (proxy or "").strip()
-    if not p:
-        return ""
-    u = urlparse(p if "://" in p else f"http://{p}")
-    host = u.hostname or ""
-    if not host:
-        return ""
-    port = u.port or (443 if (u.scheme or "http") == "https" else 80)
-    scheme = u.scheme or "http"
-    return f"{scheme}://{host}:{port}"
+    return chromium_proxy_server(proxy)
 
 
 def proxy_log_label(proxy: str) -> str:
@@ -69,5 +62,4 @@ def proxy_log_label(proxy: str) -> str:
         return f"{u.scheme or 'http'}://{auth}{host}{(':' + str(port)) if port else ''}"
     except Exception:
         return "(proxy)"
-
 

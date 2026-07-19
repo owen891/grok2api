@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 func TestRedisRuntimeStoreIntegration(t *testing.T) {
@@ -91,6 +92,27 @@ func TestRedisRuntimeStoreIntegration(t *testing.T) {
 	}
 	if err := store.AckQuotaRecovery(ctx, claimed[0]); err != nil {
 		t.Fatal(err)
+	}
+
+	performanceKey := repository.RoutePerformanceKey{AccountID: 42, UpstreamModel: "image-model"}
+	performancePolicy := repository.RoutePerformancePolicy{Alpha: .25, TTL: 30 * time.Minute, CircuitThreshold: 3, CircuitWindow: time.Minute, CircuitOpenDuration: 2 * time.Minute}
+	for range 3 {
+		if err := store.ObserveRoutePerformance(ctx, repository.RoutePerformanceObservation{Key: performanceKey, Latency: time.Second, CircuitFailure: true, ObservedAt: time.Now().UTC()}, performancePolicy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	performance, err := store.GetRoutePerformances(ctx, []repository.RoutePerformanceKey{performanceKey}, time.Now().UTC())
+	if err != nil || performance[performanceKey].CircuitOpenUntil == nil || performance[performanceKey].Samples != 3 {
+		t.Fatalf("route performance=%#v err=%v", performance[performanceKey], err)
+	}
+	secondStore, err := Open(ctx, Config{Address: address, KeyPrefix: store.prefix, ConcurrencyLease: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedPerformance, err := secondStore.GetRoutePerformances(ctx, []repository.RoutePerformanceKey{performanceKey}, time.Now().UTC())
+	_ = secondStore.Close()
+	if err != nil || sharedPerformance[performanceKey].CircuitOpenUntil == nil {
+		t.Fatalf("second client route performance=%#v err=%v", sharedPerformance[performanceKey], err)
 	}
 
 	listenerCtx, cancelListener := context.WithCancel(ctx)

@@ -65,6 +65,37 @@ browser binary fails the container health check instead of failing on the first
 registration task. Set `TURNSTILE_BROWSER_TYPE=chromium` only as an explicit
 temporary fallback after verifying the image contains Patchright Chromium.
 
+## Browser registration engine
+
+Browser registration uses the matching `*-browser` application image. It contains
+Chromium, DrissionPage, the Turnstile extension, and Xvfb; the standard image stays
+protocol-only. Enable it with the browser overlay:
+
+```sh
+docker compose --env-file .env \
+  -f compose.production.yml -f compose.browser-registration.yml \
+  pull
+docker compose --env-file .env \
+  -f compose.production.yml -f compose.browser-registration.yml \
+  up -d
+```
+
+Set the registration worker `engine` to `browser` in the admin registration settings,
+run preflight, then validate 3 accounts before increasing the batch. Browser mode always
+uses Build accounts with inline OAuth; a usable success means registration, SSO, OAuth,
+spool import, and initial sync all completed. Linux runs a headed Chromium under
+`DISPLAY=:99`/Xvfb by default.
+
+Authenticated HTTP(S) proxies are supported through a private runtime-generated Chromium
+extension. Authenticated SOCKS proxies are not supported directly; expose them through a
+local unauthenticated relay. Preflight rejects that unsupported combination.
+
+Rollback does not require an API code rollback:
+
+1. Set registration `engine` back to `protocol`.
+2. Stop active registration and confirm its Chromium processes exited.
+3. Redeploy with only `compose.production.yml` and the standard `GROK2API_IMAGE`.
+
 Do not install application Python dependencies during deployment. They are built
 once by CI and shipped inside `GROK2API_IMAGE`; normal upgrades are `pull` plus
 `up -d`, not `up -d --build`.
@@ -116,6 +147,16 @@ curl -fsS http://127.0.0.1:8001/healthz
 docker compose --env-file .env -f docker-compose.runtime.yml logs --tail=100 grok2api
 ```
 
+## Metrics and alerts
+
+Set `server.metricsEnabled: true` only when `/metrics` is reachable through an
+internal listener or an authenticated reverse proxy. The endpoint exports route
+capacity, routing failure scopes, shadow scorer agreement, shared circuit
+pressure, replenishment verification, active account inspection results,
+background task state, and HTTP latency.
+The repository includes `prometheus-alerts.yml`; load it into Prometheus and
+route notifications through the deployment's Alertmanager.
+
 ## Proxy groups and clearance
 
 Configure egress groups from the admin console under Settings -> Media & network:
@@ -131,6 +172,8 @@ Registration clearance is independent from the browser worker:
 - `Docker clearance` uses `REGISTRATION_CAPTCHA_ENDPOINT` (normally `http://grok-turnstile-solver:5072`).
 - `YesCaptcha` is selected in the Registration settings and requires its API key.
 - The browser worker remains required for Grok Web sessions; it is not required just to use Docker clearance.
+- The API container starts independently from the solver. Before a registration batch, protocol preflight probes each configured solver `/health` endpoint and requires at least one ready endpoint; it does not create a captcha task.
+- Set `captcha_preflight_timeout` to control the health timeout per endpoint (default `3` seconds). A lazy solver may report an idle browser pool and still pass preflight because it initializes on demand.
 
 For concurrent registration on a memory-constrained host, keep one browser per solver
 container and scale the solver service horizontally. The Compose service must not use
@@ -142,7 +185,9 @@ docker compose --env-file .env -f docker-compose.runtime.yml up -d --scale grok-
 
 Compose DNS load-balances `http://grok-turnstile-solver:5072`; the worker also accepts
 `captcha_endpoints` / `REGISTRATION_CAPTCHA_ENDPOINT` as a comma-separated endpoint pool
-and fails over to the next solver when one task times out.
+and fails over to the next solver within one total timeout budget. The registration worker
+reuses one clearance coordinator for the batch, limits in-flight tasks to `TURNSTILE_THREAD`,
+and temporarily opens a circuit after repeated failures on the same endpoint and proxy route.
 
 Protocol registration writes OAuth and SSO records under the persistent data directory. The runtime Compose file mounts `registration/protocol_auth/oauth_output` and `registration/protocol_auth/sso_output` over the read-only registration source tree.
 

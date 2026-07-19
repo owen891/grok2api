@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
@@ -98,7 +99,7 @@ func toAuditModel(value audit.Record) requestAuditModel {
 		EstimatedCostInUSDTicks: nonNegative(value.EstimatedCostInUSDTicks), PricingModel: truncate(value.PricingModel, 100), PricingVersion: truncate(value.PricingVersion, 20),
 		NumSourcesUsed: nonNegative(value.NumSourcesUsed), NumServerSideToolsUsed: nonNegative(value.NumServerSideToolsUsed),
 		ContextInputTokens: nonNegative(value.ContextInputTokens), ContextOutputTokens: nonNegative(value.ContextOutputTokens), DurationMS: nonNegative(value.DurationMS),
-		ErrorCode: truncate(value.ErrorCode, 100), CreatedAt: value.CreatedAt,
+		ErrorCode: truncate(value.ErrorCode, 100), RoutingTraceJSON: truncate(value.RoutingTraceJSON, 16384), CreatedAt: value.CreatedAt,
 	}
 }
 
@@ -298,6 +299,28 @@ func (r *AuditRepository) Summarize(ctx context.Context, input repository.AuditS
 		UnpricedRequests: aggregate.UnpricedRequests, PricedTokens: aggregate.PricedTokens, UnpricedTokens: aggregate.UnpricedTokens,
 	}
 	return result, nil
+}
+
+func (r *AuditRepository) CountRequestsSince(ctx context.Context, provider, upstreamModel string, since time.Time) (int64, error) {
+	provider = strings.TrimSpace(provider)
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if provider == "" || upstreamModel == "" {
+		return 0, nil
+	}
+	publicUpstream := upstreamModel
+	for _, candidate := range account.Providers() {
+		if string(candidate) == provider {
+			publicUpstream = candidate.ModelNamespace() + "/" + upstreamModel
+			break
+		}
+	}
+	var count int64
+	err := r.db.db.WithContext(ctx).Model(&requestAuditModel{}).
+		Where("provider = ?", provider).
+		Where("created_at >= ?", since).
+		Where("model_upstream_model = ? OR model_upstream_model = ? OR model_public_id = ?", upstreamModel, publicUpstream, upstreamModel).
+		Count(&count).Error
+	return count, err
 }
 
 func applyAuditQuery(query *gorm.DB, search string, start, end time.Time, filter repository.AuditListFilter) *gorm.DB {

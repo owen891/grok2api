@@ -98,7 +98,13 @@ def _extract_token(result: dict[str, Any]) -> str:
 
 
 def _http_solve(base: str, payload: dict[str, Any], timeout: float) -> str:
-    create_resp = requests.post(f"{base}/createTask", json=payload, timeout=45)
+    solve_timeout = max(1.0, float(timeout or 120))
+    deadline = time.monotonic() + solve_timeout
+    create_resp = requests.post(
+        f"{base}/createTask",
+        json=payload,
+        timeout=min(15.0, max(0.5, deadline - time.monotonic())),
+    )
     if create_resp.status_code >= 400:
         raise RuntimeError(f"本地过盾 createTask HTTP {create_resp.status_code}: {create_resp.text[:300]}")
     create_data = create_resp.json()
@@ -111,14 +117,12 @@ def _http_solve(base: str, payload: dict[str, Any], timeout: float) -> str:
             return token
         raise RuntimeError(f"本地过盾 createTask 未返回 taskId: {create_data}")
 
-    solve_timeout = max(30.0, float(timeout or 120))
-    deadline = time.monotonic() + solve_timeout
     while time.monotonic() < deadline:
         remaining = max(1.0, deadline - time.monotonic())
         result_resp = requests.post(
             f"{base}/getTaskResult",
             json={"clientKey": payload.get("clientKey") or "local", "taskId": task_id},
-            timeout=min(15.0, remaining),
+            timeout=min(10.0, remaining),
         )
         if result_resp.status_code >= 400:
             raise RuntimeError(f"本地过盾 getTaskResult HTTP {result_resp.status_code}: {result_resp.text[:300]}")
@@ -135,15 +139,15 @@ def _http_solve(base: str, payload: dict[str, Any], timeout: float) -> str:
         if status in {"ready", "success", "completed"}:
             raise RuntimeError(f"本地过盾 status={status} 但无 token: {result}")
         time.sleep(min(2.0, max(0.1, deadline - time.monotonic())))
-    diagnostic = _http_health(base)
+    diagnostic = _http_health(base, timeout=2.0)
     detail = f"，health={diagnostic}" if diagnostic else ""
     raise TimeoutError(f"本地过盾超时（{solve_timeout:.1f}s），taskId={task_id}{detail}")
 
 
-def _http_health(base: str) -> str:
+def _http_health(base: str, timeout: float = 5.0) -> str:
     """Best-effort solver health data for timeout errors; never masks the cause."""
     try:
-        response = requests.get(f"{base.rstrip('/')}/health", timeout=5)
+        response = requests.get(f"{base.rstrip('/')}/health", timeout=max(0.5, timeout))
         if response.status_code >= 400:
             return f"HTTP {response.status_code}"
         data = response.json()
@@ -159,39 +163,148 @@ def _http_health(base: str) -> str:
         return f"unavailable: {exc}"
 
 
+def _health_summary(data: Any) -> str:
+    if not isinstance(data, dict):
+        return str(data)
+    fields = {
+        key: data[key]
+        for key in (
+            "ok",
+            "browser_type",
+            "thread",
+            "lazy",
+            "pool_ready",
+            "queue",
+            "in_flight",
+            "owned",
+        )
+        if key in data
+    }
+    return json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
+
+
+def _solver_health_ready(data: Any) -> tuple[bool, str]:
+    detail = _health_summary(data)
+    if not isinstance(data, dict):
+        return False, f"invalid health response: {detail}"
+    if data.get("ok") is False:
+        return False, detail
+    if data.get("pool_ready") is False and data.get("lazy") is False:
+        return False, f"browser pool not ready: {detail}"
+    return True, detail
+
+
+def _docker_health(endpoint: str, timeout: float) -> tuple[bool, str]:
+    if not _docker_cli_available():
+        return False, "docker command not found"
+    raw = endpoint[len("docker://") :]
+    if ":" in raw:
+        container, port_s = raw.rsplit(":", 1)
+        try:
+            port = int(port_s)
+        except ValueError:
+            return False, f"invalid docker endpoint port: {port_s}"
+    else:
+        container, port = raw, 5072
+    if not container:
+        return False, "missing docker container name"
+    try:
+        status, exit_code, oom_killed = _docker_container_state(container)
+    except Exception as exc:
+        return False, str(exc)
+    if status != "running":
+        return False, f"container={status},exit={exit_code},oom={oom_killed}"
+    request_timeout = max(0.5, min(float(timeout or 3.0), 10.0))
+    script = (
+        "import urllib.request;"
+        f"print(urllib.request.urlopen('http://127.0.0.1:{port}/health', timeout={request_timeout!r}).read().decode())"
+    )
+    try:
+        process = subprocess.run(
+            ["docker", "exec", container, "python", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=request_timeout + 5.0,
+        )
+    except Exception as exc:
+        return False, f"docker health probe failed: {exc}"
+    if process.returncode != 0:
+        return False, (process.stderr or process.stdout or "docker health probe failed").strip()
+    try:
+        data = json.loads((process.stdout or "").strip())
+    except ValueError:
+        return False, f"invalid health JSON: {(process.stdout or '').strip()[:200]}"
+    return _solver_health_ready(data)
+
+
+def check_turnstile_endpoint(endpoint: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Probe solver readiness without creating a captcha task."""
+    value = str(endpoint or "").strip().rstrip("/")
+    if value.startswith("docker://"):
+        return _docker_health(value, timeout)
+    if not (value.startswith("http://") or value.startswith("https://")):
+        return False, "endpoint must use http://, https://, or docker://"
+    base = _pin_http_endpoint(value)
+    try:
+        response = requests.get(f"{base}/health", timeout=max(0.5, min(float(timeout or 3.0), 10.0)))
+    except Exception as exc:
+        return False, f"health request failed: {exc}"
+    if response.status_code >= 400:
+        return False, f"health HTTP {response.status_code}"
+    try:
+        data = response.json()
+    except ValueError:
+        return False, f"invalid health JSON: {response.text[:200]}"
+    return _solver_health_ready(data)
+
+
 def _http_solve_with_retries(base: str, payload: dict[str, Any], timeout: float) -> str:
-    """Retry a serialized solver task when the browser reports a transient timeout/failure."""
-    raw_retries = os.environ.get("LOCAL_CAPTCHA_RETRIES", "1").strip()
+    """Retry only when explicitly enabled, while preserving one total deadline."""
+    raw_retries = os.environ.get("LOCAL_CAPTCHA_RETRIES", "0").strip()
     try:
         retries = max(0, min(int(raw_retries), 3))
     except ValueError:
-        retries = 1
+        retries = 0
+    deadline = time.monotonic() + max(1.0, float(timeout or 120))
     failures: list[str] = []
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            return _http_solve(base, payload, timeout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("本地过盾总重试预算已耗尽")
+            return _http_solve(base, payload, remaining)
         except Exception as exc:
             last_error = exc
             failures.append(f"attempt {attempt + 1}/{retries + 1}: {exc}")
             if attempt < retries:
-                time.sleep(1.0)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(1.0, remaining))
     if retries == 0 and last_error is not None:
         raise last_error
     raise RuntimeError("; ".join(failures)) from None
 
 
-def _docker_exec_json_raw(container: str, path: str, body: dict[str, Any], port: int) -> dict[str, Any]:
+def _docker_exec_json_raw(
+    container: str,
+    path: str,
+    body: dict[str, Any],
+    port: int,
+    request_timeout: float = 60.0,
+) -> dict[str, Any]:
+    request_timeout = max(1.0, min(float(request_timeout or 60.0), 60.0))
     script = (
         "import json,urllib.request;"
         f"req=urllib.request.Request('http://127.0.0.1:{port}{path}', data=json.dumps({json.dumps(body)}).encode(), headers={{'Content-Type':'application/json'}});"
-        "print(urllib.request.urlopen(req, timeout=60).read().decode())"
+        f"print(urllib.request.urlopen(req, timeout={request_timeout!r}).read().decode())"
     )
     proc = subprocess.run(
         ["docker", "exec", container, "python", "-c", script],
         capture_output=True,
         text=True,
-        timeout=90,
+        timeout=request_timeout + 10.0,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"docker exec captcha 失败: {proc.stderr or proc.stdout}")
@@ -253,12 +366,18 @@ def _ensure_docker_container_running(container: str, wait_timeout: float = 30.0)
     raise TimeoutError(f"captcha container {container!r} did not become running (last state={last_state})")
 
 
-def _docker_exec_json(container: str, path: str, body: dict[str, Any], port: int) -> dict[str, Any]:
+def _docker_exec_json(
+    container: str,
+    path: str,
+    body: dict[str, Any],
+    port: int,
+    request_timeout: float = 60.0,
+) -> dict[str, Any]:
     """Execute a solver request, recovering once if Docker reports a stopped container."""
     for attempt in range(2):
         _ensure_docker_container_running(container)
         try:
-            return _docker_exec_json_raw(container, path, body, port)
+            return _docker_exec_json_raw(container, path, body, port, request_timeout)
         except RuntimeError as exc:
             detail = str(exc)
             if attempt == 0 and "not running" in detail.lower():
@@ -290,7 +409,15 @@ def _docker_solve(endpoint: str, payload: dict[str, Any], timeout: float) -> str
     if isinstance(task, dict) and task.get("proxy"):
         payload = {**payload, "task": {**task, "proxy": _dockerize_loopback_proxy(str(task["proxy"]))}}
 
-    create_data = _docker_exec_json(container, "/createTask", payload, port)
+    solve_timeout = max(1.0, float(timeout or 180))
+    deadline = time.monotonic() + solve_timeout
+    create_data = _docker_exec_json(
+        container,
+        "/createTask",
+        payload,
+        port,
+        min(15.0, max(1.0, deadline - time.monotonic())),
+    )
     if create_data.get("errorId", 0) not in (0, "0", None):
         raise RuntimeError(f"docker 本地过盾 createTask 失败: {create_data}")
     task_id = create_data.get("taskId") or create_data.get("task_id")
@@ -300,14 +427,14 @@ def _docker_solve(endpoint: str, payload: dict[str, Any], timeout: float) -> str
             return token
         raise RuntimeError(f"docker 本地过盾无 taskId: {create_data}")
 
-    solve_timeout = max(30.0, float(timeout or 180))
-    deadline = time.monotonic() + solve_timeout
     while time.monotonic() < deadline:
+        remaining = max(1.0, deadline - time.monotonic())
         result = _docker_exec_json(
             container,
             "/getTaskResult",
             {"clientKey": payload.get("clientKey") or "local", "taskId": task_id},
             port,
+            min(10.0, remaining),
         )
         if result.get("errorId", 0) not in (0, "0", None):
             raise RuntimeError(f"docker 本地过盾任务失败: {result}")
@@ -350,13 +477,18 @@ def solve_turnstile_local(
     if client_key.startswith("AC-"):
         client_key = "local"
     payload = _task_payload(website_url, website_key, task_type, proxy, client_key)
+    deadline = time.monotonic() + max(1.0, float(timeout or 180.0))
 
     if endpoint.startswith("docker://"):
-        return _docker_solve(endpoint, payload, timeout)
+        return _docker_solve(endpoint, payload, max(0.1, deadline - time.monotonic()))
 
     pinned_endpoint = _pin_http_endpoint(endpoint.rstrip("/"))
     try:
-        return _http_solve_with_retries(pinned_endpoint, payload, timeout)
+        return _http_solve_with_retries(
+            pinned_endpoint,
+            payload,
+            max(0.1, deadline - time.monotonic()),
+        )
     except Exception as primary:
         # An HTTP endpoint may be a remote/container service. Only try the
         # legacy local-container fallback when Docker is actually available;
@@ -371,8 +503,13 @@ def solve_turnstile_local(
                     f"HTTP 本地过盾失败: {primary}; 未执行 Docker 回退：服务器未找到 docker 命令。"
                     "请检查 HTTP solver 的 /health，或配置可用的 docker:// 容器端点"
                 ) from primary
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"HTTP 本地过盾失败且总超时预算已耗尽: {primary}"
+                ) from primary
             try:
-                return _docker_solve("docker://grokcli-2api:5072", payload, timeout)
+                return _docker_solve("docker://grokcli-2api:5072", payload, remaining)
             except Exception as secondary:
                 raise RuntimeError(f"HTTP 本地过盾失败: {primary}; docker 回退失败: {secondary}") from secondary
         raise

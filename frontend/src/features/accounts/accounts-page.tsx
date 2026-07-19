@@ -68,6 +68,7 @@ import {
   type QuotaDTO,
 } from "@/features/accounts/accounts-api";
 import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/account-quota";
+import { AccountInspectionDialog } from "@/features/accounts/account-inspection-dialog";
 
 function isAbortError(error: unknown): boolean {
   return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
@@ -665,6 +666,7 @@ export function AccountsPage() {
                 </Tabs>
               </div>
               <div className="flex flex-wrap items-center justify-end gap-1.5">
+                {hasProviderAccounts ? <AccountInspectionDialog provider={provider} selectedIds={[]} /> : null}
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets("all")}>{t("accountBulk.convertAllToBuild")}</Button> : null}
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets("all")}>{t("webConsoleSync.allAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
@@ -701,6 +703,7 @@ export function AccountsPage() {
                   <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}><X />{t("common.clearSelection")}</Button>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <AccountInspectionDialog provider={provider} selectedIds={[...selected]} />
                   <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(true)}>{t("common.enable")}</Button>
                   <Button variant="secondary" size="sm" onClick={() => batchUpdateMutation.mutate(false)}>{t("common.disable")}</Button>
                   {provider === "grok_web" ? <><Button variant="secondary" size="sm" onClick={() => batchNSFWMutation.mutate(true)}>{t("accounts.enableNSFW")}</Button><Button variant="secondary" size="sm" onClick={() => batchNSFWMutation.mutate(false)}>{t("accounts.disableNSFW")}</Button></> : null}

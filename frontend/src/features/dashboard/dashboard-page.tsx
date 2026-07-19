@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Spinner } from "@/components/ui/spinner";
 import { getDashboard, type DashboardPeriod, type DashboardDTO } from "@/features/dashboard/dashboard-api";
+import { getOperations } from "@/features/dashboard/operations-api";
+import { OperationsPanels } from "@/features/dashboard/operations-panels";
 import { useAuth } from "@/shared/auth/use-auth";
 import { ErrorState } from "@/shared/components/data-state";
 import { PeriodSelector } from "@/shared/components/period-selector";
@@ -46,12 +48,18 @@ export function DashboardPage() {
     queryFn: () => getDashboard(period, timezone, forceRefresh.current),
     placeholderData: (previous) => previous,
   });
+  const operationsQuery = useQuery({
+    queryKey: ["operations"],
+    queryFn: getOperations,
+    refetchInterval: 15_000,
+  });
 
   function refreshAll(): void {
     setManualRefreshing(true);
     forceRefresh.current = true;
     void Promise.all([
       dashboardQuery.refetch(),
+      operationsQuery.refetch(),
       new Promise<void>((resolve) => window.setTimeout(resolve, 400)),
     ]).finally(() => {
       forceRefresh.current = false;
@@ -101,6 +109,8 @@ export function DashboardPage() {
       </section>
 
       <TrendPanel dashboard={dashboard} metric={trendMetric} onMetricChange={setTrendMetric} locale={i18n.language} loading={loading} />
+
+      <OperationsPanels value={operationsQuery.data} loading={operationsQuery.isPending} locale={i18n.language} />
 
       <TopModels dashboard={dashboard} locale={i18n.language} loading={loading} />
     </div>

@@ -603,7 +603,7 @@ CHROMIUM_SLIM_FLAGS = [
 ]
 
 
-def create_browser_options():
+def create_browser_options(proxy_override=None):
     options = ChromiumOptions()
     options.auto_port()
     options.set_timeouts(base=1)
@@ -613,20 +613,11 @@ def create_browser_options():
         options.add_extension(EXTENSION_PATH)
     # Apply config.json "proxy" to Chromium. Without this, only HTTP helpers
     # used get_proxies(); the browser itself fell through to system/env proxy.
-    proxy = (config.get("proxy") or "").strip()
+    proxy = ((config.get("proxy") if proxy_override is None else proxy_override) or "").strip()
     if proxy:
-        try:
-            from urllib.parse import urlparse
+        from browser_proxy import configure_chromium_proxy
 
-            u = urlparse(proxy if "://" in proxy else f"http://{proxy}")
-            host = u.hostname or ""
-            if host:
-                port = u.port or (443 if (u.scheme or "http") == "https" else 80)
-                scheme = u.scheme or "http"
-                # Chromium --proxy-server cannot embed user:pass
-                options.set_argument(f"--proxy-server={scheme}://{host}:{port}")
-        except Exception as e:
-            print(f"  [proxy] set browser proxy failed: {e}")
+        configure_chromium_proxy(options, proxy)
     from browser_runtime import apply_browser_runtime
 
     apply_browser_runtime(options)
@@ -3598,4 +3589,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/domain/accountinspection"
 )
 
 var schemaModels = []any{
@@ -31,6 +33,9 @@ var schemaModels = []any{
 	&mediaJobModel{},
 	&mediaAssetModel{},
 	&runtimeSettingsModel{},
+	&registrationReplenishmentModel{},
+	&accountInspectionRunModel{},
+	&accountInspectionResultModel{},
 	&egressNodeModel{},
 	&egressGroupModel{},
 	&egressGroupMemberModel{},
@@ -74,6 +79,13 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_recovery ON media_jobs(status, lease_until, created_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_usage_recovery ON media_jobs(status, usage_recorded_at, completed_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_assets_created ON media_assets(created_at DESC, id)",
+	"CREATE INDEX IF NOT EXISTS idx_registration_replenishment_next ON registration_replenishment_state(next_attempt_at, lease_until, scope)",
+	"CREATE INDEX IF NOT EXISTS idx_account_inspection_runs_claim ON account_inspection_runs(status, lease_until, created_at, id)",
+	"CREATE UNIQUE INDEX IF NOT EXISTS uidx_account_inspection_runs_active_provider ON account_inspection_runs(provider) WHERE status IN ('queued','running')",
+	"CREATE INDEX IF NOT EXISTS idx_account_inspection_runs_provider_created ON account_inspection_runs(provider, created_at DESC, id DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_account_inspection_results_run_class ON account_inspection_results(run_id, classification, account_id)",
+	"CREATE INDEX IF NOT EXISTS idx_account_inspection_results_account_created ON account_inspection_results(account_id, created_at DESC, run_id)",
+	"CREATE INDEX IF NOT EXISTS idx_account_inspection_results_apply_claim ON account_inspection_results(run_id, apply_status, apply_lease_until, account_id)",
 }
 
 // InitializeSchema 以当前持久化模型作为首版数据库结构基线。
@@ -87,6 +99,23 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 	}
 	if err := db.AutoMigrate(schemaModels...); err != nil {
 		return fmt.Errorf("初始化数据库表: %w", err)
+	}
+	if err := db.Model(&accountInspectionResultModel{}).
+		Where("applied_at IS NOT NULL AND apply_status = ?", accountinspection.ApplyStatusPending).
+		Updates(map[string]any{"apply_status": accountinspection.ApplyStatusApplied}).Error; err != nil {
+		return fmt.Errorf("回填巡检处置状态: %w", err)
+	}
+	terminalInspectionRuns := db.Model(&accountInspectionRunModel{}).
+		Select("id").Where("status IN ?", []accountinspection.RunStatus{
+		accountinspection.RunStatusCompleted, accountinspection.RunStatusFailed, accountinspection.RunStatusCancelled,
+	})
+	if err := db.Model(&accountInspectionResultModel{}).
+		Where("applied_at IS NULL AND apply_status = ? AND run_id IN (?)", accountinspection.ApplyStatusPending, terminalInspectionRuns).
+		Updates(map[string]any{
+			"apply_status": accountinspection.ApplyStatusSkipped,
+			"apply_error":  "terminal_result_not_auto_applied",
+		}).Error; err != nil {
+		return fmt.Errorf("回填终态巡检处置状态: %w", err)
 	}
 	if err := d.ensureConsoleConstraints(ctx); err != nil {
 		return fmt.Errorf("迁移 Console 数据库约束: %w", err)
@@ -103,18 +132,20 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 }
 
 type consoleConstraint struct {
-	model any
-	table string
-	name  string
+	model    any
+	table    string
+	name     string
+	required string
 }
 
 func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 	constraints := []consoleConstraint{
-		{model: &accountModel{}, table: "provider_accounts", name: "chk_accounts_provider"},
-		{model: &modelRouteModel{}, table: "model_routes", name: "chk_model_routes_provider"},
-		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_provider"},
-		{model: &responseOwnershipModel{}, table: "response_ownership", name: "chk_response_ownership_provider"},
-		{model: &egressNodeModel{}, table: "egress_nodes", name: "chk_egress_nodes_specific_scope"},
+		{model: &accountModel{}, table: "provider_accounts", name: "chk_accounts_provider", required: "grok_console"},
+		{model: &modelRouteModel{}, table: "model_routes", name: "chk_model_routes_provider", required: "grok_console"},
+		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_provider", required: "grok_console"},
+		{model: &responseOwnershipModel{}, table: "response_ownership", name: "chk_response_ownership_provider", required: "grok_console"},
+		{model: &egressNodeModel{}, table: "egress_nodes", name: "chk_egress_nodes_specific_scope", required: "grok_console"},
+		{model: &registrationReplenishmentModel{}, table: "registration_replenishment_state", name: "chk_registration_replenishment_status", required: "verifying"},
 	}
 	migrate := func() error {
 		db := d.db.WithContext(ctx)
@@ -123,7 +154,7 @@ func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if strings.Contains(definition, "grok_console") {
+			if strings.Contains(definition, value.required) {
 				continue
 			}
 			if definition != "" {

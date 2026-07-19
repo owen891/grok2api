@@ -119,6 +119,18 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Build browser registration runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: browser-runtime
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.arch }}-browser
+          provenance: false
+          sbom: false
+
   build_ghcr_image:
     name: Publish image (${{ matrix.arch }})
     if: github.event_name == 'push'
@@ -162,6 +174,16 @@ jobs:
             type=ref,event=tag,suffix=-${{ matrix.arch }}
             type=raw,value=latest-${{ matrix.arch }},enable=${{ github.ref == 'refs/heads/main' }}
 
+      - name: Browser image metadata
+        id: browser_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch,suffix=-browser-${{ matrix.arch }}
+            type=ref,event=tag,suffix=-browser-${{ matrix.arch }}
+            type=raw,value=latest-browser-${{ matrix.arch }},enable=${{ github.ref == 'refs/heads/main' }}
+
       - name: Login to GHCR
         uses: docker/login-action@v4
         with:
@@ -180,6 +202,21 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Build and publish browser registration runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: browser-runtime
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.browser_meta.outputs.tags }}
+          labels: ${{ steps.browser_meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.arch }}-browser
+          cache-to: type=gha,scope=${{ matrix.arch }}-browser,mode=max
           provenance: mode=max
           sbom: true
 
@@ -214,6 +251,16 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
+      - name: Browser image metadata
+        id: browser_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch,suffix=-browser
+            type=ref,event=tag,suffix=-browser
+            type=raw,value=latest-browser,enable=${{ github.ref == 'refs/heads/main' }}
+
       - name: Login to GHCR
         uses: docker/login-action@v4
         with:
@@ -230,6 +277,23 @@ jobs:
               "${tag}-amd64" \
               "${tag}-arm64"
           done
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
 
       - name: Inspect image
         run: docker buildx imagetools inspect "${{ steps.image.outputs.name }}:${{ steps.meta.outputs.version }}"
+
+      - name: Create browser manifest list
+        shell: bash
+        run: |
+          jq -cr '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON" | while read -r tag; do
+            docker buildx imagetools create \
+              -t "$tag" \
+              "${tag}-amd64" \
+              "${tag}-arm64"
+          done
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.browser_meta.outputs.json }}
+
+      - name: Inspect browser image
+        run: docker buildx imagetools inspect "${{ steps.image.outputs.name }}:${{ steps.browser_meta.outputs.version }}"

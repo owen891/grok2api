@@ -18,6 +18,7 @@ services:
       REGISTRATION_CPA_HOTLOAD_DIR: "/app/data/registration/spool/incoming"
       REGISTRATION_DISABLE_REMOTE_IMPORT: "1"
       REGISTRATION_CAPTCHA_ENDPOINT: "${REGISTRATION_CAPTCHA_ENDPOINT:-http://grok-turnstile-solver:5072}"
+      REGISTRATION_CAPTCHA_CONCURRENCY: "${TURNSTILE_THREAD:-1}"
       REGISTRATION_PROXY: "${REGISTRATION_PROXY:-}"
       REGISTRATION_SOLVER_PROXY: "${REGISTRATION_SOLVER_PROXY:-}"
       REGISTRATION_HTTP_PROXY: "${REGISTRATION_HTTP_PROXY:-}"
@@ -37,8 +38,6 @@ services:
       - "${GROK2API_DATA_DIR:-/opt/grok2api-data}/registration/protocol_auth/sso_output:/app/registration/protocol_auth/sso_output"
     depends_on:
       grok-web-browser:
-        condition: service_healthy
-      grok-turnstile-solver:
         condition: service_healthy
     restart: unless-stopped
     init: true
@@ -80,7 +79,7 @@ services:
       - no-new-privileges:true
 
   grok-turnstile-solver:
-    image: grok-turnstile-solver:0d48ecf8b4ee
+    image: "${GROK2API_SOLVER_IMAGE:-ghcr.io/owen891/grok2api:solver-0d48ecf8b4ee-fixed}"
     entrypoint:
       - /bin/bash
       - /opt/grok2api/turnstile-solver-entrypoint.sh

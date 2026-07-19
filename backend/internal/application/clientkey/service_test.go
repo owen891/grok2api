@@ -88,6 +88,35 @@ func TestAuthenticateDistinguishesRuntimeStoreFailures(t *testing.T) {
 	}
 }
 
+func TestAuthenticateForPollingSkipsInferenceLimiters(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "poll-auth.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repo := relational.NewClientKeyRepository(database)
+	created, err := NewService(repo, nil, nil, 60, 5, testCipher(t)).Create(ctx, CreateInput{Name: "poll", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limiter := &pollingAwareRateLimiter{}
+	service := NewService(repo, limiter, failingConcurrencyLimiter{}, 60, 5, testCipher(t))
+	value, err := service.AuthenticateForPolling(ctx, created.Secret)
+	if err != nil || value.ID != created.Key.ID {
+		t.Fatalf("poll authentication = %#v, err=%v", value, err)
+	}
+	if _, _, err := service.Authenticate(ctx, created.Secret); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("inference authentication error = %v", err)
+	}
+	if len(limiter.keys) != 2 || !strings.HasPrefix(limiter.keys[0], "client-poll:") || limiter.limits[0] != pollingRPMLimit || strings.HasPrefix(limiter.keys[1], "client-poll:") {
+		t.Fatalf("rate limiter calls: keys=%v limits=%v", limiter.keys, limiter.limits)
+	}
+}
+
 func TestBillingLimitUsesAtomicReservations(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "billing-limit.db"))
@@ -199,6 +228,23 @@ type successfulRateLimiter struct{}
 
 func (successfulRateLimiter) Allow(context.Context, string, int, time.Time) (bool, error) {
 	return true, nil
+}
+
+type rejectingRateLimiter struct{}
+
+func (rejectingRateLimiter) Allow(context.Context, string, int, time.Time) (bool, error) {
+	return false, nil
+}
+
+type pollingAwareRateLimiter struct {
+	keys   []string
+	limits []int
+}
+
+func (r *pollingAwareRateLimiter) Allow(_ context.Context, key string, limit int, _ time.Time) (bool, error) {
+	r.keys = append(r.keys, key)
+	r.limits = append(r.limits, limit)
+	return strings.HasPrefix(key, "client-poll:"), nil
 }
 
 type failingConcurrencyLimiter struct{}

@@ -37,6 +37,7 @@ const (
 	freeUsageWindow             time.Duration = accountdomain.FreeUsageWindow
 	forcedRefreshMinInterval    time.Duration = 30 * time.Second
 	paidProbeRetryInterval      time.Duration = 15 * time.Minute
+	confirmedQuotaProbeInterval time.Duration = 15 * time.Minute
 	credentialRefreshAdvance    time.Duration = 3 * time.Minute
 	credentialRefreshSafetyPoll time.Duration = time.Minute
 	credentialRefreshTimeout    time.Duration = 30 * time.Second
@@ -1144,6 +1145,24 @@ func (s *Service) MarkReauthRequired(ctx context.Context, id uint64, reason stri
 	return nil
 }
 
+// MarkInspectionHealthy clears an obsolete reauth marker after a confirmed
+// real upstream request. It intentionally preserves the operator's enabled flag.
+func (s *Service) MarkInspectionHealthy(ctx context.Context, id uint64) (accountdomain.Credential, error) {
+	value, err := s.accounts.Get(ctx, id)
+	if err != nil {
+		return accountdomain.Credential{}, mapRepositoryError(err)
+	}
+	if value.AuthStatus == accountdomain.AuthStatusReauthRequired {
+		value.AuthStatus = accountdomain.AuthStatusActive
+		value.LastError = ""
+		value, err = s.accounts.Update(ctx, value)
+		if err != nil {
+			return accountdomain.Credential{}, mapRepositoryError(err)
+		}
+	}
+	return value, nil
+}
+
 // EnsureCredential 在即将过期时刷新 token，同一账号并发请求只执行一次刷新。
 func (s *Service) EnsureCredential(ctx context.Context, value accountdomain.Credential, force bool) (accountdomain.Credential, error) {
 	return s.ensureCredential(ctx, value, force, false, false)
@@ -1482,6 +1501,7 @@ func (s *Service) DecrementWebQuota(ctx context.Context, id uint64, mode string,
 }
 
 func (s *Service) ExhaustQuota(ctx context.Context, id uint64, mode string, resetAt *time.Time) error {
+	now := s.now()
 	if resetAt == nil {
 		windows, err := s.accounts.GetQuotaWindows(ctx, []uint64{id})
 		if err == nil {
@@ -1489,18 +1509,22 @@ func (s *Service) ExhaustQuota(ctx context.Context, id uint64, mode string, rese
 				if window.Mode != mode {
 					continue
 				}
-				if window.ResetAt != nil && window.ResetAt.After(s.now()) {
+				if window.ResetAt != nil && window.ResetAt.After(now) {
 					value := *window.ResetAt
 					resetAt = &value
 				} else if window.WindowSeconds > 0 {
-					value := s.now().Add(time.Duration(window.WindowSeconds) * time.Second)
+					value := now.Add(time.Duration(window.WindowSeconds) * time.Second)
 					resetAt = &value
 				}
 				break
 			}
 		}
 	}
-	if err := s.accounts.ExhaustQuotaWindow(ctx, id, mode, resetAt, s.now()); err != nil {
+	if resetAt == nil {
+		value := now.Add(confirmedQuotaProbeInterval)
+		resetAt = &value
+	}
+	if err := s.accounts.ExhaustQuotaWindow(ctx, id, mode, resetAt, now); err != nil {
 		return err
 	}
 	if resetAt != nil && s.quotaQueue != nil {

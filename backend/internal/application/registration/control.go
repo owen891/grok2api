@@ -9,10 +9,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,8 +23,12 @@ import (
 )
 
 const (
-	maxRegistrationLogLines = 500
-	maxRegistrationLogBytes = 5 << 20
+	maxRegistrationLogLines    = 500
+	maxRegistrationLogBytes    = 5 << 20
+	registrationEngineProtocol = "protocol"
+	registrationEngineBrowser  = "browser"
+	defaultBrowserSignupURL    = "https://accounts.x.ai/sign-up?redirect=grok-com"
+	defaultBrowserEgressURL    = "https://api64.ipify.org?format=json"
 )
 
 var (
@@ -245,6 +251,10 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 	if err := c.ensureWorkerConfigLocked(); err != nil {
 		return Status{}, err
 	}
+	engine, err := c.engineLocked()
+	if err != nil {
+		return Status{}, err
+	}
 	if err := c.resolveProxyGroupLocked(ctx, registrationProxyScope(accountType)); err != nil {
 		return Status{}, err
 	}
@@ -275,26 +285,45 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 		value = 1
 	}
 	target := &value
-	if err := os.Remove(c.protocolStatePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(c.workerStatePath(engine)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		c.releaseLockLocked()
-		return Status{}, fmt.Errorf("清理协议注册状态: %w", err)
+		return Status{}, fmt.Errorf("clear %s registration state: %w", engine, err)
 	}
 
-	protocolScript := filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
-	if _, err := os.Stat(protocolScript); err != nil {
+	workerScript := c.workerScriptPath(engine)
+	if _, err := os.Stat(workerScript); err != nil {
 		c.releaseLockLocked()
-		return Status{}, fmt.Errorf("协议注册脚本不存在: %w", err)
+		return Status{}, fmt.Errorf("%s registration script does not exist: %w", engine, err)
 	}
-	arguments := protocolWorkerArguments(c.config.Command, protocolScript,
-		"--config", c.config.ConfigPath,
-		"--state-dir", c.dataPath(),
-		"--log-file", c.logPath(),
-		"--count", strconv.Itoa(input.Count),
-		"--threads", strconv.Itoa(input.Threads),
-		"--account-type", accountType,
-	)
-	if effectiveProxy != "" {
-		arguments = append(arguments, "--proxy", effectiveProxy)
+	var arguments []string
+	if engine == registrationEngineBrowser {
+		arguments = browserWorkerArguments(c.config.Command, workerScript,
+			"--config", c.config.ConfigPath,
+			"--state-dir", c.dataPath(),
+			"--log-file", c.logPath(),
+			"--accounts-file", c.browserLedgerPath(),
+			"--count", strconv.Itoa(input.Count),
+			"--threads", strconv.Itoa(input.Threads),
+			"--account-type", accountType,
+		)
+		if accountType == "build" {
+			arguments = append(arguments, "--inline-mint")
+		}
+		if effectiveProxy != "" {
+			arguments = append(arguments, "--proxy", effectiveProxy)
+		}
+	} else {
+		arguments = protocolWorkerArguments(c.config.Command, workerScript,
+			"--config", c.config.ConfigPath,
+			"--state-dir", c.dataPath(),
+			"--log-file", c.logPath(),
+			"--count", strconv.Itoa(input.Count),
+			"--threads", strconv.Itoa(input.Threads),
+			"--account-type", accountType,
+		)
+		if effectiveProxy != "" {
+			arguments = append(arguments, "--proxy", effectiveProxy)
+		}
 	}
 	if input.Extra > 0 {
 		arguments = append(arguments, "--extra", strconv.Itoa(input.Extra))
@@ -306,9 +335,9 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 		arguments = append(arguments, "--auto-nsfw")
 	}
 	command := exec.Command(c.config.Command[0], arguments...)
-	c.appendLogLocked(fmt.Sprintf("[website] 启动协议注册任务: 类型=%s 数量=%d 追加=%d 线程=%d", accountType, input.Count, input.Extra, input.Threads))
+	c.appendLogLocked(fmt.Sprintf("[website] starting %s registration: account_type=%s count=%d extra=%d threads=%d", engine, accountType, input.Count, input.Extra, input.Threads))
 	command.Dir = c.config.WorkDir
-	command.Env = c.workerEnvironment()
+	command.Env = c.workerEnvironmentForEngine(engine)
 	prepareProcess(command)
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -326,7 +355,7 @@ func (c *Controller) Start(ctx context.Context, input StartInput) (Status, error
 	writer.Close()
 	now := time.Now().UTC()
 	state = persistedState{
-		Engine: "protocol", Running: true, PID: command.Process.Pid, StartedAt: &now,
+		Engine: engine, Running: true, PID: command.Process.Pid, StartedAt: &now,
 		ProgressMode: mode, TargetCount: target,
 	}
 	if err := c.writeStateLocked(state); err != nil {
@@ -500,7 +529,7 @@ func preflightCheckLabel(name string) string {
 		"registrationData": "注册数据目录", "spool": "任务队列目录", "engine": "注册引擎", "emailSources": "邮件来源",
 		"emailCredentials": "邮件凭据", "cpaBaseURL": "CPA 地址", "proxy": "代理", "cpaProxy": "CPA 代理",
 		"captchaEndpoint": "清障服务地址", "captchaSolver": "清障方案", "yescaptcha": "YesCaptcha 配置",
-		"protocolWorker": "协议 Worker", "dependencies": "协议依赖",
+		"protocolWorker": "协议 Worker", "dependencies": "协议依赖", "egressIP": "出口 IP",
 	}
 	if label, ok := labels[name]; ok {
 		return label
@@ -528,7 +557,7 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	dataErr := ensurePrivateDirectory(c.dataPath())
 	add("registrationData", dataErr == nil, c.dataPath())
 	spoolErr := ensurePrivateDirectory(filepath.Join(c.config.SpoolPath, "incoming"))
-	add("spool", spoolErr == nil, c.config.SpoolPath)
+	add("spool", spoolErr == nil && directoryWritable(filepath.Join(c.config.SpoolPath, "incoming")), c.config.SpoolPath)
 	add("logDirectory", ensurePrivateDirectory(c.dataPath()) == nil, c.logPath())
 
 	settings := WorkerSettings{}
@@ -537,7 +566,11 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		configValue, _ = readJSONMap(c.config.ConfigPath)
 		settings = settingsView(configValue)
 	}
-	add("engine", true, "protocol")
+	engine, engineErr := normalizeRegistrationEngine(settings.Engine)
+	add("engine", configErr == nil && engineErr == nil, settings.Engine)
+	if engineErr != nil {
+		engine = registrationEngineProtocol
+	}
 	enabledSources := make([]EmailSourceSettings, 0, len(settings.EmailSources))
 	credentialsReady := true
 	for _, source := range settings.EmailSources {
@@ -567,7 +600,7 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	} else {
 		add("cpaBaseURL", true, "协议模式不执行浏览器 CPA 探测")
 	}
-	_, proxyOK, proxyDetail := resolveRegistrationProxy(settings.Proxy)
+	effectiveProxy, proxyOK, proxyDetail := resolveRegistrationProxy(settings.Proxy)
 	add("proxy", proxyOK, proxyDetail)
 	if strings.TrimSpace(settings.CPAProxy) == "" {
 		add("cpaProxy", true, "未单独配置，沿用注册代理")
@@ -577,53 +610,99 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	}
 	cpaDir := filepath.Join(c.dataPath(), "cpa_auths")
 	add("cpaAuthDir", ensurePrivateDirectory(cpaDir) == nil, cpaDir)
-	solver := strings.ToLower(strings.TrimSpace(stringValue(configValue["clearance_provider"], stringValue(configValue["captcha_solver"], "docker"))))
-	if solver == "docker" {
-		solver = "local"
-	}
-	if solver == "" {
-		solver = "local"
-	}
-	yesKey := strings.TrimSpace(stringValue(configValue["yescaptcha_api_key"], ""))
-	if yesKey == "" {
-		yesKey = strings.TrimSpace(stringValue(configValue["yes_captcha_key"], ""))
-	}
-	if yesKey == "" {
-		yesKey = strings.TrimSpace(stringValue(configValue["captcha_api_key"], ""))
-	}
-	// YYDS 的 AC- key 不能当 YesCaptcha
-	if strings.HasPrefix(yesKey, "AC-") {
-		yesKey = ""
-	}
-	if solver == "local" {
-		ep := strings.TrimSpace(stringValue(configValue["captcha_endpoint"], ""))
-		if ep == "" {
-			ep = strings.TrimSpace(stringValue(configValue["local_captcha_endpoint"], ""))
+	workerScript := c.workerScriptPath(engine)
+	if engine == registrationEngineBrowser {
+		browserModule := filepath.Join(c.config.WorkDir, "grok_register_ttk.py")
+		manifest := filepath.Join(c.config.WorkDir, "turnstilePatch", "manifest.json")
+		contentScript := filepath.Join(c.config.WorkDir, "turnstilePatch", "content.js")
+		addRegularFileCheck(add, "browserWorker", workerScript)
+		addRegularFileCheck(add, "browserModule", browserModule)
+		addRegularFileCheck(add, "turnstileManifest", manifest)
+		addRegularFileCheck(add, "turnstileContent", contentScript)
+		browserPath, browserErr := resolveBrowserExecutable(c.config.BrowserPath)
+		browserDetail := browserPath
+		if browserErr != nil {
+			browserDetail = browserErr.Error()
 		}
-		add("captchaEndpoint", ep != "", ep)
-		add("captchaSolver", true, "local-http")
+		add("chromium", browserErr == nil, browserDetail)
+		displayOK, displayDetail := browserDisplayReady(c.workerEnvironmentForEngine(engine))
+		add("display", displayOK, displayDetail)
+		add("cpaAuthWritable", directoryWritable(cpaDir), cpaDir)
+		add("oauthConfig", browserOAuthConfigReady(configValue), "inline Build OAuth and CPA spool")
+		proxyAuthOK, proxyAuthDetail := browserProxyAuthenticationReady(effectiveProxy)
+		add("browserProxyAuth", proxyAuthOK, proxyAuthDetail)
+		cpaBrowserProxy := effectiveProxy
+		if strings.TrimSpace(settings.CPAProxy) != "" {
+			resolved, ok, _ := resolveRegistrationProxy(settings.CPAProxy)
+			if ok {
+				cpaBrowserProxy = resolved
+			}
+		}
+		cpaProxyAuthOK, cpaProxyAuthDetail := browserProxyAuthenticationReady(cpaBrowserProxy)
+		add("cpaBrowserProxyAuth", cpaProxyAuthOK, cpaProxyAuthDetail)
+		egressURL := strings.TrimSpace(os.Getenv("REGISTRATION_PREFLIGHT_EGRESS_URL"))
+		if egressURL == "" {
+			egressURL = strings.TrimSpace(stringValue(configValue["egress_check_url"], defaultBrowserEgressURL))
+		}
+		egressOK, egressDetail := probeEgressIP(ctx, egressURL, effectiveProxy)
+		add("egressIP", proxyOK && egressOK, egressDetail)
+
+		signupURL := strings.TrimSpace(os.Getenv("REGISTRATION_PREFLIGHT_SIGNUP_URL"))
+		if signupURL == "" {
+			signupURL = strings.TrimSpace(stringValue(configValue["signup_url"], defaultBrowserSignupURL))
+		}
+		reachable, detail := probeBrowserRegistrationPage(ctx, signupURL, effectiveProxy)
+		add("registrationPage", proxyOK && reachable, detail)
+		for _, source := range enabledSources {
+			target := browserEmailProbeURL(source)
+			reachable, detail := probeHTTPReachability(ctx, target, effectiveProxy)
+			add("emailReachability:"+source.ID, reachable, detail)
+		}
 	} else {
-		add("yescaptcha", yesKey != "", "yescaptcha_api_key")
+		solver := strings.ToLower(strings.TrimSpace(stringValue(configValue["clearance_provider"], stringValue(configValue["captcha_solver"], "docker"))))
+		if solver == "docker" || solver == "" {
+			solver = "local"
+		}
+		yesKey := strings.TrimSpace(stringValue(configValue["yescaptcha_api_key"], ""))
+		if yesKey == "" {
+			yesKey = strings.TrimSpace(stringValue(configValue["yes_captcha_key"], ""))
+		}
+		if yesKey == "" {
+			yesKey = strings.TrimSpace(stringValue(configValue["captcha_api_key"], ""))
+		}
+		if strings.HasPrefix(yesKey, "AC-") {
+			yesKey = ""
+		}
+		if solver == "local" {
+			ep := strings.TrimSpace(stringValue(configValue["captcha_endpoint"], ""))
+			if ep == "" {
+				ep = strings.TrimSpace(stringValue(configValue["local_captcha_endpoint"], ""))
+			}
+			add("captchaEndpoint", ep != "", ep)
+			add("captchaSolver", true, "local-http")
+		} else {
+			add("yescaptcha", yesKey != "", "yescaptcha_api_key")
+		}
+		addRegularFileCheck(add, "protocolWorker", workerScript)
+		add("oauthConfig", oauthConfigReady(configValue), "OAuth authorization and import configuration")
 	}
-	protocolScript := filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
-	_, protocolErr := os.Stat(protocolScript)
-	add("protocolWorker", protocolErr == nil, protocolScript)
-	add("oauthConfig", oauthConfigReady(configValue), "OAuth 授权模块、端点和 Turnstile 配置")
 
 	dependencyOK := false
 	dependencyDetail := "worker unavailable"
 	if commandErr == nil && workErr == nil {
 		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		arguments := protocolWorkerArguments(c.config.Command, protocolScript,
-			"--preflight",
-			"--config", c.config.ConfigPath,
-			"--state-dir", c.dataPath(),
-			"--log-file", c.logPath(),
-		)
+		probeArguments := []string{
+			"--preflight", "--config", c.config.ConfigPath,
+			"--state-dir", c.dataPath(), "--log-file", c.logPath(),
+		}
+		arguments := protocolWorkerArguments(c.config.Command, workerScript, probeArguments...)
+		if engine == registrationEngineBrowser {
+			arguments = browserWorkerArguments(c.config.Command, workerScript, probeArguments...)
+		}
 		probe := exec.CommandContext(probeCtx, c.config.Command[0], arguments...)
 		probe.Dir = c.config.WorkDir
-		probe.Env = c.workerEnvironment()
+		probe.Env = c.workerEnvironmentForEngine(engine)
 		output, err := probe.CombinedOutput()
 		dependencyOK = err == nil
 		dependencyDetail = "ready"
@@ -635,6 +714,10 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		}
 	}
 	add("dependencies", dependencyOK, truncateText(dependencyDetail, 500))
+	if engine == registrationEngineBrowser {
+		add("grokRegisterImport", dependencyOK, truncateText(dependencyDetail, 500))
+		add("drissionPage", dependencyOK, truncateText(dependencyDetail, 500))
+	}
 	result := PreflightResult{OK: true, Checks: checks, Config: settings}
 	for _, check := range checks {
 		result.OK = result.OK && check.OK
@@ -649,6 +732,261 @@ func oauthConfigReady(config map[string]any) bool {
 	// The protocol worker performs the import and endpoint checks. This guard
 	// catches an accidentally replaced config before spawning that worker.
 	return strings.TrimSpace(stringValue(config["engine"], "protocol")) == "protocol"
+}
+
+func browserOAuthConfigReady(config map[string]any) bool {
+	if !boolValue(config["cpa_export_enabled"], true) {
+		return false
+	}
+	_, err := validateCPABaseURL(stringValue(config["cpa_base_url"], "https://cli-chat-proxy.grok.com/v1"))
+	return err == nil
+}
+
+func addRegularFileCheck(add func(string, bool, string), name, path string) {
+	info, err := os.Stat(path)
+	add(name, err == nil && info.Mode().IsRegular(), path)
+}
+
+func directoryWritable(path string) bool {
+	if err := ensurePrivateDirectory(path); err != nil {
+		return false
+	}
+	file, err := os.CreateTemp(path, ".registration-write-check-*")
+	if err != nil {
+		return false
+	}
+	name := file.Name()
+	if closeErr := file.Close(); closeErr != nil {
+		_ = os.Remove(name)
+		return false
+	}
+	return os.Remove(name) == nil
+}
+
+func resolveBrowserExecutable(configured string) (string, error) {
+	candidate := strings.TrimSpace(configured)
+	if candidate == "" {
+		candidate = strings.TrimSpace(os.Getenv("REGISTRATION_BROWSER_PATH"))
+	}
+	if candidate != "" {
+		path, err := filepath.Abs(candidate)
+		if err == nil {
+			candidate = path
+		}
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().IsRegular() {
+			return candidate, nil
+		}
+		return "", fmt.Errorf("configured browser executable is unavailable: %s", candidate)
+	}
+	for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "msedge"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	if runtime.GOOS == "windows" {
+		for _, base := range []string{os.Getenv("PROGRAMFILES"), os.Getenv("PROGRAMFILES(X86)"), os.Getenv("LOCALAPPDATA")} {
+			if base == "" {
+				continue
+			}
+			for _, relative := range []string{
+				filepath.Join("Google", "Chrome", "Application", "chrome.exe"),
+				filepath.Join("Microsoft", "Edge", "Application", "msedge.exe"),
+			} {
+				candidate := filepath.Join(base, relative)
+				if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+					return candidate, nil
+				}
+			}
+		}
+	}
+	return "", errors.New("Chromium or a compatible Chrome/Edge executable was not found")
+}
+
+func browserDisplayReady(environment []string) (bool, string) {
+	if runtime.GOOS != "linux" {
+		return true, runtime.GOOS + " does not require DISPLAY preflight"
+	}
+	mode := strings.ToLower(strings.TrimSpace(workerEnvironmentValue(environment, "REGISTRATION_BROWSER_MODE")))
+	if mode == "headless" {
+		return true, "headless"
+	}
+	if display := strings.TrimSpace(workerEnvironmentValue(environment, "DISPLAY")); display != "" {
+		return true, "DISPLAY=" + display
+	}
+	if path, err := exec.LookPath("Xvfb"); err == nil {
+		return true, path
+	}
+	return false, "DISPLAY is empty and Xvfb is unavailable"
+}
+
+func browserEmailProbeURL(source EmailSourceSettings) string {
+	base := strings.TrimRight(strings.TrimSpace(source.APIBase), "/")
+	if source.Type == "yyds" && !strings.HasSuffix(base, "/domains") {
+		return base + "/domains"
+	}
+	return base
+}
+
+func browserProxyAuthenticationReady(proxy string) (bool, string) {
+	if strings.TrimSpace(proxy) == "" {
+		return true, "direct connection"
+	}
+	parsed, err := url.Parse(proxy)
+	if err != nil {
+		return false, "invalid proxy URL"
+	}
+	if parsed.User != nil {
+		scheme := strings.ToLower(parsed.Scheme)
+		if scheme != "http" && scheme != "https" {
+			return false, "authenticated SOCKS proxy requires a local unauthenticated relay"
+		}
+		return true, "authenticated " + scheme + " proxy via Chromium auth extension"
+	}
+	return true, parsed.Scheme + "://" + parsed.Host
+}
+
+func probeHTTPReachability(ctx context.Context, target, proxy string) (bool, string) {
+	targetURL, err := url.ParseRequestURI(strings.TrimSpace(target))
+	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" {
+		return false, "invalid URL"
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	if strings.TrimSpace(proxy) != "" {
+		proxyURL, parseErr := url.Parse(proxy)
+		if parseErr != nil {
+			return false, "invalid proxy URL"
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, targetURL.String(), nil)
+	if err != nil {
+		return false, "request setup failed"
+	}
+	request.Header.Set("User-Agent", "Mozilla/5.0 Grok2API-Registration-Preflight")
+	response, err := (&http.Client{Transport: transport, Timeout: 12 * time.Second}).Do(request)
+	if err != nil {
+		detail := err.Error()
+		if proxy != "" {
+			detail = strings.ReplaceAll(detail, proxy, "<registration-proxy>")
+		}
+		return false, targetURL.Host + ": " + truncateText(detail, 240)
+	}
+	defer response.Body.Close()
+	_, _ = io.CopyN(io.Discard, response.Body, 1024)
+	ok := response.StatusCode < http.StatusInternalServerError
+	return ok, targetURL.Host + ": " + response.Status
+}
+
+// probeBrowserRegistrationPage is intentionally stricter than the generic
+// reachability probe. A 4xx response (especially Cloudflare's challenge page)
+// proves that the TCP route exists, but it is not a usable browser-registration
+// route and would otherwise leave a worker retrying a page with no sign-up UI.
+func probeBrowserRegistrationPage(ctx context.Context, target, proxy string) (bool, string) {
+	targetURL, err := url.ParseRequestURI(strings.TrimSpace(target))
+	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" {
+		return false, "invalid URL"
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	if strings.TrimSpace(proxy) != "" {
+		proxyURL, parseErr := url.Parse(proxy)
+		if parseErr != nil {
+			return false, "invalid proxy URL"
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, targetURL.String(), nil)
+	if err != nil {
+		return false, "request setup failed"
+	}
+	request.Header.Set("User-Agent", "Mozilla/5.0 Grok2API-Registration-Preflight")
+	response, err := (&http.Client{Transport: transport, Timeout: 12 * time.Second}).Do(request)
+	if err != nil {
+		detail := err.Error()
+		if proxy != "" {
+			detail = strings.ReplaceAll(detail, proxy, "<registration-proxy>")
+		}
+		return false, targetURL.Host + ": " + truncateText(detail, 240)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 16*1024))
+	detail := targetURL.Host + ": " + response.Status
+	if response.StatusCode >= http.StatusBadRequest {
+		return false, detail
+	}
+	page := strings.ToLower(string(body))
+	if strings.EqualFold(strings.TrimSpace(response.Header.Get("cf-mitigated")), "challenge") ||
+		strings.Contains(page, "attention required! | cloudflare") ||
+		strings.Contains(page, "/cdn-cgi/challenge-platform/") {
+		return false, detail + " (Cloudflare challenge)"
+	}
+	return true, detail
+}
+
+func probeEgressIP(ctx context.Context, target, proxy string) (bool, string) {
+	targetURL, err := url.ParseRequestURI(strings.TrimSpace(target))
+	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" {
+		return false, "invalid URL"
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	if strings.TrimSpace(proxy) != "" {
+		proxyURL, parseErr := url.Parse(proxy)
+		if parseErr != nil {
+			return false, "invalid proxy URL"
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, targetURL.String(), nil)
+	if err != nil {
+		return false, "request setup failed"
+	}
+	request.Header.Set("User-Agent", "Mozilla/5.0 Grok2API-Registration-Preflight")
+	response, err := (&http.Client{Transport: transport, Timeout: 12 * time.Second}).Do(request)
+	if err != nil {
+		detail := err.Error()
+		if proxy != "" {
+			detail = strings.ReplaceAll(detail, proxy, "<registration-proxy>")
+		}
+		return false, targetURL.Host + ": " + truncateText(detail, 240)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= http.StatusInternalServerError {
+		return false, targetURL.Host + ": " + response.Status
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 4096))
+	if err != nil {
+		return false, targetURL.Host + ": unreadable response"
+	}
+	candidate := ""
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) == nil {
+		candidate = strings.TrimSpace(stringValue(payload["ip"], ""))
+	}
+	if candidate == "" {
+		for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "ip=") {
+				candidate = strings.TrimSpace(strings.TrimPrefix(line, "ip="))
+				break
+			}
+			if candidate == "" {
+				candidate = line
+			}
+		}
+	}
+	if net.ParseIP(candidate) == nil {
+		return false, targetURL.Host + ": response did not contain an IP address"
+	}
+	return true, candidate + " via " + targetURL.Host
 }
 
 func (c *Controller) monitor(command *exec.Cmd, reader *os.File, done chan struct{}) {
@@ -699,23 +1037,36 @@ func (c *Controller) statusLocked(state persistedState) Status {
 }
 
 func (c *Controller) progressLocked(state persistedState) Progress {
+	if normalizedRegistrationEngine(state.Engine) == registrationEngineBrowser {
+		return c.browserProgressLocked(state, countNonEmptyLines(c.browserLedgerPath()))
+	}
 	return c.protocolProgressLocked(state, countProtocolAccounts(c.protocolLedgerPath()))
 }
 
 func (c *Controller) protocolProgressLocked(state persistedState, accountCount int) Progress {
+	return c.workerProgressLocked(state, accountCount, c.protocolStatePath())
+}
+
+func (c *Controller) browserProgressLocked(state persistedState, accountCount int) Progress {
+	return c.workerProgressLocked(state, accountCount, c.browserStatePath())
+}
+
+func (c *Controller) workerProgressLocked(state persistedState, accountCount int, statePath string) Progress {
 	done := 0
 	total := 0
 	progress := Progress{Mode: state.ProgressMode, AccountCount: accountCount}
-	if data, err := os.ReadFile(c.protocolStatePath()); err == nil {
+	if data, err := os.ReadFile(statePath); err == nil {
 		var worker struct {
-			Done      int  `json:"done"`
-			Target    int  `json:"target"`
-			Attempted *int `json:"attempted"`
-			OK        int  `json:"ok"`
-			Failed    int  `json:"failed"`
-			Resumable int  `json:"resumable"`
+			Done       int  `json:"done"`
+			Target     int  `json:"target"`
+			Attempted  *int `json:"attempted"`
+			OK         int  `json:"ok"`
+			Failed     int  `json:"failed"`
+			Resumable  int  `json:"resumable"`
+			Registered int  `json:"registered"`
 		}
 		if json.Unmarshal(data, &worker) == nil {
+			progress.AccountCount = max(progress.AccountCount, worker.Registered)
 			done = max(0, worker.Done)
 			total = max(0, worker.Target)
 			if worker.Attempted != nil {
@@ -839,7 +1190,11 @@ func (c *Controller) ensureWorkerConfigLocked() error {
 }
 
 func (c *Controller) forceSafeWorkerSettings(value map[string]any) {
-	value["engine"] = "protocol"
+	engine, err := normalizeRegistrationEngine(stringValue(value["engine"], registrationEngineProtocol))
+	if err != nil {
+		engine = registrationEngineProtocol
+	}
+	value["engine"] = engine
 	delete(value, "protocol_fallback_browser")
 	if !isSupportedEmailProvider(stringValue(value["email_provider"], "")) {
 		value["email_provider"] = "yyds"
@@ -898,6 +1253,39 @@ func (c *Controller) workerEnvironment() []string {
 	return environment
 }
 
+func (c *Controller) workerEnvironmentForEngine(engine string) []string {
+	environment := c.workerEnvironment()
+	if engine == registrationEngineBrowser && workerEnvironmentValue(environment, "REGISTRATION_BROWSER_MODE") == "" {
+		environment = setEnvironment(environment, "REGISTRATION_BROWSER_MODE", "background")
+	}
+	return environment
+}
+
+func workerEnvironmentValue(environment []string, key string) string {
+	prefix := strings.ToUpper(key) + "="
+	for _, item := range environment {
+		if strings.HasPrefix(strings.ToUpper(item), prefix) {
+			return item[len(prefix):]
+		}
+	}
+	return ""
+}
+
+func (c *Controller) engineLocked() (string, error) {
+	value, err := readJSONMap(c.config.ConfigPath)
+	if err != nil {
+		return "", err
+	}
+	return normalizeRegistrationEngine(stringValue(value["engine"], registrationEngineProtocol))
+}
+
+func (c *Controller) workerScriptPath(engine string) string {
+	if engine == registrationEngineBrowser {
+		return filepath.Join(c.config.WorkDir, "register_cli.py")
+	}
+	return filepath.Join(c.config.WorkDir, "protocol_register_cli.py")
+}
+
 func registrationProxyScope(accountType string) string {
 	if accountType == "web" {
 		return "grok_web"
@@ -942,8 +1330,20 @@ func (c *Controller) logPath() string  { return filepath.Join(c.dataPath(), "reg
 func (c *Controller) protocolStatePath() string {
 	return filepath.Join(c.dataPath(), "state.json")
 }
+func (c *Controller) browserStatePath() string {
+	return filepath.Join(c.dataPath(), "browser_state.json")
+}
+func (c *Controller) workerStatePath(engine string) string {
+	if engine == registrationEngineBrowser {
+		return c.browserStatePath()
+	}
+	return c.protocolStatePath()
+}
 func (c *Controller) protocolLedgerPath() string {
 	return filepath.Join(c.dataPath(), "protocol_accounts.jsonl")
+}
+func (c *Controller) browserLedgerPath() string {
+	return filepath.Join(c.dataPath(), "accounts_cli.txt")
 }
 
 func (c *Controller) readStateLocked() (persistedState, error) {
@@ -1066,7 +1466,7 @@ func settingsView(value map[string]any) WorkerSettings {
 		endpoint = strings.TrimSpace(stringValue(value["local_captcha_endpoint"], ""))
 	}
 	return WorkerSettings{
-		Engine:                 "protocol",
+		Engine:                 normalizedRegistrationEngine(stringValue(value["engine"], registrationEngineProtocol)),
 		EmailSources:           emailSourcesView(value),
 		EmailProvider:          stringValue(value["email_provider"], "yyds"),
 		EmailProviderFallbacks: stringSlice(value["email_provider_fallbacks"]),
@@ -1086,12 +1486,12 @@ func settingsView(value map[string]any) WorkerSettings {
 
 func applySettingsPatch(value map[string]any, patch WorkerSettingsPatch) error {
 	if patch.Engine != nil {
-		engine := strings.ToLower(strings.TrimSpace(*patch.Engine))
-		if engine != "protocol" {
+		engine, err := normalizeRegistrationEngine(*patch.Engine)
+		if err != nil {
 			return fmt.Errorf("%w: 不支持的注册引擎", ErrInvalidInput)
 		}
+		value["engine"] = engine
 	}
-	value["engine"] = "protocol"
 	if patch.CaptchaSolver != nil {
 		solver := strings.ToLower(strings.TrimSpace(*patch.CaptchaSolver))
 		if !slices.Contains([]string{"local", "yescaptcha"}, solver) {
@@ -1437,7 +1837,7 @@ func resolveCommand(command []string) (string, error) {
 }
 
 func protocolWorkerArguments(command []string, script string, arguments ...string) []string {
-	prefix := append([]string(nil), command[1:]...)
+	prefix := workerCommandPrefix(command)
 	for _, value := range prefix {
 		if filepath.Base(value) == filepath.Base(script) {
 			return append(prefix, arguments...)
@@ -1449,8 +1849,62 @@ func protocolWorkerArguments(command []string, script string, arguments ...strin
 	return append(append(prefix, "--protocol-worker"), arguments...)
 }
 
+func browserWorkerArguments(command []string, script string, arguments ...string) []string {
+	prefix := workerCommandPrefix(command)
+	for _, value := range prefix {
+		if filepath.Base(value) == filepath.Base(script) {
+			return append(prefix, arguments...)
+		}
+	}
+	if isPythonCommand(command[0]) {
+		pythonFlags := make([]string, 0, len(prefix)+2)
+		for _, value := range prefix {
+			if strings.HasSuffix(strings.ToLower(value), ".py") {
+				continue
+			}
+			pythonFlags = append(pythonFlags, value)
+		}
+		if !slices.Contains(pythonFlags, "-u") {
+			pythonFlags = append(pythonFlags, "-u")
+		}
+		return append(append(pythonFlags, script), arguments...)
+	}
+	return append(append(prefix, "--browser-worker"), arguments...)
+}
+
+func workerCommandPrefix(command []string) []string {
+	prefix := make([]string, 0, max(0, len(command)-1))
+	for _, value := range command[1:] {
+		if value == "--protocol-worker" || value == "--browser-worker" {
+			continue
+		}
+		prefix = append(prefix, value)
+	}
+	return prefix
+}
+
+func normalizeRegistrationEngine(value string) (string, error) {
+	engine := strings.ToLower(strings.TrimSpace(value))
+	if engine == "" {
+		engine = registrationEngineProtocol
+	}
+	if engine != registrationEngineProtocol && engine != registrationEngineBrowser {
+		return "", ErrInvalidInput
+	}
+	return engine, nil
+}
+
+func normalizedRegistrationEngine(value string) string {
+	engine, err := normalizeRegistrationEngine(value)
+	if err != nil {
+		return registrationEngineProtocol
+	}
+	return engine
+}
+
 func isPythonCommand(command string) bool {
-	base := strings.ToLower(filepath.Base(command))
+	base := strings.ToLower(filepath.Base(strings.ReplaceAll(command, `\`, "/")))
+	base = strings.TrimSuffix(base, ".exe")
 	return base == "python" || base == "python3" || base == "py" || strings.HasPrefix(base, "python3.")
 }
 

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -43,6 +45,22 @@ func TestRegistrationHelperProcess(t *testing.T) {
 			state, _ := json.Marshal(map[string]any{"done": 1, "target": 1})
 			_ = os.WriteFile(filepath.Join(stateDir, "state.json"), state, 0o600)
 			_ = os.WriteFile(filepath.Join(stateDir, "protocol_accounts.jsonl"), []byte("{\"email\":\"synthetic@example.invalid\"}\n"), 0o600)
+		}
+	}
+	if slices.Contains(os.Args, "--browser-worker") {
+		stateDir := ""
+		for index, argument := range os.Args {
+			if argument == "--state-dir" && index+1 < len(os.Args) {
+				stateDir = os.Args[index+1]
+				break
+			}
+		}
+		if stateDir != "" {
+			_ = os.MkdirAll(stateDir, 0o700)
+			state, _ := json.Marshal(map[string]any{
+				"done": 1, "target": 1, "attempted": 1, "ok": 1, "failed": 0, "registered": 1,
+			})
+			_ = os.WriteFile(filepath.Join(stateDir, "browser_state.json"), state, 0o600)
 		}
 	}
 	for index, argument := range os.Args {
@@ -384,6 +402,231 @@ func TestControllerProtocolModeUsesConfiguredWorkerDispatcher(t *testing.T) {
 	}
 }
 
+func TestControllerBrowserModeUsesSelectedWebWorkerAndBrowserState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/ip" {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"ip":"203.0.113.10"}`))
+			return
+		}
+		if request.URL.Path == "/signup" {
+			_, _ = writer.Write([]byte("<html><body>sign up</body></html>"))
+			return
+		}
+		writer.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	controller := newControllerTest(t, 0)
+	prepareBrowserControllerTest(t, controller)
+	argumentsPath := filepath.Join(t.TempDir(), "browser-arguments.txt")
+	t.Setenv("GO_REGISTRATION_HELPER_ARGS_FILE", argumentsPath)
+	t.Setenv("REGISTRATION_BROWSER_MODE", "headless")
+	t.Setenv("REGISTRATION_PREFLIGHT_EGRESS_URL", server.URL+"/ip")
+
+	engine := registrationEngineBrowser
+	sources := []EmailSourceSettings{{ID: "mail", Type: "tempmail_lol", Enabled: true, APIBase: server.URL}}
+	settings, err := controller.UpdateSettings(WorkerSettingsPatch{Engine: &engine, EmailSources: &sources})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Engine != registrationEngineBrowser {
+		t.Fatalf("browser engine was not persisted: %+v", settings)
+	}
+	config, err := readJSONMap(controller.config.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config["signup_url"] = server.URL + "/signup"
+	if err := writeJSONAtomic(controller.config.ConfigPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	preflight := controller.Preflight(context.Background())
+	if !preflight.OK {
+		t.Fatalf("browser preflight = %+v", preflight)
+	}
+	for _, check := range preflight.Checks {
+		if strings.HasPrefix(check.Name, "captcha") || check.Name == "yescaptcha" {
+			t.Fatalf("browser preflight depended on token solver: %+v", check)
+		}
+	}
+	if check, ok := preflightCheck(preflight.Checks, "egressIP"); !ok || !check.OK || !strings.Contains(check.Detail, "203.0.113.10") {
+		t.Fatalf("browser preflight did not record its egress IP: %+v", check)
+	}
+
+	status, err := controller.Start(context.Background(), StartInput{Count: 1, Threads: 3, AccountType: "web", AutoNSFW: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Running {
+		t.Fatalf("browser worker did not start: %+v", status)
+	}
+	status = waitForStopped(t, controller)
+	if status.ExitCode == nil || *status.ExitCode != 0 || status.Progress.Done != 1 || status.Progress.Succeeded != 1 || status.Progress.AccountCount != 1 {
+		t.Fatalf("browser status = %+v", status)
+	}
+
+	data, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := strings.Split(string(data), "\n")
+	for _, required := range []string{"--browser-worker", "--auto-nsfw", "--state-dir", "--log-file", "--accounts-file"} {
+		if !slices.Contains(arguments, required) {
+			t.Fatalf("browser argument %q missing: %q", required, arguments)
+		}
+	}
+	accountTypeIndex := slices.Index(arguments, "--account-type")
+	if accountTypeIndex < 0 || accountTypeIndex+1 >= len(arguments) || arguments[accountTypeIndex+1] != "web" {
+		t.Fatalf("browser worker did not preserve the selected Web account type: %q", arguments)
+	}
+	if slices.Contains(arguments, "--protocol-worker") || slices.Contains(arguments, "--inline-mint") {
+		t.Fatalf("Build-only arguments leaked into the Browser Web worker: %q", arguments)
+	}
+}
+
+func TestControllerBrowserBuildUsesInlineMint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/ip" {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"ip":"203.0.113.10"}`))
+			return
+		}
+		if request.URL.Path == "/signup" {
+			_, _ = writer.Write([]byte("<html><body>sign up</body></html>"))
+			return
+		}
+		writer.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	controller := newControllerTest(t, 0)
+	prepareBrowserControllerTest(t, controller)
+	argumentsPath := filepath.Join(t.TempDir(), "browser-build-arguments.txt")
+	t.Setenv("GO_REGISTRATION_HELPER_ARGS_FILE", argumentsPath)
+	t.Setenv("REGISTRATION_BROWSER_MODE", "headless")
+	t.Setenv("REGISTRATION_PREFLIGHT_EGRESS_URL", server.URL+"/ip")
+
+	engine := registrationEngineBrowser
+	sources := []EmailSourceSettings{{ID: "mail", Type: "tempmail_lol", Enabled: true, APIBase: server.URL}}
+	if _, err := controller.UpdateSettings(WorkerSettingsPatch{Engine: &engine, EmailSources: &sources}); err != nil {
+		t.Fatal(err)
+	}
+	config, err := readJSONMap(controller.config.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config["signup_url"] = server.URL + "/signup"
+	if err := writeJSONAtomic(controller.config.ConfigPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := controller.Start(context.Background(), StartInput{Count: 1, Threads: 1, AccountType: "build"}); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	status := waitForStopped(t, controller)
+	if status.ExitCode == nil || *status.ExitCode != 0 {
+		t.Fatalf("browser Build status = %+v", status)
+	}
+	data, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := strings.Split(string(data), "\n")
+	if !slices.Contains(arguments, "--inline-mint") || slices.Contains(arguments, "--auto-nsfw") {
+		t.Fatalf("unexpected Browser Build arguments: %q", arguments)
+	}
+	accountTypeIndex := slices.Index(arguments, "--account-type")
+	if accountTypeIndex < 0 || accountTypeIndex+1 >= len(arguments) || arguments[accountTypeIndex+1] != "build" {
+		t.Fatalf("browser worker did not preserve the selected Build account type: %q", arguments)
+	}
+}
+
+func TestBrowserWorkerArgumentsSupportConfiguredCommandShapes(t *testing.T) {
+	script := filepath.Join("registration", "register_cli.py")
+	protocolScript := filepath.Join("registration", "protocol_register_cli.py")
+	tests := []struct {
+		name    string
+		command []string
+		want    []string
+	}{
+		{name: "wrapper", command: []string{"grok2api-registration"}, want: []string{"--browser-worker", "--help"}},
+		{name: "wrapper-with-protocol-dispatcher", command: []string{"grok2api-registration", "--protocol-worker"}, want: []string{"--browser-worker", "--help"}},
+		{name: "browser-script", command: []string{"python", "-u", script}, want: []string{"-u", script, "--help"}},
+		{name: "protocol-script", command: []string{"python", "-u", protocolScript}, want: []string{"-u", script, "--help"}},
+		{name: "python-only", command: []string{"python"}, want: []string{"-u", script, "--help"}},
+		{name: "windows-python-path", command: []string{`C:\Python313\python.exe`, "-u", protocolScript}, want: []string{"-u", script, "--help"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := browserWorkerArguments(test.command, script, "--help")
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("browserWorkerArguments(%q) = %q, want %q", test.command, got, test.want)
+			}
+		})
+	}
+}
+
+func TestBrowserPreflightSupportsHTTPProxyAuthAndRejectsAuthenticatedSOCKS(t *testing.T) {
+	ok, detail := browserProxyAuthenticationReady("http://user:secret@proxy.example:8080")
+	if !ok || !strings.Contains(detail, "auth extension") {
+		t.Fatalf("authenticated browser proxy check = %v, %q", ok, detail)
+	}
+	ok, detail = browserProxyAuthenticationReady("socks5://user:secret@proxy.example:1080")
+	if ok || !strings.Contains(detail, "local unauthenticated relay") {
+		t.Fatalf("authenticated SOCKS proxy check = %v, %q", ok, detail)
+	}
+	if ok, _ := browserProxyAuthenticationReady("http://proxy.example:8080"); !ok {
+		t.Fatal("unauthenticated browser proxy was rejected")
+	}
+}
+
+func TestProbeBrowserRegistrationPageRejectsCloudflareChallenge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("cf-mitigated", "challenge")
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte("<title>Attention Required! | Cloudflare</title>"))
+	}))
+	defer server.Close()
+
+	ok, detail := probeBrowserRegistrationPage(context.Background(), server.URL, "")
+	if ok || !strings.Contains(detail, "403") {
+		t.Fatalf("Cloudflare registration probe = %v, %q", ok, detail)
+	}
+}
+
+func TestProbeEgressIPAcceptsJSONAndTraceResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/trace" {
+			_, _ = writer.Write([]byte("fl=123\nip=2001:db8::10\nloc=ZZ\n"))
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ip":"203.0.113.20"}`))
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		path string
+		ip   string
+	}{{path: "/json", ip: "203.0.113.20"}, {path: "/trace", ip: "2001:db8::10"}} {
+		ok, detail := probeEgressIP(context.Background(), server.URL+test.path, "")
+		if !ok || !strings.Contains(detail, test.ip) {
+			t.Fatalf("probeEgressIP(%q) = %v, %q", test.path, ok, detail)
+		}
+	}
+}
+
+func preflightCheck(checks []PreflightCheck, name string) (PreflightCheck, bool) {
+	for _, check := range checks {
+		if check.Name == name {
+			return check, true
+		}
+	}
+	return PreflightCheck{}, false
+}
+
 func TestWorkerEnvironmentInheritsAndOverridesBrowserConfig(t *testing.T) {
 	t.Setenv("REGISTRATION_BROWSER_MODE", "xvfb")
 	t.Setenv("REGISTRATION_BROWSER_PATH", "/usr/bin/chromium")
@@ -413,6 +656,7 @@ func TestProtocolWorkerArgumentsSupportConfiguredCommandShapes(t *testing.T) {
 		want    []string
 	}{
 		{name: "wrapper", command: []string{"grok2api-registration"}, want: []string{"--protocol-worker", "--help"}},
+		{name: "wrapper-with-browser-dispatcher", command: []string{"grok2api-registration", "--browser-worker"}, want: []string{"--protocol-worker", "--help"}},
 		{name: "browser-script", command: []string{"python", "register_cli.py"}, want: []string{"register_cli.py", "--protocol-worker", "--help"}},
 		{name: "protocol-script", command: []string{"python", "-u", script}, want: []string{"-u", script, "--help"}},
 		{name: "python-only", command: []string{"python"}, want: []string{"-u", script, "--help"}},
@@ -484,6 +728,25 @@ func TestProtocolProgressMigratesLegacyDoneAttempts(t *testing.T) {
 	}
 	if progress.Percent == nil || *progress.Percent != 0 {
 		t.Fatalf("unexpected migrated percent: %+v", progress.Percent)
+	}
+}
+
+func TestBrowserProgressReadsBrowserState(t *testing.T) {
+	controller := newControllerTest(t, 0)
+	state := map[string]any{
+		"done": 2, "target": 3, "attempted": 3, "ok": 2, "failed": 1, "registered": 3,
+	}
+	data, _ := json.Marshal(state)
+	if err := os.MkdirAll(controller.dataPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controller.browserStatePath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := 3
+	progress := controller.browserProgressLocked(persistedState{Engine: registrationEngineBrowser, ProgressMode: "count", TargetCount: &target}, 0)
+	if progress.Done != 2 || progress.Attempted != 3 || progress.Succeeded != 2 || progress.Failed != 1 || progress.AccountCount != 3 {
+		t.Fatalf("unexpected browser progress: %+v", progress)
 	}
 }
 
@@ -559,6 +822,26 @@ func newControllerTest(t *testing.T, sleepMS int) *Controller {
 		ConfigPath: filepath.Join(dataDir, "config.json"),
 		Command:    []string{os.Args[0], "-test.run=TestRegistrationHelperProcess", "--"},
 	})
+}
+
+func prepareBrowserControllerTest(t *testing.T, controller *Controller) {
+	t.Helper()
+	controller.config.BrowserPath = os.Args[0]
+	files := map[string]string{
+		"register_cli.py":                                "# synthetic browser worker\n",
+		"grok_register_ttk.py":                           "# synthetic browser module\n",
+		filepath.Join("turnstilePatch", "manifest.json"): `{}`,
+		filepath.Join("turnstilePatch", "content.js"):    "// synthetic\n",
+	}
+	for name, contents := range files {
+		path := filepath.Join(controller.config.WorkDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func waitForStopped(t *testing.T, controller *Controller) Status {

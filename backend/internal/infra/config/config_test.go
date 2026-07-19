@@ -171,6 +171,41 @@ func TestValidateRejectsUnsafeRuntimeLimits(t *testing.T) {
 	}
 }
 
+func TestValidateAutoReplenishmentSafetyBounds(t *testing.T) {
+	valid := defaultConfig()
+	valid.Secrets.JWTSecret = "12345678901234567890123456789012"
+	valid.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	valid.Registration.Enabled = true
+	valid.Registration.AutoReplenish.Enabled = true
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid auto replenishment rejected: %v", err)
+	}
+
+	batch := valid
+	batch.Registration.AutoReplenish.RegisterCount = 2
+	if err := batch.Validate(); err == nil {
+		t.Fatal("multi-account replenishment batch was accepted")
+	}
+
+	disabledWorker := valid
+	disabledWorker.Registration.Enabled = false
+	if err := disabledWorker.Validate(); err == nil {
+		t.Fatal("auto replenishment without registration worker was accepted")
+	}
+
+	predictive := valid
+	predictive.Registration.AutoReplenish.Predictive = true
+	predictive.Registration.AutoReplenish.TargetEligible = 2
+	predictive.Registration.AutoReplenish.MinDemandRPM = 1
+	if err := predictive.Validate(); err != nil {
+		t.Fatalf("valid predictive replenishment rejected: %v", err)
+	}
+	predictive.Registration.AutoReplenish.MinDemandRPM = 0
+	if err := predictive.Validate(); err == nil {
+		t.Fatal("predictive replenishment without demand threshold was accepted")
+	}
+}
+
 func TestValidateRejectsExampleSecretsAndUnsafeCookies(t *testing.T) {
 	base := defaultConfig()
 	base.Secrets.JWTSecret = "12345678901234567890123456789012"

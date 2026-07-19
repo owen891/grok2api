@@ -2,6 +2,8 @@ package media
 
 import "time"
 
+const ImageJobRecoveryTimeout = 35 * time.Minute
+
 type Status string
 
 type JobKind string
@@ -18,37 +20,38 @@ const (
 
 // Job 表示可跨进程重启恢复的异步视频任务。
 type Job struct {
-	ID              string
-	Kind            JobKind
-	RequestID       string
-	ClientKeyID     uint64
-	ClientKeyName   string
-	AccountID       uint64
-	AccountName     string
-	EgressNodeID    *uint64
-	EgressNodeName  string
-	EgressScope     string
-	EgressMode      string
-	Provider        string
-	Model           string
-	ModelRouteID    uint64
-	UpstreamModel   string
-	Prompt          string
-	Seconds         int
-	Size            string
-	Quality         string
-	Status          Status
-	Progress        int
-	InputJSON       string
-	OutputJSON      string
-	UpstreamURL     string
-	ContentType     string
-	ErrorCode       string
-	ErrorMessage    string
-	LeaseUntil      *time.Time
-	ClaimToken      string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	CompletedAt     *time.Time
-	UsageRecordedAt *time.Time
+	ID               string
+	Kind             JobKind
+	RequestID        string
+	ClientKeyID      uint64
+	ClientKeyName    string
+	AccountID        uint64
+	AccountName      string
+	EgressNodeID     *uint64
+	EgressNodeName   string
+	EgressScope      string
+	EgressMode       string
+	Provider         string
+	Model            string
+	ModelRouteID     uint64
+	UpstreamModel    string
+	Prompt           string
+	Seconds          int
+	Size             string
+	Quality          string
+	Status           Status
+	Progress         int
+	InputJSON        string
+	OutputJSON       string
+	UpstreamURL      string
+	ContentType      string
+	ErrorCode        string
+	ErrorMessage     string
+	RoutingTraceJSON string
+	LeaseUntil       *time.Time
+	ClaimToken       string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	CompletedAt      *time.Time
+	UsageRecordedAt  *time.Time
 }

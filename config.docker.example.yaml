@@ -39,6 +39,9 @@ registration:
   workDir: "/app/registration"
   configPath: "/app/data/registration/config.json"
   command: ["grok2api-registration"]
+  # The browser-runtime Compose overlay supplies Xvfb and Chromium defaults.
+  browserMode: ""
+  browserPath: ""
 
 provider:
   web:

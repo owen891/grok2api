@@ -272,6 +272,25 @@ type RoutingCandidate struct {
 	SupportsModel        bool
 }
 
+// RoutingCapacity is a read-only summary produced by the selector's routing policy.
+type RoutingCapacity struct {
+	Total            int
+	Eligible         int
+	Saturated        int
+	Disabled         int
+	ReauthRequired   int
+	QuotaExhausted   int
+	RecoveringSoon   int
+	Cooling          int
+	ModelCooling     int
+	Unsupported      int
+	InFlight         int
+	TotalSlots       int
+	AvailableSlots   int
+	Unlimited        int
+	EarliestRecovery *time.Time
+}
+
 // ModelQuotaBlock 表示账号的单模型配额暂不可用，不影响该账号上的其他模型。
 type ModelQuotaBlock struct {
 	AccountID     uint64

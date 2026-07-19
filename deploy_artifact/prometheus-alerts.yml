@@ -1,0 +1,46 @@
+groups:
+  - name: grok2api-routing
+    rules:
+      - alert: Grok2APIRouteCapacityEmpty
+        expr: sum by (provider, model) (grok2api_route_capacity{state="eligible"}) == 0
+          and sum by (provider, model) (grok2api_route_capacity{state="total"}) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Grok2API route has no eligible capacity"
+          description: "{{ $labels.provider }}/{{ $labels.model }} has accounts but no routable account for two minutes."
+      - alert: Grok2APIBackgroundTaskDegraded
+        expr: grok2api_background_task_state{state="degraded"} == 1
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Grok2API background task degraded"
+          description: "Task {{ $labels.task }} is degraded."
+      - alert: Grok2APIReplenishmentVerificationFailed
+        expr: increase(grok2api_replenishment_failures_total{stage="verification"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Automatic replenishment did not create routable capacity"
+          description: "Registration completed without a verified capacity increase for {{ $labels.scope }}."
+      - alert: Grok2APIRoutingCircuitPressure
+        expr: sum by (model) (rate(grok2api_circuit_failure_observations_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Grok2API account circuit pressure is elevated"
+          description: "Account-scoped failures for {{ $labels.model }} are advancing the shared circuit."
+      - alert: Grok2APIAccountInspectionProbeErrors
+        expr: |
+          sum by (provider) (increase(grok2api_account_inspection_results_total{classification="probe_error"}[15m]))
+          /
+          clamp_min(sum by (provider) (increase(grok2api_account_inspection_results_total[15m])), 1) > 0.5
+          and sum by (provider) (increase(grok2api_account_inspection_results_total[15m])) >= 10
+        labels:
+          severity: warning
+        annotations:
+          summary: "Grok2API account inspection probe errors are elevated"
+          description: "More than half of recent {{ $labels.provider }} probes failed without reliable account evidence. Check provider and egress health before applying recommendations."

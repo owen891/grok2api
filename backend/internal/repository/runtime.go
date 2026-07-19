@@ -57,3 +57,40 @@ type QuotaRecoveryQueue interface {
 	AckQuotaRecovery(ctx context.Context, value account.QuotaRecoveryEvent) error
 	RescheduleQuotaRecovery(ctx context.Context, value account.QuotaRecoveryEvent) error
 }
+
+type RoutePerformanceKey struct {
+	AccountID     uint64
+	UpstreamModel string
+}
+
+type RoutePerformance struct {
+	SuccessEWMA          float64
+	LatencyEWMA          time.Duration
+	Samples              int64
+	ConsecutiveFailures  int
+	LastCircuitFailureAt *time.Time
+	CircuitOpenUntil     *time.Time
+	UpdatedAt            time.Time
+}
+
+type RoutePerformanceObservation struct {
+	Key            RoutePerformanceKey
+	Latency        time.Duration
+	Success        bool
+	CircuitFailure bool
+	ObservedAt     time.Time
+}
+
+type RoutePerformancePolicy struct {
+	Alpha               float64
+	TTL                 time.Duration
+	CircuitThreshold    int
+	CircuitWindow       time.Duration
+	CircuitOpenDuration time.Duration
+}
+
+// RoutePerformanceRepository shares account/model quality and circuit state across instances.
+type RoutePerformanceRepository interface {
+	ObserveRoutePerformance(ctx context.Context, value RoutePerformanceObservation, policy RoutePerformancePolicy) error
+	GetRoutePerformances(ctx context.Context, keys []RoutePerformanceKey, now time.Time) (map[RoutePerformanceKey]RoutePerformance, error)
+}

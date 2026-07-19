@@ -159,7 +159,11 @@ def create_standalone_page(
             "DrissionPage not installed; run inside grok_reg uv env or pip install DrissionPage"
         ) from e
 
+    from .proxyutil import proxy_log_label, resolve_proxy
+
+    proxy = resolve_proxy(proxy)
     opts = None
+    configured_by_factory = False
     # Project root = parent of this package (./cpa_xai → ../)
     _pkg_root = Path(__file__).resolve().parents[1]
     try:
@@ -171,7 +175,8 @@ def create_standalone_page(
             try:
                 from grok_register_ttk import create_browser_options  # type: ignore
 
-                opts = create_browser_options()
+                opts = create_browser_options(proxy_override=proxy)
+                configured_by_factory = True
                 log("已复用注册浏览器配置（含 Turnstile 扩展）")
             except Exception as e:  # noqa: BLE001
                 log(f"注册浏览器配置不可用：{e}")
@@ -206,14 +211,13 @@ def create_standalone_page(
 
     apply_browser_runtime(opts, default_headless=headless, log=log)
 
-    from .proxyutil import proxy_for_chromium, proxy_log_label, resolve_proxy
+    from browser_proxy import configure_chromium_proxy
 
-    # explicit / runtime config first; env only as fallback
-    proxy = resolve_proxy(proxy)
-    chrome_proxy = proxy_for_chromium(proxy)
+    chrome_proxy = configure_chromium_proxy(opts, proxy) if not configured_by_factory else ""
     if chrome_proxy:
-        opts.set_argument(f"--proxy-server={chrome_proxy}")
         log(f"浏览器代理：{proxy_log_label(proxy)}（Chromium {chrome_proxy}）")
+    elif proxy and configured_by_factory:
+        log(f"浏览器代理：{proxy_log_label(proxy)}（已由注册浏览器配置加载）")
     else:
         log("浏览器代理：直连")
 

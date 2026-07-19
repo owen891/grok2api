@@ -340,6 +340,7 @@ def export_cpa_xai_for_account(
     def _log(msg: str) -> None:
         log(f"[cpa] {msg}")
 
+    mint_started = time.monotonic()
     result = mint_and_export(
         email=email,
         password=password,
@@ -357,6 +358,8 @@ def export_cpa_xai_for_account(
         recycle_every=recycle_every,
         log=_log,
     )
+    result["oauth_seconds"] = round(time.monotonic() - mint_started, 3)
+    result["oauth_ok"] = bool(result.get("ok"))
 
     if result.get("ok") and result.get("path"):
         remote = upload_cpa_auth_file(result["path"], config=cfg, log_callback=_log)
@@ -375,6 +378,7 @@ def export_cpa_xai_for_account(
             log(f"[cpa] hotload copy -> {dst}")
             await_result = bool(environment_hotload) or bool(cfg.get("cpa_hotload_await_result", False))
             if await_result:
+                import_started = time.monotonic()
                 result_timeout = max(1.0, min(float(cfg.get("cpa_hotload_result_timeout_sec", 300) or 300), 600.0))
                 import_result = _await_hotload_result(
                     cpa_dir,
@@ -383,6 +387,7 @@ def export_cpa_xai_for_account(
                     timeout=result_timeout,
                 )
                 result["hotload_import"] = import_result
+                result["import_seconds"] = round(time.monotonic() - import_started, 3)
                 if import_result.get("ok"):
                     log(
                         f"[cpa] spool import success: created={import_result.get('created', 0)} "

@@ -125,7 +125,7 @@ func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job
 	if value.ClaimToken != "" {
 		query = query.Where("claim_token = ?", value.ClaimToken)
 	}
-	result := query.Select("kind", "request_id", "client_key_name", "account_id", "account_name", "egress_node_id", "egress_node_name", "egress_scope", "egress_mode", "provider", "model", "model_route_id", "upstream_model", "prompt", "seconds", "size", "quality", "status", "progress", "input_json", "output_json", "upstream_url", "content_type", "error_code", "error_message", "lease_until", "claim_token", "updated_at", "completed_at", "usage_recorded_at").Updates(updates)
+	result := query.Select("kind", "request_id", "client_key_name", "account_id", "account_name", "egress_node_id", "egress_node_name", "egress_scope", "egress_mode", "provider", "model", "model_route_id", "upstream_model", "prompt", "seconds", "size", "quality", "status", "progress", "input_json", "output_json", "upstream_url", "content_type", "error_code", "error_message", "routing_trace_json", "lease_until", "claim_token", "updated_at", "completed_at", "usage_recorded_at").Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -224,7 +224,11 @@ func (r *MediaJobRepository) MarkMediaJobUsageRecorded(ctx context.Context, id s
 func (r *MediaJobRepository) ListRecoverableMediaJobs(ctx context.Context, limit int) ([]media.Job, error) {
 	var rows []mediaJobModel
 	now := time.Now().UTC()
-	if err := r.db.db.WithContext(ctx).Where("status = ? OR (status = ? AND (lease_until IS NULL OR lease_until <= ?))", media.StatusQueued, media.StatusInProgress, now).Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error; err != nil {
+	imageStaleBefore := now.Add(-media.ImageJobRecoveryTimeout)
+	if err := r.db.db.WithContext(ctx).Where(
+		"status = ? OR (status = ? AND (lease_until IS NULL OR lease_until <= ? OR (kind = ? AND updated_at <= ?)))",
+		media.StatusQueued, media.StatusInProgress, now, media.JobKindImage, imageStaleBefore,
+	).Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	values := make([]media.Job, 0, len(rows))
@@ -239,8 +243,12 @@ func (r *MediaJobRepository) TryClaimMediaJob(ctx context.Context, id string, no
 	if claimToken == "" {
 		return media.Job{}, false, repository.ErrConflict
 	}
+	imageStaleBefore := now.Add(-media.ImageJobRecoveryTimeout)
 	result := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
-		Where("id = ? AND (status = ? OR (status = ? AND (lease_until IS NULL OR lease_until <= ?)))", id, media.StatusQueued, media.StatusInProgress, now).
+		Where(
+			"id = ? AND (status = ? OR (status = ? AND (lease_until IS NULL OR lease_until <= ? OR (kind = ? AND updated_at <= ?))))",
+			id, media.StatusQueued, media.StatusInProgress, now, media.JobKindImage, imageStaleBefore,
+		).
 		Updates(map[string]any{"status": media.StatusInProgress, "lease_until": leaseUntil, "claim_token": claimToken, "updated_at": now})
 	if result.Error != nil {
 		return media.Job{}, false, result.Error
@@ -268,7 +276,7 @@ func mediaJobFromDomain(value media.Job) *mediaJobModel {
 		Model:    value.Model, ModelRouteID: value.ModelRouteID, UpstreamModel: value.UpstreamModel,
 		Prompt: value.Prompt, Seconds: value.Seconds, Size: value.Size, Quality: value.Quality,
 		Status: string(value.Status), Progress: value.Progress, InputJSON: value.InputJSON, OutputJSON: value.OutputJSON, UpstreamURL: value.UpstreamURL,
-		ContentType: value.ContentType, ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage,
+		ContentType: value.ContentType, ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage, RoutingTraceJSON: value.RoutingTraceJSON,
 		LeaseUntil: value.LeaseUntil, ClaimToken: value.ClaimToken, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 		CompletedAt: value.CompletedAt, UsageRecordedAt: value.UsageRecordedAt,
 	}
@@ -283,7 +291,7 @@ func mediaJobToDomain(row mediaJobModel) media.Job {
 		Model:    row.Model, ModelRouteID: row.ModelRouteID, UpstreamModel: row.UpstreamModel,
 		Prompt: row.Prompt, Seconds: row.Seconds, Size: row.Size, Quality: row.Quality,
 		Status: media.Status(row.Status), Progress: row.Progress, InputJSON: row.InputJSON, OutputJSON: row.OutputJSON, UpstreamURL: row.UpstreamURL,
-		ContentType: row.ContentType, ErrorCode: row.ErrorCode, ErrorMessage: row.ErrorMessage,
+		ContentType: row.ContentType, ErrorCode: row.ErrorCode, ErrorMessage: row.ErrorMessage, RoutingTraceJSON: row.RoutingTraceJSON,
 		LeaseUntil: row.LeaseUntil, ClaimToken: row.ClaimToken, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		CompletedAt: row.CompletedAt, UsageRecordedAt: row.UsageRecordedAt,
 	}

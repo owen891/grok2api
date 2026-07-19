@@ -107,6 +107,9 @@ type Service struct {
 	mediaWorker    int
 	mediaQueueFull atomic.Uint64
 	logger         *slog.Logger
+	replenisher    interface {
+		Request(context.Context, accountdomain.Provider, string, string)
+	}
 }
 
 func (s *Service) ConfigureMedia(repository repository.MediaJobRepository, concurrency int) {
@@ -128,6 +131,22 @@ func NewService(models routeResolver, audits auditRecorder, accounts *accountapp
 func (s *Service) SetLogger(logger *slog.Logger) {
 	if logger != nil {
 		s.logger = logger
+	}
+}
+
+func (s *Service) SetCapacityReplenisher(replenisher interface {
+	Request(context.Context, accountdomain.Provider, string, string)
+}) {
+	s.replenisher = replenisher
+}
+
+func (s *Service) requestCapacityReplenishment(ctx context.Context, providerValue accountdomain.Provider, model, quotaMode string, err error) {
+	if s.replenisher == nil {
+		return
+	}
+	var unavailable *SelectionUnavailableError
+	if errors.As(err, &unavailable) && unavailable.Reason == SelectionQuotaExhausted {
+		s.replenisher.Request(ctx, providerValue, model, quotaMode)
 	}
 }
 
@@ -292,6 +311,12 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		return nil, routeErr
 	}
 	ctx = infraegress.WithGroupID(ctx, route.EgressGroupID)
+	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+	routingTrace := routingTraceFromContext(ctx)
+	if routingTrace == nil {
+		routingTrace = newRoutingTrace(route.ID, route.Provider, route.UpstreamModel, quotaMode)
+	}
+	ctx = withRoutingTrace(ctx, routingTrace)
 	timing := newGenerationTiming(publicModel, route.Provider)
 	timingHandedOff := false
 	defer func() {
@@ -315,6 +340,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		record.ErrorCode = "model_not_allowed"
 		record.CreatedAt = time.Now().UTC()
 		applyAuditEgress(&record, egressTrace, route.Provider)
+		applyRoutingTrace(&record, routingTrace)
 		if err := s.audits.Create(ctx, record); err != nil {
 			s.logger.Error("request_usage_write_failed", "event_id", record.EventID, "request_id", input.RequestID, "error", err)
 		}
@@ -345,7 +371,6 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	excluded := make(map[uint64]bool)
 	failureFingerprints := make(map[string]int)
 	authRecoveryAttempted := make(map[uint64]bool)
-	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 	var lastErr error
 	var lastFailure *UpstreamFailure
 	forwardResponse := func(credential accountdomain.Credential) (*provider.Response, error) {
@@ -353,7 +378,9 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
 		elapsed := time.Since(started)
 		timing.markUpstream(elapsed)
-		s.selector.ObserveRouteResult(credential.ID, route.UpstreamModel, elapsed, err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300)
+		if err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+			s.selector.ObserveRouteResult(credential.ID, route.UpstreamModel, elapsed, true)
+		}
 		return response, err
 	}
 	ensureCredential := func(credential accountdomain.Credential, force bool) (accountdomain.Credential, error) {
@@ -384,6 +411,7 @@ attemptLoop:
 		excluded[lease.Credential.ID] = true
 		credential, err := ensureCredential(lease.Credential, false)
 		if err != nil {
+			routingTrace.recordAttempt(attempt+1, lease.Credential.ID, "credential", 0, "credential_unavailable", "rotate_account", FailureScopeAccount, time.Since(selectionStarted), true, false)
 			lease.Release()
 			lastErr = err
 			lastFailure = newCredentialUpstreamFailure(err, lease.Credential.ID, lease.Credential.Name)
@@ -398,6 +426,8 @@ attemptLoop:
 				break
 			}
 			lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
+			s.selector.ObserveRouteFailure(credential.ID, route.UpstreamModel, time.Since(selectionStarted), DecideFailure(lastFailure))
+			routingTrace.recordAttempt(attempt+1, credential.ID, "transport", 0, lastFailure.AuditCode(), "rotate_account", lastFailure.Scope, time.Since(selectionStarted), lastFailure.AccountScoped, false)
 			failureFingerprints[lastFailure.Fingerprint]++
 			if failureFingerprints[lastFailure.Fingerprint] >= 2 {
 				break
@@ -413,6 +443,8 @@ attemptLoop:
 				lease.Release()
 				lastErr = fmt.Errorf("%s SSO 凭据已失效", credential.Provider)
 				lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, nil, credential.ID, credential.Name)
+				s.selector.ObserveRouteFailure(credential.ID, route.UpstreamModel, time.Since(selectionStarted), DecideFailure(lastFailure))
+				routingTrace.recordAttempt(attempt+1, credential.ID, "response", http.StatusUnauthorized, lastFailure.AuditCode(), "require_reauth", FailureScopeAccount, time.Since(selectionStarted), true, true)
 				continue
 			}
 			authRecoveryAttempted[credential.ID] = true
@@ -441,6 +473,7 @@ attemptLoop:
 				lease.Release()
 				lastErr = fmt.Errorf("刷新后上游仍返回 401")
 				lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, body, credential.ID, credential.Name)
+				s.selector.ObserveRouteFailure(credential.ID, route.UpstreamModel, time.Since(selectionStarted), DecideFailure(lastFailure))
 				continue
 			}
 		}
@@ -448,6 +481,7 @@ attemptLoop:
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 			body, _ := readRetryableBody(response.Body)
 			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			s.selector.ObserveRouteFailure(credential.ID, route.UpstreamModel, time.Since(selectionStarted), DecideFailure(lastFailure))
 			egressForbidden := s.providers.RetryForbiddenAsEgress(credential.Provider) &&
 				response.StatusCode == http.StatusForbidden && !lastFailure.AccountScoped
 			if egressForbidden && attempt == 0 && attempt+1 < attempts {
@@ -455,6 +489,7 @@ attemptLoop:
 				delete(excluded, credential.ID)
 				lease.Release()
 				lastErr = fmt.Errorf("Grok Web 出口会话被反机器人规则拒绝")
+				routingTrace.recordAttempt(attempt+1, credential.ID, "response", response.StatusCode, lastFailure.AuditCode(), "retry_egress", FailureScopeEgress, time.Since(selectionStarted), false, false)
 				continue
 			}
 			if s.providers.SupportsCredentialRefresh(credential.Provider) && !authRecoveryAttempted[credential.ID] && credential.EncryptedRefreshToken != "" && (lastFailure.PermanentAccountDenial || lastFailure.CredentialRejected) {
@@ -511,6 +546,11 @@ attemptLoop:
 			if lastFailure.AccountScoped && !failureHandled {
 				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
 			}
+			action := "rotate_account"
+			if failureHandled {
+				action = "update_account_state"
+			}
+			routingTrace.recordAttempt(attempt+1, credential.ID, "response", response.StatusCode, lastFailure.AuditCode(), action, DecideFailure(lastFailure).Scope, time.Since(selectionStarted), lastFailure.AccountScoped, failureHandled)
 			lease.Release()
 			lastErr = fmt.Errorf("上游返回 %d", response.StatusCode)
 			s.logger.Warn("upstream_request_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "status", response.StatusCode, "upstream_code", lastFailure.UpstreamCode, "account_scoped", lastFailure.AccountScoped)
@@ -525,6 +565,7 @@ attemptLoop:
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			s.selector.markSuccess(ctx, credential, false)
 		}
+		routingTrace.recordAttempt(attempt+1, credential.ID, "response", response.StatusCode, "", "return_response", FailureScopeUnknown, time.Since(selectionStarted), false, false)
 		accountID := credential.ID
 		var once sync.Once
 		finalize := func(usage Usage, responseID, errorCode string) {
@@ -565,6 +606,7 @@ attemptLoop:
 				record.ErrorCode = errorCode
 				record.CreatedAt = now
 				applyAuditEgress(&record, egressTrace, route.Provider)
+				applyRoutingTrace(&record, routingTrace)
 				if err := s.audits.Create(persistCtx, record); err != nil {
 					s.logger.Error("request_usage_write_failed", "event_id", record.EventID, "request_id", input.RequestID, "error", err)
 				}
@@ -606,6 +648,7 @@ attemptLoop:
 		record.ErrorCode = lastFailure.AuditCode()
 		record.CreatedAt = time.Now().UTC()
 		applyAuditEgress(&record, egressTrace, route.Provider)
+		applyRoutingTrace(&record, routingTrace)
 		if lastFailure.AccountID != 0 {
 			accountID := lastFailure.AccountID
 			record.AccountID = &accountID
@@ -627,6 +670,7 @@ attemptLoop:
 	record.ErrorCode = "upstream_unavailable"
 	record.CreatedAt = time.Now().UTC()
 	applyAuditEgress(&record, egressTrace, route.Provider)
+	applyRoutingTrace(&record, routingTrace)
 	persistCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
 	defer cancel()
 	if err := s.audits.Create(persistCtx, record); err != nil {
@@ -681,6 +725,35 @@ type ImageGenerationInput struct {
 	Resolution     string
 	ResponseFormat string
 	Streaming      bool
+	execution      imageExecutionOptions
+}
+
+type imageExecutionOptions struct {
+	RouteID            uint64
+	PreferredAccountID uint64
+	OnAttempt          func(accountdomain.Credential, int)
+}
+
+func imageProtocolFailure(err error, credential accountdomain.Credential) (*UpstreamFailure, bool) {
+	protocolFailure, ok := provider.AsMediaProtocolError(err)
+	if !ok {
+		return nil, false
+	}
+	code := strings.TrimSpace(protocolFailure.Code)
+	if code == "" {
+		code = "image_generation_incomplete"
+	}
+	message := "Grok Web Lite 响应结束但没有返回可用的最终图片"
+	status := http.StatusBadGateway
+	if code == "image_moderated" {
+		message = "图片被 Grok 内容策略拦截，请调整提示词后重试"
+		status = http.StatusBadRequest
+	}
+	return &UpstreamFailure{
+		HTTPStatus: status, Code: code,
+		PublicMessage: message,
+		AccountID:     credential.ID, AccountName: credential.Name, Scope: FailureScopeProtocol, Cause: err,
+	}, true
 }
 
 type ImageEditInput struct {
@@ -695,9 +768,9 @@ type ImageEditInput struct {
 }
 
 func (s *Service) GenerateImage(ctx context.Context, input ImageGenerationInput) (*Result, error) {
-	return s.executeImage(ctx, input.RequestID, input.ClientKey, input.PublicModel, audit.OperationImage, func(executionCtx context.Context, adapter provider.ImageAdapter, credential accountdomain.Credential, upstream string) (*provider.Response, error) {
+	return s.executeImage(ctx, input.RequestID, input.ClientKey, input.PublicModel, audit.OperationImage, input.execution, func(executionCtx context.Context, adapter provider.ImageAdapter, credential accountdomain.Credential, upstream string) (*provider.Response, error) {
 		return adapter.GenerateImage(executionCtx, provider.ImageGenerationRequest{
-			Credential: credential, Model: upstream, Prompt: input.Prompt, Count: input.Count,
+			RequestID: input.RequestID, Credential: credential, Model: upstream, Prompt: input.Prompt, Count: input.Count,
 			Size: input.Size, AspectRatio: input.AspectRatio, Resolution: input.Resolution,
 			ResponseFormat: input.ResponseFormat, Streaming: input.Streaming,
 		})
@@ -705,7 +778,7 @@ func (s *Service) GenerateImage(ctx context.Context, input ImageGenerationInput)
 }
 
 func (s *Service) EditImage(ctx context.Context, input ImageEditInput) (*Result, error) {
-	return s.executeImage(ctx, input.RequestID, input.ClientKey, input.PublicModel, audit.OperationImageEdit, func(executionCtx context.Context, adapter provider.ImageAdapter, credential accountdomain.Credential, upstream string) (*provider.Response, error) {
+	return s.executeImage(ctx, input.RequestID, input.ClientKey, input.PublicModel, audit.OperationImageEdit, imageExecutionOptions{}, func(executionCtx context.Context, adapter provider.ImageAdapter, credential accountdomain.Credential, upstream string) (*provider.Response, error) {
 		return adapter.EditImage(executionCtx, provider.ImageEditRequest{
 			Credential: credential, Model: upstream, Prompt: input.Prompt,
 			ImageURLs: input.ImageURLs, Count: input.Count, Resolution: input.Resolution, ResponseFormat: input.ResponseFormat,
@@ -713,26 +786,44 @@ func (s *Service) EditImage(ctx context.Context, input ImageEditInput) (*Result,
 	}, false, input.Resolution, input.Count, len(input.ImageURLs))
 }
 
-func (s *Service) executeImage(ctx context.Context, requestID string, key clientkey.Key, publicModel string, operation audit.Operation, execute func(context.Context, provider.ImageAdapter, accountdomain.Credential, string) (*provider.Response, error), streaming bool, resolution string, requestedCount, inputImageCount int) (*Result, error) {
+func (s *Service) executeImage(ctx context.Context, requestID string, key clientkey.Key, publicModel string, operation audit.Operation, options imageExecutionOptions, execute func(context.Context, provider.ImageAdapter, accountdomain.Credential, string) (*provider.Response, error), streaming bool, resolution string, requestedCount, inputImageCount int) (*Result, error) {
 	ctx, egressTrace := infraegress.WithTrace(ctx)
 	startedAt := time.Now()
 	eventID := newAuditEventID()
-	routes, err := s.models.GetByPublicIDCandidates(ctx, publicModel)
-	if err != nil {
-		return nil, ErrModelNotFound
-	}
 	capability := modeldomain.CapabilityImage
 	if operation == audit.OperationImageEdit {
 		capability = modeldomain.CapabilityImageEdit
 	}
-	route, err := s.selectMediaRoute(routes, key, capability, func(providerValue accountdomain.Provider) bool {
-		_, ok := s.providers.Images(providerValue)
-		return ok
-	})
-	if err != nil {
-		return nil, err
+	var route modeldomain.Route
+	var err error
+	if options.RouteID != 0 {
+		route, err = s.models.Get(ctx, options.RouteID)
+		if err != nil || !route.Enabled || route.Capability != capability {
+			return nil, ErrModelNotFound
+		}
+		if !s.clientKeys.CanUseModel(key, route.ID) {
+			return nil, clientkeyapp.ErrModelNotAllowed
+		}
+		if _, ok := s.providers.Images(route.Provider); !ok {
+			return nil, ErrNoAvailableAccount
+		}
+	} else {
+		routes, routeErr := s.models.GetByPublicIDCandidates(ctx, publicModel)
+		if routeErr != nil {
+			return nil, ErrModelNotFound
+		}
+		route, err = s.selectMediaRoute(routes, key, capability, func(providerValue accountdomain.Provider) bool {
+			_, ok := s.providers.Images(providerValue)
+			return ok
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	ctx = infraegress.WithGroupID(ctx, route.EgressGroupID)
+	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+	routingTrace := newRoutingTrace(route.ID, route.Provider, route.UpstreamModel, quotaMode)
+	ctx = withRoutingTrace(ctx, routingTrace)
 	externalModel := modeldomain.ExternalPublicID(route.Provider, route.PublicID)
 	adapter, ok := s.providers.Images(route.Provider)
 	if !ok {
@@ -758,6 +849,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			record.AccountName = credential.Name
 		}
 		applyAuditEgress(&record, egressTrace, route.Provider)
+		applyRoutingTrace(&record, routingTrace)
 		persistCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
 		defer cancel()
 		if auditErr := s.audits.Create(persistCtx, record); auditErr != nil {
@@ -786,7 +878,6 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			s.cancelBillingReservation(eventID)
 		}
 	}()
-	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 	attempts := int(s.maxAttempts.Load())
 	if attempts <= 0 {
 		attempts = 3
@@ -798,9 +889,23 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 	var lastCredentialFailure *accountdomain.Credential
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
+		if attempt == 0 && options.PreferredAccountID != 0 {
+			lease, err = s.selector.AcquirePinned(ctx, route.Provider, options.PreferredAccountID, route.UpstreamModel, quotaMode, true)
+			if err != nil {
+				excluded[options.PreferredAccountID] = true
+				s.logger.Warn("image_preferred_account_unavailable", "request_id", requestID, "route_id", route.ID, "account_id", options.PreferredAccountID, "error", err)
+				lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
+			}
+		} else {
+			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
+		}
 		if err != nil {
+			s.requestCapacityReplenishment(ctx, route.Provider, route.UpstreamModel, quotaMode, err)
 			if lastCredentialFailure != nil {
+				if failure, ok := imageProtocolFailure(lastErr, *lastCredentialFailure); ok {
+					writeFailureAudit(failure.HTTPStatus, failure.Code, lastCredentialFailure)
+					return nil, failure
+				}
 				var failure *UpstreamFailure
 				if errors.As(lastErr, &failure) {
 					writeFailureAudit(failure.HTTPStatus, failure.AuditCode(), lastCredentialFailure)
@@ -815,16 +920,24 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 		excluded[lease.Credential.ID] = true
 		credential, err = s.accounts.EnsureCredential(ctx, lease.Credential, false)
 		if err != nil {
+			routingTrace.recordAttempt(attempt+1, lease.Credential.ID, "credential", 0, "credential_unavailable", "rotate_account", FailureScopeAccount, 0, true, false)
 			s.logger.Error("image_credential_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", lease.Credential.ID, "error", err)
 			failedCredential := lease.Credential
 			lastCredentialFailure = &failedCredential
 			lease.Release()
 			continue
 		}
+		if options.OnAttempt != nil {
+			options.OnAttempt(credential, attempt+1)
+		}
+		s.logger.Info("image_attempt_started", "request_id", requestID, "attempt", attempt+1, "route_id", route.ID, "egress_group_id", route.EgressGroupID, "account_id", credential.ID)
 		executionStarted := time.Now()
 		response, err = execute(ctx, adapter, credential, route.UpstreamModel)
-		if !provider.IsMediaPostProcessingError(err) {
-			s.selector.ObserveRouteResult(credential.ID, route.UpstreamModel, time.Since(executionStarted), err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300)
+		_, protocolError := provider.AsMediaProtocolError(err)
+		if !provider.IsMediaPostProcessingError(err) && !protocolError {
+			if err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+				s.selector.ObserveRouteResult(credential.ID, route.UpstreamModel, time.Since(executionStarted), true)
+			}
 		}
 		if err != nil {
 			s.logger.Error("image_upstream_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", credential.ID, "error", err)
@@ -837,6 +950,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 					errorCode = "browser_worker_unavailable"
 					publicMessage = "Grok Web 浏览器 worker 不可用，请检查 worker 容器健康状态"
 				}
+				routingTrace.recordAttempt(attempt+1, credential.ID, "egress", 0, errorCode, "fail_request", FailureScopeEgress, time.Since(executionStarted), false, false)
 				writeFailureAudit(http.StatusServiceUnavailable, errorCode, &credential)
 				return nil, &UpstreamFailure{
 					HTTPStatus:    http.StatusServiceUnavailable,
@@ -845,18 +959,47 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 					Cause:         err,
 				}
 			}
+			if protocolFailure, ok := imageProtocolFailure(err, credential); ok {
+				rawProtocolFailure, _ := provider.AsMediaProtocolError(err)
+				lastErr = err
+				failedCredential := credential
+				lastCredentialFailure = &failedCredential
+				if lease.QuotaMode != "" {
+					s.accounts.QueueQuotaRefresh(credential.ID, lease.QuotaMode)
+				}
+				lease.Release()
+				action := "fail_request"
+				if rawProtocolFailure.Retryable && attempt+1 < attempts {
+					action = "rotate_account"
+				}
+				routingTrace.recordAttempt(attempt+1, credential.ID, "protocol", protocolFailure.HTTPStatus, protocolFailure.Code, action, FailureScopeProtocol, time.Since(executionStarted), false, false)
+				s.logger.Warn("image_protocol_failure", "request_id", requestID, "attempt", attempt+1, "account_id", credential.ID, "code", protocolFailure.Code, "retryable", rawProtocolFailure.Retryable)
+				if rawProtocolFailure.Retryable && attempt+1 < attempts {
+					continue
+				}
+				writeFailureAudit(protocolFailure.HTTPStatus, protocolFailure.Code, &credential)
+				return nil, protocolFailure
+			}
 			lastErr = err
 			failedCredential := credential
 			lastCredentialFailure = &failedCredential
-			if !provider.IsMediaPostProcessingError(err) {
-				s.selector.MarkFailure(ctx, credential, 0, 0)
+			errorCode := "upstream_unavailable"
+			if provider.IsMediaPostProcessingError(err) {
+				errorCode = "media_postprocessing_failed"
 			}
+			action := "rotate_account"
+			if provider.IsMediaPostProcessingError(err) || attempt+1 >= attempts {
+				action = "fail_request"
+			}
+			scope := FailureScopeProvider
+			if provider.IsMediaPostProcessingError(err) {
+				scope = FailureScopePostProcess
+			}
+			failure := &UpstreamFailure{HTTPStatus: http.StatusBadGateway, Code: errorCode, Scope: scope, AccountID: credential.ID, AccountName: credential.Name, Cause: err}
+			s.selector.ObserveRouteFailure(credential.ID, route.UpstreamModel, time.Since(executionStarted), DecideFailure(failure))
+			routingTrace.recordAttempt(attempt+1, credential.ID, "generation", 0, errorCode, action, scope, time.Since(executionStarted), !provider.IsMediaPostProcessingError(err), false)
 			lease.Release()
 			if provider.IsMediaPostProcessingError(err) || attempt+1 >= attempts {
-				errorCode := "upstream_unavailable"
-				if provider.IsMediaPostProcessingError(err) {
-					errorCode = "media_postprocessing_failed"
-				}
 				writeFailureAudit(http.StatusBadGateway, errorCode, &credential)
 				return nil, err
 			}
@@ -864,6 +1007,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 		}
 		if response == nil {
 			lastErr = errors.New("image provider returned an empty response")
+			routingTrace.recordAttempt(attempt+1, credential.ID, "protocol", 0, "empty_response", "rotate_account", FailureScopeProtocol, time.Since(executionStarted), false, false)
 			lease.Release()
 			if attempt+1 >= attempts {
 				writeFailureAudit(http.StatusBadGateway, "upstream_unavailable", &credential)
@@ -876,6 +1020,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 			body, bodyErr := readRetryableBody(response.Body)
 			failure := newHTTPUpstreamFailure(status, body, credential.ID, credential.Name)
+			s.selector.ObserveRouteFailure(credential.ID, route.UpstreamModel, time.Since(executionStarted), DecideFailure(failure))
 			if bodyErr != nil {
 				failure.Cause = bodyErr
 			}
@@ -886,6 +1031,13 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			if failure.AccountScoped && !failureHandled {
 				s.selector.MarkFailure(ctx, credential, status, retryAfter)
 			}
+			action := "rotate_account"
+			if failureHandled {
+				action = "update_account_state"
+			} else if status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(credential.Provider) && !failure.AccountScoped {
+				action = "retry_egress"
+			}
+			routingTrace.recordAttempt(attempt+1, credential.ID, "response", status, failure.AuditCode(), action, DecideFailure(failure).Scope, time.Since(executionStarted), failure.AccountScoped, failureHandled)
 			s.logger.Warn("image_attempt_failed", "request_id", requestID, "attempt", attempt+1, "account_id", credential.ID,
 				"provider", credential.Provider, "status", status, "failure_code", failure.Code,
 				"quota_confirmed", failure.QuotaExhausted, "quota_mode", lease.QuotaMode, "account_scoped", failure.AccountScoped)
@@ -899,6 +1051,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			writeFailureAudit(failure.HTTPStatus, failure.AuditCode(), &credential)
 			return nil, failure
 		}
+		routingTrace.recordAttempt(attempt+1, credential.ID, "response", response.StatusCode, "", "return_response", FailureScopeUnknown, time.Since(executionStarted), false, false)
 		break
 	}
 	if response.StatusCode == http.StatusUnauthorized && credential.AuthType == accountdomain.AuthTypeSSO {
@@ -918,6 +1071,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			record.ErrorCode = errorCode
 			record.DurationMS, record.CreatedAt = time.Since(startedAt).Milliseconds(), time.Now().UTC()
 			applyAuditEgress(&record, egressTrace, route.Provider)
+			applyRoutingTrace(&record, routingTrace)
 			if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" {
 				s.selector.markSuccess(persistCtx, credential, false)
 				record.MediaOutputImages = int64(max(0, requestedCount))

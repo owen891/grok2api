@@ -11,6 +11,7 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	inspectionapp "github.com/chenyme/grok2api/backend/internal/application/accountinspection"
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
@@ -21,8 +22,10 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
+	operationsapp "github.com/chenyme/grok2api/backend/internal/application/operations"
 	quotarecoveryapp "github.com/chenyme/grok2api/backend/internal/application/quotarecovery"
 	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
+	replenishmentapp "github.com/chenyme/grok2api/backend/internal/application/replenishment"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
@@ -36,6 +39,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/observability"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	httpserver "github.com/chenyme/grok2api/backend/internal/transport/http"
@@ -43,27 +47,30 @@ import (
 
 // Application 管理后端进程生命周期和本地后台任务。
 type Application struct {
-	logger            *slog.Logger
-	database          *relational.Database
-	server            *http.Server
-	audits            *auditapp.Service
-	responses         repository.ResponseRepository
-	runtime           io.Closer
-	settingsBus       repository.SettingsChangeBus
-	settings          *settingsapp.Service
-	gateway           *gateway.Service
-	media             *mediaapp.Service
-	quotaRecovery     *quotarecoveryapp.Service
-	registrationSpool *registrationapp.Service
-	registration      *registrationapp.Controller
-	accounts          *accountapp.Service
-	models            *modelapp.Service
-	clientKeys        *clientkeyapp.Service
-	accountRepo       repository.AccountRepository
-	modelRepo         repository.ModelRepository
-	providers         *provider.Registry
-	web               *webprovider.Adapter
-	startup           *startupState
+	logger             *slog.Logger
+	database           *relational.Database
+	server             *http.Server
+	audits             *auditapp.Service
+	responses          repository.ResponseRepository
+	runtime            io.Closer
+	settingsBus        repository.SettingsChangeBus
+	settings           *settingsapp.Service
+	gateway            *gateway.Service
+	media              *mediaapp.Service
+	quotaRecovery      *quotarecoveryapp.Service
+	replenisher        *replenishmentapp.Service
+	registrationSpool  *registrationapp.Service
+	registration       *registrationapp.Controller
+	accounts           *accountapp.Service
+	accountInspections *inspectionapp.Service
+	models             *modelapp.Service
+	operations         *operationsapp.Service
+	clientKeys         *clientkeyapp.Service
+	accountRepo        repository.AccountRepository
+	modelRepo          repository.ModelRepository
+	providers          *provider.Registry
+	web                *webprovider.Adapter
+	startup            *startupState
 }
 
 func resolveRegistrationProxyGroup(ctx context.Context, groups repository.EgressGroupRepository, cipher *security.Cipher, groupID uint64, expectedScope string, visited map[uint64]struct{}) ([]string, error) {
@@ -167,6 +174,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressGroupService := egressgroupapp.NewService(egressRepo, egressRepo, cipher)
 	mediaJobRepo := relational.NewMediaJobRepository(database)
 	mediaAssetRepo := relational.NewMediaAssetRepository(database)
+	replenishmentRepo := relational.NewReplenishmentRepository(database)
+	accountInspectionRepo := relational.NewAccountInspectionRepository(database)
 	loadedConfig, settingsUpdatedAt, settingsRevision, err := settingsapp.LoadPersisted(ctx, cfg, runtimeSettingsRepo)
 	if err != nil {
 		database.Close()
@@ -185,6 +194,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	var refreshLock repository.DistributedLock
 	var settingsBus repository.SettingsChangeBus
 	var quotaQueue repository.QuotaRecoveryQueue
+	var routePerformance repository.RoutePerformanceRepository
 	var runtimeStore io.Closer
 	runtimeHealth := func(context.Context) error { return nil }
 	switch cfg.RuntimeStore.Driver {
@@ -208,6 +218,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		refreshLock = redisruntime.NewLockStore(redisStore)
 		settingsBus = redisStore
 		quotaQueue = redisStore
+		routePerformance = redisStore
 	case "memory":
 		rateLimiter = memory.NewRateLimiter()
 		concurrency = memory.NewConcurrencyLimiter()
@@ -215,6 +226,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		deviceSessions = memory.NewDeviceSessionStore()
 		refreshLock = memory.NewLockStore()
 		quotaQueue = memory.NewQuotaRecoveryQueue()
+		routePerformance = memory.NewRoutePerformanceStore()
 	default:
 		database.Close()
 		return nil, fmt.Errorf("不支持的运行态驱动: %s", cfg.RuntimeStore.Driver)
@@ -314,11 +326,33 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
 	dashboardService := dashboardapp.NewService(dashboardRepo)
 	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
+	selector.SetLogger(logger)
+	selector.SetRoutePerformanceRepository(routePerformance)
+	accountInspectionService := inspectionapp.NewService(accountRepo, modelRepo, accountInspectionRepo, providers, accountService, selector, logger)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
 	gatewayService.SetLogger(logger)
 	gatewayService.ConfigureMedia(mediaJobRepo, cfg.Provider.Web.MediaConcurrency)
 	quotaRecoveryService := quotarecoveryapp.NewService(logger, quotaQueue, accountService, cfg.Provider.Web.RecoveryBackoffBase.Value(), cfg.Provider.Web.RecoveryBackoffMax.Value())
 	quotaRecoveryService.SetBulkPool(syncPool)
+	replenisher := replenishmentapp.NewService(selector, replenishmentRepo, registrationController, replenishmentapp.Config{
+		Enabled: cfg.Registration.AutoReplenish.Enabled, DryRun: cfg.Registration.AutoReplenish.DryRun,
+		Provider: account.Provider(cfg.Registration.AutoReplenish.Provider), Model: cfg.Registration.AutoReplenish.Model,
+		QuotaMode: cfg.Registration.AutoReplenish.QuotaMode, RegisterCount: cfg.Registration.AutoReplenish.RegisterCount,
+		Cooldown: cfg.Registration.AutoReplenish.Cooldown.Value(), RecoveryLeadTime: cfg.Registration.AutoReplenish.RecoveryLeadTime.Value(),
+		Predictive: cfg.Registration.AutoReplenish.Predictive, TargetEligible: cfg.Registration.AutoReplenish.TargetEligible,
+		MinDemandRPM: cfg.Registration.AutoReplenish.MinDemandRPM, DemandWindow: cfg.Registration.AutoReplenish.DemandWindow.Value(),
+		VerificationGrace:     cfg.Registration.AutoReplenish.VerificationGrace.Value(),
+		MaxDailyRegistrations: cfg.Registration.AutoReplenish.MaxDailyRegistrations,
+	}, logger)
+	replenisher.SetDemandSource(auditRepo)
+	gatewayService.SetCapacityReplenisher(replenisher)
+	operationsService := operationsapp.NewService(modelRepo, selector, providers, replenishmentRepo, operationsapp.ReplenishmentConfig{
+		Enabled: cfg.Registration.AutoReplenish.Enabled, DryRun: cfg.Registration.AutoReplenish.DryRun,
+		Scope: replenisher.Scope(), MaxDailyRegistrations: cfg.Registration.AutoReplenish.MaxDailyRegistrations,
+		Predictive: cfg.Registration.AutoReplenish.Predictive, TargetEligible: cfg.Registration.AutoReplenish.TargetEligible,
+		MinDemandRPM: cfg.Registration.AutoReplenish.MinDemandRPM, DemandWindow: cfg.Registration.AutoReplenish.DemandWindow.Value(),
+		VerificationGrace: cfg.Registration.AutoReplenish.VerificationGrace.Value(),
+	})
 	var notifySettings func(context.Context)
 	if settingsBus != nil {
 		notifySettings = func(notifyCtx context.Context) {
@@ -359,12 +393,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, EgressGroups: egressGroupService, Registration: registrationController})
+	var metricsHandler http.Handler
+	if cfg.Server.MetricsEnabled {
+		metricsHandler = observability.Handler()
+	}
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountInspections: accountInspectionService, AccountSync: accountSyncService, Models: modelService, Operations: operationsService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, EgressGroups: egressGroupService, Registration: registrationController, Metrics: metricsHandler})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
 		audits: auditService, responses: responseRepo, runtime: runtimeStore,
-		settingsBus: settingsBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, registrationSpool: registrationSpool, registration: registrationController, accounts: accountService, models: modelService, clientKeys: clientKeyService,
+		settingsBus: settingsBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, replenisher: replenisher, registrationSpool: registrationSpool, registration: registrationController, accounts: accountService, accountInspections: accountInspectionService, models: modelService, operations: operationsService, clientKeys: clientKeyService,
 		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, startup: startup,
 	}, nil
 }
@@ -469,6 +507,15 @@ func (a *Application) Run(ctx context.Context) error {
 		a.quotaRecovery.Run(taskCtx)
 		return nil
 	})
+	if a.replenisher != nil {
+		startBackground("registration_replenisher", a.replenisher.Run)
+	}
+	if a.accountInspections != nil {
+		startBackground("account_inspection", a.accountInspections.Run)
+	}
+	if a.operations != nil {
+		startBackground("operations_sampler", a.runOperationsSampler)
+	}
 	if a.registrationSpool != nil {
 		startBackground("registration_spool", a.registrationSpool.Run)
 	}
@@ -535,6 +582,24 @@ func (a *Application) Run(ctx context.Context) error {
 	}
 }
 
+func (a *Application) runOperationsSampler(ctx context.Context) error {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		snapshotCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		_, err := a.operations.Snapshot(snapshotCtx)
+		cancel()
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
 func (a *Application) Close() error {
 	var runtimeErr error
 	if a.runtime != nil {
@@ -546,6 +611,9 @@ func (a *Application) Close() error {
 func (a *Application) runPeriodicTask(ctx context.Context, interval time.Duration, name string, task func(context.Context) error) {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
+	if a.operations != nil {
+		a.operations.TaskScheduled(name, time.Now().UTC().Add(interval))
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -554,8 +622,15 @@ func (a *Application) runPeriodicTask(ctx context.Context, interval time.Duratio
 			runCtx, cancel := context.WithTimeout(ctx, minDuration(interval, 5*time.Minute))
 			err := task(runCtx)
 			cancel()
+			nextRunAt := time.Now().UTC().Add(interval)
 			if err != nil {
 				a.logger.Warn(name+"_failed", "error", err)
+				if a.operations != nil {
+					a.operations.TaskFailed(name, err, false)
+					a.operations.TaskScheduled(name, nextRunAt)
+				}
+			} else if a.operations != nil {
+				a.operations.TaskSucceeded(name, &nextRunAt)
 			}
 			resetTimer(timer, interval)
 		}
@@ -565,12 +640,20 @@ func (a *Application) runPeriodicTask(ctx context.Context, interval time.Duratio
 func (a *Application) runSupervisedTask(ctx context.Context, name string, task func(context.Context) error) {
 	backoff := time.Second
 	for {
+		stopHeartbeat := a.startTaskHeartbeat(ctx, name)
 		err := batch.Do(ctx, task)
+		stopHeartbeat()
 		if ctx.Err() != nil {
+			if a.operations != nil {
+				a.operations.TaskStopped(name)
+			}
 			return
 		}
 		if err == nil {
 			err = errors.New("后台任务意外退出")
+		}
+		if a.operations != nil {
+			a.operations.TaskFailed(name, err, true)
 		}
 		var panicErr *batch.PanicError
 		if errors.As(err, &panicErr) {
@@ -586,6 +669,32 @@ func (a *Application) runSupervisedTask(ctx context.Context, name string, task f
 		case <-timer.C:
 		}
 		backoff = min(backoff*2, 30*time.Second)
+	}
+}
+
+func (a *Application) startTaskHeartbeat(ctx context.Context, name string) func() {
+	if a.operations == nil {
+		return func() {}
+	}
+	a.operations.TaskStarted(name)
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				a.operations.TaskHeartbeat(name)
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
 	}
 }
 

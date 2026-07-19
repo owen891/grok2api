@@ -5,6 +5,40 @@ import type { SortOrder } from "@/shared/lib/table-sort";
 
 export type AuditPeriod = PeriodValue;
 
+export type RoutingTraceEventDTO = {
+  type: "candidate_pool" | "selected" | "selection_failed" | "attempt";
+  elapsedMs: number;
+  attempt?: number;
+  accountId?: string;
+  selection?: string;
+  total?: number;
+  excluded?: number;
+  eligible?: number;
+  probe?: number;
+  cooling?: number;
+  modelCooling?: number;
+  quotaExhausted?: number;
+  unsupported?: number;
+  reason?: string;
+  stage?: string;
+  statusCode?: number;
+  errorCode?: string;
+  action?: string;
+  durationMs?: number;
+  accountScoped?: boolean;
+  quotaStateChanged?: boolean;
+};
+
+export type RoutingTraceDTO = {
+  version: number;
+  routeId: string;
+  provider: "grok_build" | "grok_web" | "grok_console";
+  model: string;
+  quotaMode?: string;
+  startedAt: string;
+  events: RoutingTraceEventDTO[];
+};
+
 export type AuditDTO = {
   id: string;
   requestId: string;
@@ -42,6 +76,7 @@ export type AuditDTO = {
   contextOutputTokens: number;
   durationMs: number;
   errorCode?: string;
+  routingTrace?: RoutingTraceDTO;
   createdAt: string;
 };
 
@@ -79,6 +114,18 @@ export type AuditSummaryDTO = {
   };
 };
 
+const routingTraceEventValidator = hasShape({
+  type: isOneOf("candidate_pool", "selected", "selection_failed", "attempt"), elapsedMs: isNumber,
+  attempt: isOptional(isNumber), accountId: isOptional(isString), selection: isOptional(isString), total: isOptional(isNumber),
+  excluded: isOptional(isNumber), eligible: isOptional(isNumber), probe: isOptional(isNumber), cooling: isOptional(isNumber),
+  modelCooling: isOptional(isNumber), quotaExhausted: isOptional(isNumber), unsupported: isOptional(isNumber), reason: isOptional(isString),
+  stage: isOptional(isString), statusCode: isOptional(isNumber), errorCode: isOptional(isString), action: isOptional(isString),
+  durationMs: isOptional(isNumber), accountScoped: isOptional(isBoolean), quotaStateChanged: isOptional(isBoolean),
+});
+const routingTraceValidator = hasShape({
+  version: isNumber, routeId: isString, provider: isOneOf("grok_build", "grok_web", "grok_console"), model: isString,
+  quotaMode: isOptional(isString), startedAt: isString, events: isArrayOf(routingTraceEventValidator),
+});
 const auditValidator = hasShape({
   id: isString, requestId: isString, clientKeyId: isString, clientKeyName: isOptional(isString), modelRouteId: isString,
   modelPublicId: isOptional(isString), modelUpstreamModel: isOptional(isString), provider: isOneOf("grok_build", "grok_web", "grok_console"),
@@ -91,7 +138,7 @@ const auditValidator = hasShape({
   cachedInputTokens: isNumber, outputTokens: isNumber, reasoningTokens: isNumber, totalTokens: isNumber,
   costInUsdTicks: isNumber, estimatedCostInUsdTicks: isNumber, pricingModel: isOptional(isString), pricingVersion: isOptional(isString),
   numSourcesUsed: isNumber, numServerSideToolsUsed: isNumber, contextInputTokens: isNumber, contextOutputTokens: isNumber,
-  durationMs: isNumber, errorCode: isOptional(isString), createdAt: isString,
+  durationMs: isNumber, errorCode: isOptional(isString), routingTrace: isOptional(routingTraceValidator), createdAt: isString,
 });
 const decodeAuditPage = createObjectDecoder<AuditCursorPageDTO>("audit page", {
   items: isArrayOf(auditValidator), pageSize: isNumber, nextCursor: isString, hasMore: isBoolean,

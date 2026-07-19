@@ -60,6 +60,7 @@ type ServerConfig struct {
 	ReadTimeout    Duration `yaml:"readTimeout"`
 	RequestTimeout Duration `yaml:"requestTimeout"`
 	SwaggerEnabled bool     `yaml:"swaggerEnabled"`
+	MetricsEnabled bool     `yaml:"metricsEnabled"`
 }
 
 type FrontendConfig struct {
@@ -104,15 +105,33 @@ type AuthConfig struct {
 }
 
 type RegistrationConfig struct {
-	Enabled         bool     `yaml:"enabled"`
-	SpoolPath       string   `yaml:"spoolPath"`
-	PollInterval    Duration `yaml:"pollInterval"`
-	FailedRetention Duration `yaml:"failedRetention"`
-	WorkDir         string   `yaml:"workDir"`
-	ConfigPath      string   `yaml:"configPath"`
-	Command         []string `yaml:"command"`
-	BrowserMode     string   `yaml:"browserMode"`
-	BrowserPath     string   `yaml:"browserPath"`
+	Enabled         bool                `yaml:"enabled"`
+	SpoolPath       string              `yaml:"spoolPath"`
+	PollInterval    Duration            `yaml:"pollInterval"`
+	FailedRetention Duration            `yaml:"failedRetention"`
+	WorkDir         string              `yaml:"workDir"`
+	ConfigPath      string              `yaml:"configPath"`
+	Command         []string            `yaml:"command"`
+	BrowserMode     string              `yaml:"browserMode"`
+	BrowserPath     string              `yaml:"browserPath"`
+	AutoReplenish   AutoReplenishConfig `yaml:"autoReplenish"`
+}
+
+type AutoReplenishConfig struct {
+	Enabled               bool     `yaml:"enabled"`
+	DryRun                bool     `yaml:"dryRun"`
+	Predictive            bool     `yaml:"predictive"`
+	TargetEligible        int      `yaml:"targetEligible"`
+	MinDemandRPM          float64  `yaml:"minDemandRPM"`
+	DemandWindow          Duration `yaml:"demandWindow"`
+	Provider              string   `yaml:"provider"`
+	Model                 string   `yaml:"model"`
+	QuotaMode             string   `yaml:"quotaMode"`
+	RegisterCount         int      `yaml:"registerCount"`
+	Cooldown              Duration `yaml:"cooldown"`
+	RecoveryLeadTime      Duration `yaml:"recoveryLeadTime"`
+	VerificationGrace     Duration `yaml:"verificationGrace"`
+	MaxDailyRegistrations int      `yaml:"maxDailyRegistrations"`
 }
 
 type ProviderConfig struct {
@@ -409,6 +428,17 @@ func (c Config) Validate() error {
 			return errors.New("registration.browserMode 必须是 xvfb、headless、headed 或 background")
 		}
 	}
+	if c.Registration.AutoReplenish.Enabled {
+		if !c.Registration.Enabled {
+			return errors.New("registration.autoReplenish requires registration.enabled")
+		}
+		if c.Registration.AutoReplenish.Provider != "grok_web" || strings.TrimSpace(c.Registration.AutoReplenish.Model) == "" || strings.TrimSpace(c.Registration.AutoReplenish.QuotaMode) == "" {
+			return errors.New("registration.autoReplenish provider/model/quotaMode 无效")
+		}
+		if c.Registration.AutoReplenish.RegisterCount != 1 || c.Registration.AutoReplenish.Cooldown.Value() < 5*time.Minute || c.Registration.AutoReplenish.RecoveryLeadTime.Value() < 0 || c.Registration.AutoReplenish.RecoveryLeadTime.Value() > time.Hour || c.Registration.AutoReplenish.VerificationGrace.Value() < 30*time.Second || c.Registration.AutoReplenish.VerificationGrace.Value() > 15*time.Minute || c.Registration.AutoReplenish.MaxDailyRegistrations < 1 || c.Registration.AutoReplenish.MaxDailyRegistrations > 100 || c.Registration.AutoReplenish.TargetEligible < 0 || c.Registration.AutoReplenish.TargetEligible > 1000 || c.Registration.AutoReplenish.MinDemandRPM < 0 || c.Registration.AutoReplenish.MinDemandRPM > 100000 || (c.Registration.AutoReplenish.Predictive && (c.Registration.AutoReplenish.TargetEligible < 1 || c.Registration.AutoReplenish.MinDemandRPM <= 0 || c.Registration.AutoReplenish.DemandWindow.Value() < time.Minute || c.Registration.AutoReplenish.DemandWindow.Value() > 24*time.Hour)) {
+			return errors.New("registration.autoReplenish 参数无效")
+		}
+	}
 	providerURL, err := url.ParseRequestURI(strings.TrimSpace(c.Provider.Build.BaseURL))
 	if err != nil || providerURL.Scheme == "" || providerURL.Host == "" {
 		return errors.New("provider.build.baseURL 必须是有效 URL")
@@ -506,7 +536,8 @@ func defaultConfig() Config {
 		Registration: RegistrationConfig{
 			SpoolPath: "./data/registration/spool", PollInterval: Duration(2 * time.Second), FailedRetention: Duration(7 * 24 * time.Hour),
 			WorkDir: "./registration", ConfigPath: "./data/registration/config.json",
-			Command: []string{"grok2api-registration"},
+			Command:       []string{"grok2api-registration"},
+			AutoReplenish: AutoReplenishConfig{DryRun: true, Provider: "grok_web", Model: "grok-imagine-image", QuotaMode: "fast", RegisterCount: 1, Cooldown: Duration(30 * time.Minute), RecoveryLeadTime: Duration(10 * time.Minute), VerificationGrace: Duration(2 * time.Minute), DemandWindow: Duration(15 * time.Minute), MaxDailyRegistrations: 3},
 		},
 		Provider: ProviderConfig{
 			Build: BuildProviderConfig{

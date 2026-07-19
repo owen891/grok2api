@@ -10,6 +10,38 @@ import (
 	"unicode"
 )
 
+type FailureScope string
+
+const (
+	FailureScopeUnknown     FailureScope = "unknown"
+	FailureScopeAccount     FailureScope = "account"
+	FailureScopeQuota       FailureScope = "quota"
+	FailureScopeEgress      FailureScope = "egress"
+	FailureScopeProvider    FailureScope = "provider"
+	FailureScopeProtocol    FailureScope = "protocol"
+	FailureScopeNetwork     FailureScope = "network"
+	FailureScopePostProcess FailureScope = "post_process"
+)
+
+type FailureAction string
+
+const (
+	FailureActionFail          FailureAction = "fail"
+	FailureActionRotateAccount FailureAction = "rotate_account"
+	FailureActionUpdateQuota   FailureAction = "update_quota"
+	FailureActionRetryEgress   FailureAction = "retry_egress"
+	FailureActionRefresh       FailureAction = "refresh_credential"
+	FailureActionRequireReauth FailureAction = "require_reauth"
+	FailureActionRetryProvider FailureAction = "retry_provider"
+)
+
+type FailureDecision struct {
+	Scope           FailureScope
+	Action          FailureAction
+	PenalizeAccount bool
+	Retryable       bool
+}
+
 // UpstreamFailure 保存可安全暴露给下游和审计的上游失败分类，不包含响应正文或凭据。
 type UpstreamFailure struct {
 	HTTPStatus             int
@@ -19,6 +51,7 @@ type UpstreamFailure struct {
 	AccountID              uint64
 	AccountName            string
 	AccountScoped          bool
+	Scope                  FailureScope
 	PermanentAccountDenial bool
 	QuotaExhausted         bool
 	FreeQuotaExhausted     bool
@@ -26,6 +59,33 @@ type UpstreamFailure struct {
 	CredentialRejected     bool
 	Fingerprint            string
 	Cause                  error
+}
+
+// DecideFailure centralizes the routing action for future breaker/admission
+// control while existing retry branches migrate incrementally.
+func DecideFailure(failure *UpstreamFailure) FailureDecision {
+	if failure == nil {
+		return FailureDecision{Scope: FailureScopeUnknown, Action: FailureActionFail}
+	}
+	if failure.QuotaExhausted || failure.FreeQuotaExhausted || failure.ModelQuotaExhausted {
+		return FailureDecision{Scope: FailureScopeQuota, Action: FailureActionUpdateQuota, Retryable: true}
+	}
+	if failure.PermanentAccountDenial || failure.CredentialRejected {
+		return FailureDecision{Scope: FailureScopeAccount, Action: FailureActionRequireReauth, PenalizeAccount: true, Retryable: true}
+	}
+	if failure.AccountScoped {
+		return FailureDecision{Scope: FailureScopeAccount, Action: FailureActionRotateAccount, PenalizeAccount: true, Retryable: true}
+	}
+	if failure.Scope == FailureScopeProtocol {
+		return FailureDecision{Scope: FailureScopeProtocol, Action: FailureActionRetryProvider, Retryable: true}
+	}
+	if failure.Scope == FailureScopeEgress {
+		return FailureDecision{Scope: FailureScopeEgress, Action: FailureActionRetryEgress, Retryable: true}
+	}
+	if failure.Scope == FailureScopeNetwork {
+		return FailureDecision{Scope: FailureScopeNetwork, Action: FailureActionRetryProvider, Retryable: true}
+	}
+	return FailureDecision{Scope: FailureScopeProvider, Action: FailureActionRetryProvider, Retryable: true}
 }
 
 func (e *UpstreamFailure) Error() string {
@@ -63,6 +123,7 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 	failure := &UpstreamFailure{
 		HTTPStatus: status, Code: "upstream_error", PublicMessage: "上游服务返回错误",
 		UpstreamCode: upstreamCode, AccountID: accountID, AccountName: accountName,
+		Scope: FailureScopeProvider,
 	}
 	if status < 400 || status > 599 {
 		failure.HTTPStatus = http.StatusBadGateway
@@ -73,11 +134,13 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.Code = "upstream_unauthorized"
 		failure.PublicMessage = "上游账号认证失败"
 		failure.AccountScoped = true
+		failure.Scope = FailureScopeAccount
 		failure.CredentialRejected = true
 	case http.StatusPaymentRequired:
 		failure.Code = "upstream_payment_required"
 		failure.PublicMessage = "上游账号额度不足"
 		failure.AccountScoped = true
+		failure.Scope = FailureScopeQuota
 		failure.QuotaExhausted = true
 	case http.StatusForbidden:
 		failure.Code = "upstream_forbidden"
@@ -88,6 +151,9 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.QuotaExhausted = failure.FreeQuotaExhausted || isPaidQuotaExhaustion(metadataText)
 		failure.CredentialRejected = !failure.QuotaExhausted && containsAny(metadataText, "authentication", "unauthorized", "invalid token", "token expired")
 		failure.AccountScoped = failure.PermanentAccountDenial || failure.QuotaExhausted || failure.CredentialRejected || isAccountScopedForbidden(metadataText)
+		if failure.AccountScoped {
+			failure.Scope = FailureScopeAccount
+		}
 		switch {
 		case failure.PermanentAccountDenial:
 			failure.Code = "upstream_account_permission_denied"
@@ -102,11 +168,12 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 	case http.StatusTooManyRequests:
 		failure.Code = "upstream_rate_limited"
 		failure.PublicMessage = "上游请求频率受限"
-		failure.AccountScoped = true
 		failure.ModelQuotaExhausted = isModelQuotaExhaustion(metadataText)
 		failure.FreeQuotaExhausted = failure.ModelQuotaExhausted || isFreeQuotaExhaustion(metadataText)
 		failure.QuotaExhausted = failure.FreeQuotaExhausted || isPaidQuotaExhaustion(metadataText)
 		if failure.QuotaExhausted {
+			failure.AccountScoped = true
+			failure.Scope = FailureScopeQuota
 			failure.Code = "upstream_quota_exhausted"
 			failure.PublicMessage = "上游账号额度不足或等待恢复"
 		}
@@ -122,6 +189,18 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 	return failure
 }
 
+// ClassifyHTTPFailure exposes the shared routing taxonomy to active account
+// inspection without duplicating provider error parsing.
+func ClassifyHTTPFailure(status int, body []byte, accountID uint64, accountName string) *UpstreamFailure {
+	return newHTTPUpstreamFailure(status, body, accountID, accountName)
+}
+
+// ClassifyTransportFailure maps a probe transport failure into the same stable
+// scope and action vocabulary used by normal routing.
+func ClassifyTransportFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
+	return newTransportUpstreamFailure(err, accountID, accountName)
+}
+
 func newTransportUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
 	code, message := "upstream_network_error", "连接上游服务失败"
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -129,14 +208,14 @@ func newTransportUpstreamFailure(err error, accountID uint64, accountName string
 	}
 	return &UpstreamFailure{
 		HTTPStatus: http.StatusBadGateway, Code: code, PublicMessage: message,
-		AccountID: accountID, AccountName: accountName, Fingerprint: code, Cause: err,
+		AccountID: accountID, AccountName: accountName, Fingerprint: code, Scope: FailureScopeNetwork, Cause: err,
 	}
 }
 
 func newCredentialUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
 	return &UpstreamFailure{
 		HTTPStatus: http.StatusBadGateway, Code: "upstream_credential_unavailable", PublicMessage: "上游账号凭据不可用",
-		AccountID: accountID, AccountName: accountName, AccountScoped: true, Cause: err,
+		AccountID: accountID, AccountName: accountName, AccountScoped: true, Scope: FailureScopeAccount, Cause: err,
 	}
 }
 

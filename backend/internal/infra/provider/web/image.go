@@ -279,7 +279,7 @@ func (a *Adapter) generateLiteImage(ctx context.Context, request provider.ImageG
 	spec, _ := Resolve(request.Model)
 	urls := make([]string, 0, count)
 	for len(urls) < count {
-		value, err := a.generateLiteImageURL(ctx, request.Credential, spec, request.Prompt)
+		value, err := a.generateLiteImageURL(ctx, request.Credential, spec, request.Prompt, request.RequestID)
 		if err != nil {
 			if isWebUsageLimitError(err) && len(urls) == 0 {
 				return imageUsageLimitResponse(), nil
@@ -322,9 +322,9 @@ func (e *liteUpstreamError) Response() *provider.Response {
 	return &provider.Response{StatusCode: e.StatusCode, Status: e.Status, Header: jsonHeaders(), Body: io.NopCloser(bytes.NewReader(e.Body))}
 }
 
-func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.Credential, spec ModelSpec, prompt string) (string, error) {
+func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.Credential, spec ModelSpec, prompt, requestID string) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		upstream, lease, statsigTarget, err := a.openLiteImageUpstream(ctx, credential, spec, prompt)
+		upstream, lease, statsigTarget, err := a.openLiteImageUpstream(ctx, credential, spec, prompt, requestID)
 		if err != nil {
 			return "", err
 		}
@@ -401,7 +401,9 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 		if len(parsed.Images) == 0 {
 			diagnostics := inspectLiteCapture(capture.Bytes())
 			candidates := extractCapturedImageCandidates(capture.Bytes())
+			policyRefused := isLiteImagePolicyRefusal(diagnostics, parsed.Text.String())
 			a.log().Warn("web_lite_image_not_found",
+				"request_id", requestID,
 				"account_id", credential.ID,
 				"captured_bytes", len(capture.Bytes()),
 				"frames", diagnostics.Frames,
@@ -414,9 +416,18 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 				"candidate_urls", len(candidates),
 				"max_progress", diagnostics.MaxProgress,
 				"soft_stop", diagnostics.SoftStop,
+				"moderated", diagnostics.Moderated,
+				"r_rated", diagnostics.RRated,
+				"policy_refused", policyRefused,
 				"upstream_error_code", diagnostics.ErrorCode,
 				"upstream_error", diagnostics.ErrorMessage,
 			)
+			if diagnostics.Moderated || policyRefused {
+				return "", provider.NewTerminalMediaProtocolError(
+					"image_moderated",
+					errors.New("图片被 Grok 内容策略拦截"),
+				)
+			}
 			for _, candidate := range candidates {
 				if raw, err := a.downloadImage(ctx, credential, candidate); err == nil && len(raw) > 0 {
 					a.log().Info("web_lite_image_candidate_recovered",
@@ -428,10 +439,13 @@ func (a *Adapter) generateLiteImageURL(ctx context.Context, credential account.C
 				}
 			}
 			if attempt == 0 {
-				a.log().Warn("web_lite_image_empty_retry", "account_id", credential.ID)
+				a.log().Warn("web_lite_image_empty_retry", "request_id", requestID, "account_id", credential.ID)
 				continue
 			}
-			return "", fmt.Errorf("Grok Web Lite 响应结束但未解析到最终图片")
+			return "", provider.NewMediaProtocolError(
+				"image_generation_incomplete",
+				errors.New("Grok Web Lite 响应结束但未解析到最终图片"),
+			)
 		}
 		// Lite 上游固定生成两张，但每次查询只计一次 Fast 额度；按旧协议取首张并为 n 重复查询。
 		return parsed.Images[0], nil
@@ -469,7 +483,7 @@ func (a *Adapter) forwardLiteChatCompletion(ctx context.Context, request provide
 	}
 	parsed := parsedChat{ResponseID: responseID, InputTokens: estimateTokens(normalized.Prompt)}
 	for range count {
-		rawURL, err := a.generateLiteImageURL(ctx, request.Credential, spec, normalized.Prompt)
+		rawURL, err := a.generateLiteImageURL(ctx, request.Credential, spec, normalized.Prompt, "")
 		if err != nil {
 			var upstreamErr *liteUpstreamError
 			if errors.As(err, &upstreamErr) && parsed.Text.Len() == 0 {
@@ -498,7 +512,7 @@ func (a *Adapter) streamLiteChatImages(ctx context.Context, writer *io.PipeWrite
 	parsed := parsedChat{ResponseID: responseID, InputTokens: estimateTokens(prompt)}
 	writeStreamStart(writer, "chat", responseID, model, parsed.InputTokens)
 	for range count {
-		rawURL, err := a.generateLiteImageURL(ctx, credential, spec, prompt)
+		rawURL, err := a.generateLiteImageURL(ctx, credential, spec, prompt, "")
 		if err != nil {
 			_ = writer.CloseWithError(err)
 			return
@@ -837,8 +851,11 @@ func imageCandidatesFromUUID(uuid string) []string {
 	if uuid == "" || strings.ContainsAny(uuid, "/\\{}[]\"") {
 		return nil
 	}
-	// Common soft_stop shape: image_chunk only has imageUuid; final assets live under assets.grok.com.
+	// Common soft_stop shape: image_chunk only has imageUuid; probe the known
+	// public Imagine layout before legacy assets.grok.com layouts.
 	return []string{
+		"https://imagine-public.x.ai/imagine-public/images/" + uuid + ".jpg",
+		"https://imagine-public.x.ai/imagine-public/images/" + uuid + ".png",
 		"https://assets.grok.com/generated/" + uuid + "/image.jpg",
 		"https://assets.grok.com/generated/" + uuid + ".jpg",
 		"https://assets.grok.com/" + uuid,
@@ -855,8 +872,46 @@ type liteCaptureDiagnostics struct {
 	ImageUUIDs     []string
 	MaxProgress    int
 	SoftStop       bool
+	Moderated      bool
+	RRated         bool
 	ErrorCode      string
 	ErrorMessage   string
+}
+
+func isLiteImagePolicyRefusal(diagnostics liteCaptureDiagnostics, text string) bool {
+	if !diagnostics.SoftStop || diagnostics.ImageChunks != 0 {
+		return false
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(text), " "))
+	if normalized == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"content policy",
+		"safety policy",
+		"policy violation",
+		"can't help with that request",
+		"cannot help with that request",
+		"can't assist with that request",
+		"cannot assist with that request",
+		"unable to assist with that request",
+		"can't generate this image",
+		"cannot generate this image",
+		"unable to generate this image",
+		"can’t help with that request",
+		"can’t assist with that request",
+		"无法帮助处理该请求",
+		"无法协助处理该请求",
+		"无法生成这张图片",
+		"不能生成这张图片",
+		"内容政策",
+		"安全政策",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func inspectLiteCapture(data []byte) liteCaptureDiagnostics {
@@ -900,6 +955,12 @@ func inspectLiteCapture(data []byte) liteCaptureDiagnostics {
 func inspectLiteCaptureValue(value any, result *liteCaptureDiagnostics, imageFields map[string]struct{}) {
 	switch current := value.(type) {
 	case map[string]any:
+		if moderated, _ := current["moderated"].(bool); moderated {
+			result.Moderated = true
+		}
+		if rRated, _ := current["rRated"].(bool); rRated {
+			result.RRated = true
+		}
 		for key, nested := range current {
 			if key == "jsonData" {
 				if encoded, _ := nested.(string); encoded != "" {

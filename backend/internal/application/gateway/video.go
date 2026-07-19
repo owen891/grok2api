@@ -59,6 +59,8 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	ctx = infraegress.WithGroupID(ctx, route.EgressGroupID)
 	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+	routingTrace := newRoutingTrace(route.ID, route.Provider, route.UpstreamModel, quotaMode)
+	ctx = withRoutingTrace(ctx, routingTrace)
 	lease, err := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
 	if err != nil {
 		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
@@ -76,7 +78,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		AccountID: accountID, AccountName: lease.Credential.Name,
 		Provider: string(route.Provider), Model: externalModel, ModelRouteID: route.ID, UpstreamModel: model.DisplayUpstreamModel(route.Provider, route.UpstreamModel), Prompt: input.Prompt,
 		Seconds: input.Duration, Size: input.AspectRatio, Quality: input.Resolution,
-		Status: media.StatusQueued, Progress: 0, InputJSON: encodeVideoInput(input.ReferenceURLs), CreatedAt: now, UpdatedAt: now,
+		Status: media.StatusQueued, Progress: 0, InputJSON: encodeVideoInput(input.ReferenceURLs), RoutingTraceJSON: routingTrace.JSON(), CreatedAt: now, UpdatedAt: now,
 	}
 	reserved := false
 	if pricing, ok := audit.EstimateOfficialVideoCost(externalModel, input.Resolution, input.Duration); ok {
@@ -235,12 +237,21 @@ func (s *Service) claimVideoJob(ctx context.Context, id string) (media.Job, bool
 	if err != nil {
 		return media.Job{}, false, err
 	}
-	return s.mediaJobs.TryClaimMediaJob(ctx, id, now, now.Add(videoJobLease), claimToken)
+	lease := videoJobLease
+	if strings.HasPrefix(id, "image_") {
+		lease = imageJobLease
+	}
+	return s.mediaJobs.TryClaimMediaJob(ctx, id, now, now.Add(lease), claimToken)
 }
 
 func (s *Service) runVideoJob(parent context.Context, job media.Job, route model.Route) {
 	ctx, cancel := context.WithTimeout(parent, videoJobTimeout)
 	defer cancel()
+	routingTrace := routingTraceFromJSON(job.RoutingTraceJSON)
+	if routingTrace == nil {
+		routingTrace = newRoutingTrace(route.ID, route.Provider, route.UpstreamModel, "")
+	}
+	ctx = withRoutingTrace(ctx, routingTrace)
 	ctx, egressTrace := infraegress.WithTrace(ctx)
 	ctx = infraegress.WithGroupID(ctx, route.EgressGroupID)
 	startedAt := time.Now()
@@ -253,6 +264,8 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	// 轮询或结果处理失败切换到其他账号。
 	lease, err := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.UpstreamModel, "", true)
 	if err != nil {
+		routingTrace.recordAttempt(1, job.AccountID, "selection", 0, "account_unavailable", "fail_job", FailureScopeAccount, time.Since(startedAt), true, false)
+		job.RoutingTraceJSON = routingTrace.JSON()
 		if parent.Err() != nil {
 			s.deferVideoJob(parent, job)
 			return
@@ -285,8 +298,12 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			updateCancel()
 		},
 	})
-	s.selector.ObserveRouteResult(lease.Credential.ID, route.UpstreamModel, time.Since(generationStarted), err == nil)
+	if err == nil {
+		s.selector.ObserveRouteResult(lease.Credential.ID, route.UpstreamModel, time.Since(generationStarted), true)
+	}
 	if err != nil {
+		routingTrace.recordAttempt(1, job.AccountID, "generation", 0, "generation_failed", "fail_job", FailureScopeProvider, time.Since(generationStarted), true, false)
+		job.RoutingTraceJSON = routingTrace.JSON()
 		if parent.Err() != nil {
 			s.deferVideoJob(parent, job)
 			return
@@ -294,12 +311,18 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		if errors.Is(err, provider.ErrUnauthorized) && lease.Credential.AuthType == account.AuthTypeSSO {
 			_ = s.accounts.MarkReauthRequired(context.Background(), lease.Credential.ID, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
 		}
-		s.selector.MarkFailure(context.Background(), lease.Credential, 0, 0)
+		failure := &UpstreamFailure{HTTPStatus: http.StatusBadGateway, Code: "generation_failed", Scope: FailureScopeProvider, AccountID: lease.Credential.ID, AccountName: lease.Credential.Name, Cause: err}
+		if errors.Is(err, provider.ErrUnauthorized) {
+			failure.AccountScoped, failure.CredentialRejected, failure.Scope = true, true, FailureScopeAccount
+		}
+		s.selector.ObserveRouteFailure(lease.Credential.ID, route.UpstreamModel, time.Since(generationStarted), DecideFailure(failure))
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
 		s.failVideoJob(parent, job, "generation_failed", err)
 		return
 	}
 	now := time.Now().UTC()
+	routingTrace.recordAttempt(1, job.AccountID, "generation", http.StatusOK, "", "complete_job", FailureScopeUnknown, time.Since(generationStarted), false, false)
+	job.RoutingTraceJSON = routingTrace.JSON()
 	job.Status, job.Progress, job.UpstreamURL, job.ContentType = media.StatusCompleted, 100, result.URL, result.ContentType
 	applyMediaJobEgress(&job, egressTrace, route.Provider)
 	job.LeaseUntil, job.UpdatedAt, job.CompletedAt = nil, now, &now
@@ -359,6 +382,7 @@ func (s *Service) recordVideoAudit(ctx context.Context, job media.Job, durationM
 		MediaInputImages: int64(len(decodeVideoInput(job.InputJSON))),
 		DurationMS:       durationMS, CreatedAt: createdAt,
 	}
+	record.RoutingTraceJSON = job.RoutingTraceJSON
 	if job.Status == media.StatusCompleted {
 		record.MediaOutputSeconds = int64(max(0, job.Seconds))
 	}

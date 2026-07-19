@@ -14,5 +14,6 @@ type AuditRepository interface {
 	List(ctx context.Context, offset, limit int) ([]audit.Record, int64, error)
 	ListCursor(ctx context.Context, query AuditCursorQuery) ([]audit.Record, bool, error)
 	Summarize(ctx context.Context, query AuditSummaryQuery) (audit.Summary, error)
+	CountRequestsSince(ctx context.Context, provider, upstreamModel string, since time.Time) (int64, error)
 	SumTokensByAccountsSince(ctx context.Context, accountIDs []uint64, since time.Time) (map[uint64]int64, error)
 }

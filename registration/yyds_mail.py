@@ -10,10 +10,6 @@ import time
 from typing import Any, Optional
 
 import requests
-import urllib3
-from urllib3.exceptions import InsecureRequestWarning
-
-urllib3.disable_warnings(InsecureRequestWarning)
 
 YYDS_API_BASE = "https://maliapi.215.im/v1"
 config: dict[str, Any] = {}
@@ -33,7 +29,7 @@ def _headers(api_key: Optional[str] = None, jwt: Optional[str] = None, json_body
 
 
 def yyds_get_domains(api_key=None, jwt=None):
-    resp = requests.get(f"{YYDS_API_BASE}/domains", headers=_headers(api_key, jwt), timeout=20, verify=False)
+    resp = requests.get(f"{YYDS_API_BASE}/domains", headers=_headers(api_key, jwt), timeout=20)
     resp.raise_for_status()
     data = resp.json()
     return data.get("data", []) if data.get("success") else []
@@ -52,7 +48,6 @@ def yyds_create_account(address=None, domain=None, api_key=None, jwt=None):
         json=payload,
         headers=_headers(api_key, jwt, json_body=True),
         timeout=20,
-        verify=False,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -67,7 +62,6 @@ def yyds_get_token(address, api_key=None, jwt=None):
         json={"address": address},
         headers=_headers(api_key, jwt, json_body=True),
         timeout=20,
-        verify=False,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -85,7 +79,6 @@ def yyds_get_messages(address, token=None, api_key=None, jwt=None):
         params={"address": address},
         headers=headers,
         timeout=20,
-        verify=False,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -102,7 +95,6 @@ def yyds_get_message_detail(message_id, token=None, api_key=None, jwt=None):
         f"{YYDS_API_BASE}/messages/{message_id}",
         headers=headers,
         timeout=20,
-        verify=False,
     )
     resp.raise_for_status()
     data = resp.json()

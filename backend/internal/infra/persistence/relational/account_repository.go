@@ -931,8 +931,19 @@ func (r *AccountRepository) DecrementQuotaWindowBy(ctx context.Context, accountI
 }
 
 func (r *AccountRepository) ExhaustQuotaWindow(ctx context.Context, accountID uint64, mode string, resetAt *time.Time, now time.Time) error {
-	return r.db.db.WithContext(ctx).Model(&quotaWindowModel{}).Where("account_id = ? AND mode = ?", accountID, mode).
-		Updates(map[string]any{"remaining": 0, "reset_at": resetAt, "updated_at": now}).Error
+	windowSeconds := 0
+	if resetAt != nil && resetAt.After(now) {
+		windowSeconds = max(1, int(resetAt.Sub(now)/time.Second))
+	}
+	row := quotaWindowModel{
+		AccountID: accountID, Mode: truncate(strings.TrimSpace(mode), 64), Remaining: 0, Total: 0,
+		UsagePercent: 100, BreakdownJSON: "[]", WindowSeconds: windowSeconds, ResetAt: resetAt,
+		SyncedAt: &now, Source: string(account.QuotaSourceUpstream), UpdatedAt: now,
+	}
+	return r.db.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "account_id"}, {Name: "mode"}},
+		DoUpdates: clause.AssignmentColumns([]string{"remaining", "reset_at", "updated_at"}),
+	}).Create(&row).Error
 }
 
 func (r *AccountRepository) ListDueQuotaWindows(ctx context.Context, now time.Time, limit int) ([]account.QuotaWindow, error) {

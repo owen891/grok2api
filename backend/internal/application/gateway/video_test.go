@@ -83,6 +83,17 @@ func TestVideoQueueIsBoundedAndDeduplicated(t *testing.T) {
 	}
 }
 
+func TestImageClaimsUseImageTimeoutLease(t *testing.T) {
+	repository := &videoUsageRepository{job: media.Job{ID: "image_claim", Kind: media.JobKindImage}}
+	service := &Service{mediaJobs: repository}
+	if _, claimed, err := service.claimVideoJob(context.Background(), "image_claim"); err != nil || !claimed {
+		t.Fatalf("claim image: claimed=%v err=%v", claimed, err)
+	}
+	if repository.claimLease < imageJobLease-time.Second || repository.claimLease > imageJobLease+time.Second {
+		t.Fatalf("image claim lease = %v, want %v", repository.claimLease, imageJobLease)
+	}
+}
+
 type durableVideoAuditRecorder struct {
 	failures int
 	calls    int
@@ -100,7 +111,10 @@ func (r *durableVideoAuditRecorder) CreateDurable(_ context.Context, value audit
 	return nil
 }
 
-type videoUsageRepository struct{ job media.Job }
+type videoUsageRepository struct {
+	job        media.Job
+	claimLease time.Duration
+}
 
 func (r *videoUsageRepository) CreateMediaJob(context.Context, media.Job) error { return nil }
 
@@ -129,8 +143,9 @@ func (r *videoUsageRepository) ListUnrecordedTerminalMediaJobs(context.Context, 
 	return []media.Job{r.job}, nil
 }
 
-func (r *videoUsageRepository) TryClaimMediaJob(context.Context, string, time.Time, time.Time, string) (media.Job, bool, error) {
-	return media.Job{}, false, nil
+func (r *videoUsageRepository) TryClaimMediaJob(_ context.Context, _ string, now, leaseUntil time.Time, _ string) (media.Job, bool, error) {
+	r.claimLease = leaseUntil.Sub(now)
+	return r.job, true, nil
 }
 
 func (r *videoUsageRepository) MarkMediaJobUsageRecorded(_ context.Context, _ string, recordedAt time.Time) error {

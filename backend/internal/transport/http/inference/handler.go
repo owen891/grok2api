@@ -666,7 +666,7 @@ func officialVideoErrorCode(value string) string {
 		return "service_unavailable"
 	case "model_not_found":
 		return "invalid_argument"
-	case "upstream_quota_exhausted", "upstream_rate_limited", "egress_unavailable", "browser_worker_unavailable", "model_not_allowed", "client_key_unavailable":
+	case "upstream_quota_exhausted", "upstream_rate_limited", "egress_unavailable", "browser_worker_unavailable", "image_generation_incomplete", "image_moderated", "model_not_allowed", "client_key_unavailable":
 		return value
 	default:
 		return "internal_error"

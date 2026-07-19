@@ -64,6 +64,42 @@ func IsMediaPostProcessingError(err error) bool {
 	return errors.As(err, &target)
 }
 
+// MediaProtocolError marks an upstream media response that completed at the
+// transport layer but did not produce a usable final artifact.
+type MediaProtocolError struct {
+	Code      string
+	Retryable bool
+	Cause     error
+}
+
+func (e *MediaProtocolError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "media protocol response was incomplete"
+	}
+	return e.Cause.Error()
+}
+
+func (e *MediaProtocolError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func NewMediaProtocolError(code string, cause error) error {
+	return &MediaProtocolError{Code: code, Retryable: true, Cause: cause}
+}
+
+func NewTerminalMediaProtocolError(code string, cause error) error {
+	return &MediaProtocolError{Code: code, Cause: cause}
+}
+
+func AsMediaProtocolError(err error) (*MediaProtocolError, bool) {
+	var target *MediaProtocolError
+	ok := errors.As(err, &target)
+	return target, ok
+}
+
 // CredentialRefreshError 区分需要重新认证的永久 OAuth 错误与可后台退避重试的临时错误。
 type CredentialRefreshError struct {
 	Status     int
@@ -149,6 +185,7 @@ type QuotaSnapshot struct {
 }
 
 type ImageGenerationRequest struct {
+	RequestID      string
 	Credential     account.Credential
 	Model          string
 	Prompt         string

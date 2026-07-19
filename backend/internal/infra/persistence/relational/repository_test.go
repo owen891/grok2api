@@ -215,6 +215,43 @@ func TestAccountRepositoryDecrementsQuotaByAmountAtomically(t *testing.T) {
 	}
 }
 
+func TestAccountRepositoryExhaustsMissingQuotaWindow(t *testing.T) {
+	ctx := context.Background()
+	repo := NewAccountRepository(openTestDatabase(t))
+	value, _, err := repo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "missing-fast", SourceKey: "missing-fast",
+		EncryptedAccessToken: testEncryptedToken, AuthStatus: account.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := repo.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+		AccountID: value.ID, Mode: "auto", Remaining: 7, Total: 7, Source: account.QuotaSourceUpstream,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	resetAt := now.Add(15 * time.Minute)
+	if err := repo.ExhaustQuotaWindow(ctx, value.ID, "fast", &resetAt, now); err != nil {
+		t.Fatal(err)
+	}
+	windows, err := repo.GetQuotaWindows(ctx, []uint64{value.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byMode := make(map[string]account.QuotaWindow, len(windows[value.ID]))
+	for _, window := range windows[value.ID] {
+		byMode[window.Mode] = window
+	}
+	fast, ok := byMode["fast"]
+	if !ok || fast.Remaining != 0 || fast.Total != 0 || fast.UsagePercent != 100 || fast.ResetAt == nil || !fast.ResetAt.Equal(resetAt) || fast.WindowSeconds != 900 {
+		t.Fatalf("synthetic fast quota = %#v", fast)
+	}
+	if auto := byMode["auto"]; auto.Remaining != 7 {
+		t.Fatalf("auto quota changed = %#v", auto)
+	}
+}
+
 func TestAccountRepositorySummarizesOperationalStates(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()

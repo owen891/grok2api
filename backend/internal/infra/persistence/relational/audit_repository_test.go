@@ -42,6 +42,34 @@ func TestAuditRepositorySumTokensByAccountsSince(t *testing.T) {
 	}
 }
 
+func TestAuditRepositoryCountRequestsSinceScopesProviderModelAndWindow(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "audit-demand.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewAuditRepository(database)
+	now := time.Now().UTC()
+	values := []audit.Record{
+		{RequestID: "match-upstream", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_web", ModelUpstreamModel: "grok-imagine-image", StatusCode: 200, CreatedAt: now.Add(-time.Minute)},
+		{RequestID: "match-public", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_web", ModelPublicID: "grok-imagine-image", StatusCode: 503, CreatedAt: now.Add(-2 * time.Minute)},
+		{RequestID: "old", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_web", ModelUpstreamModel: "grok-imagine-image", StatusCode: 200, CreatedAt: now.Add(-20 * time.Minute)},
+		{RequestID: "other-model", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_web", ModelUpstreamModel: "grok-imagine-video", StatusCode: 200, CreatedAt: now.Add(-time.Minute)},
+		{RequestID: "other-provider", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_build", ModelUpstreamModel: "grok-imagine-image", StatusCode: 200, CreatedAt: now.Add(-time.Minute)},
+	}
+	if err := repository.CreateBatch(ctx, values); err != nil {
+		t.Fatal(err)
+	}
+	count, err := repository.CountRequestsSince(ctx, "grok_web", "grok-imagine-image", now.Add(-15*time.Minute))
+	if err != nil || count != 2 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
 func TestAuditRepositoryBatchAndCursor(t *testing.T) {
 	ctx := context.Background()
 	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "audit-cursor.db"))

@@ -219,6 +219,7 @@ func (m *Manager) acquireGroup(ctx context.Context, groupID uint64, scope domain
 		return nil, &UnavailableError{Scope: scope, Reason: UnavailableCapacity}
 	}
 	available := make([]domain.Node, 0, len(nodes))
+	capacityBlocked := false
 	highestPriority := -int(^uint(0)>>1) - 1
 	for _, node := range nodes {
 		limit, ok := allowed[node.ID]
@@ -229,6 +230,7 @@ func (m *Manager) acquireGroup(ctx context.Context, groupID uint64, scope domain
 		load := m.memberLoad[groupMemberKey{groupID: group.ID, nodeID: node.ID}]
 		m.mu.Unlock()
 		if limit.MaxConcurrency > 0 && load >= limit.MaxConcurrency {
+			capacityBlocked = true
 			continue
 		}
 		if limit.Priority > highestPriority {
@@ -243,6 +245,9 @@ func (m *Manager) acquireGroup(ctx context.Context, groupID uint64, scope domain
 	if len(available) == 0 {
 		if group.FallbackGroupID != nil {
 			return m.acquireGroup(ctx, *group.FallbackGroupID, scope, affinity, visited)
+		}
+		if capacityBlocked {
+			return nil, &UnavailableError{Scope: scope, Reason: UnavailableCapacity}
 		}
 		return m.acquireScope(ctx, scope, affinity)
 	}
@@ -767,6 +772,51 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 	if _, err := m.repository.UpdateEgressNode(ctx, value); err == nil {
 		m.invalidateNodes(value.Scope)
 	}
+}
+
+// UpdateCloudflareSession persists the browser worker's refreshed Cloudflare
+// state for the same egress node. The worker proves the session is usable
+// before this is called; ordinary Go requests must receive the refreshed
+// cookies instead of continuing to send an expired snapshot.
+func (m *Manager) UpdateCloudflareSession(ctx context.Context, nodeID uint64, cookies, userAgent string) error {
+	if nodeID == 0 || m.cipher == nil {
+		return errors.New("Cloudflare 会话缺少出口节点")
+	}
+	node, err := m.repository.GetEgressNode(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	if node.Scope != domain.ScopeWeb && node.Scope != domain.ScopeWebAsset {
+		return errors.New("Cloudflare 会话只能写入 Web 出口")
+	}
+	cookies = application.SanitizeCloudflareCookies(cookies)
+	userAgent = strings.TrimSpace(userAgent)
+	if len(userAgent) > 512 || strings.IndexFunc(userAgent, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return errors.New("浏览器 User-Agent 无效")
+	}
+	if cookies != "" {
+		encrypted, encryptErr := m.cipher.Encrypt(cookies)
+		if encryptErr != nil {
+			return encryptErr
+		}
+		node.EncryptedCloudflareCookie = encrypted
+	}
+	if userAgent != "" {
+		node.UserAgent = userAgent
+	}
+	node.Health = 1
+	node.FailureCount = 0
+	node.CooldownUntil = nil
+	node.LastError = ""
+	node.UpdatedAt = time.Now().UTC()
+	if _, err := m.repository.UpdateEgressNode(ctx, node); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.invalidateClientLocked(nodeID)
+	m.mu.Unlock()
+	m.invalidateNodes(node.Scope)
+	return nil
 }
 
 func (m *Manager) invalidateClientLocked(nodeID uint64) {

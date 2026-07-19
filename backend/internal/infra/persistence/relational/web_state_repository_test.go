@@ -93,4 +93,23 @@ func TestWebResponseStateAndMediaJobRoundTrip(t *testing.T) {
 	if err := jobs.MarkMediaJobUsageRecorded(ctx, failed.ID, failedAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	staleImage := job
+	staleImage.ID, staleImage.Kind, staleImage.RequestID = "image_stale_claim", mediadomain.JobKindImage, "request-image-stale"
+	staleImage.Seconds, staleImage.Size, staleImage.Quality = 1, "1:1", "1k"
+	staleImage.Status, staleImage.Progress = mediadomain.StatusInProgress, 1
+	staleImage.ClaimToken = "stale_claim_token_00000001"
+	staleImage.UpdatedAt = now.Add(-mediadomain.ImageJobRecoveryTimeout - time.Minute)
+	staleLease := now.Add(2 * time.Hour)
+	staleImage.LeaseUntil = &staleLease
+	if err := jobs.CreateMediaJob(ctx, staleImage); err != nil {
+		t.Fatal(err)
+	}
+	recoverable, err = jobs.ListRecoverableMediaJobs(ctx, 10)
+	if err != nil || len(recoverable) != 1 || recoverable[0].ID != staleImage.ID {
+		t.Fatalf("stale image jobs = %#v, err=%v", recoverable, err)
+	}
+	claimedImage, ok, err := jobs.TryClaimMediaJob(ctx, staleImage.ID, now, now.Add(mediadomain.ImageJobRecoveryTimeout), "claim_token_0000000000000004")
+	if err != nil || !ok || claimedImage.ID != staleImage.ID {
+		t.Fatalf("stale image claim = %#v, ok=%v err=%v", claimedImage, ok, err)
+	}
 }

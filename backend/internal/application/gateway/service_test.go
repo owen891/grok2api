@@ -466,7 +466,8 @@ func TestWebAmbiguousRateLimitPreservesQuotaAndCoolsAccount(t *testing.T) {
 	registry := provider.NewRegistry(adapter)
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
-	accountService.SetQuotaRecoveryQueue(memory.NewQuotaRecoveryQueue())
+	quotaQueue := memory.NewQuotaRecoveryQueue()
+	accountService.SetQuotaRecoveryQueue(quotaQueue)
 	runQuotaRefreshWorkers(t, accountService)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
@@ -488,8 +489,8 @@ func TestWebAmbiguousRateLimitPreservesQuotaAndCoolsAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.CooldownUntil == nil || !updated.CooldownUntil.After(time.Now().UTC()) || updated.LastError != "upstream status 429" {
-		t.Fatalf("rate-limited account = %#v", updated)
+	if updated.CooldownUntil != nil || updated.LastError != "" || updated.FailureCount != 0 {
+		t.Fatalf("ambiguous rate limit must not penalize account: %#v", updated)
 	}
 	select {
 	case mode := <-adapter.synced:
@@ -502,8 +503,16 @@ func TestWebAmbiguousRateLimitPreservesQuotaAndCoolsAccount(t *testing.T) {
 	if _, err := accountRepo.GetQuotaRecovery(ctx, credential.ID); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("Web 429 must not create Build quota recovery state: %v", err)
 	}
+	if err := accountRepo.UpdateHealth(ctx, credential.ID, 0, nil, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := accountRepo.ReplaceQuotaWindows(ctx, credential.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+		AccountID: credential.ID, Mode: "auto", Remaining: 4, Total: 10, WindowSeconds: 3600, Source: account.QuotaSourceUpstream,
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	confirmed := newHTTPUpstreamFailure(http.StatusTooManyRequests, []byte(`{"error":{"code":"usage_limit_reached","message":"You've reached your usage limit."}}`), credential.ID, credential.Name)
-	if !service.reconcileQuotaFailure(ctx, credential, "grok-web-test", "fast", confirmed, http.StatusTooManyRequests, time.Hour) {
+	if !service.reconcileQuotaFailure(ctx, credential, "grok-web-test", "fast", confirmed, http.StatusTooManyRequests, 0) {
 		t.Fatal("confirmed Web quota exhaustion was not reconciled")
 	}
 	windows, err = accountRepo.GetQuotaWindows(ctx, []uint64{credential.ID})
@@ -511,11 +520,27 @@ func TestWebAmbiguousRateLimitPreservesQuotaAndCoolsAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	remaining = map[string]int{}
+	var fastResetAt *time.Time
 	for _, window := range windows[credential.ID] {
 		remaining[window.Mode] = window.Remaining
+		if window.Mode == "fast" {
+			fastResetAt = window.ResetAt
+		}
 	}
-	if remaining["fast"] != 0 || remaining["auto"] != 4 {
+	if len(remaining) != 2 || remaining["fast"] != 0 || remaining["auto"] != 4 || fastResetAt == nil || fastResetAt.Before(time.Now().UTC().Add(14*time.Minute)) {
 		t.Fatalf("confirmed quota remaining = %#v", remaining)
+	}
+	_, err = selector.Acquire(ctx, account.ProviderWeb, "grok-web-test", "fast", "", nil, false)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionQuotaExhausted {
+		t.Fatalf("selector error = %v, want quota exhausted", err)
+	}
+	events, err := quotaQueue.ClaimDueQuotaRecoveries(ctx, time.Now().UTC().Add(16*time.Minute), 10, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].AccountID != credential.ID || events[0].Mode != "fast" {
+		t.Fatalf("quota recovery events = %#v", events)
 	}
 }
 
@@ -723,6 +748,80 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	selector.MarkQuotaStateChanged(account.ProviderWeb)
+	scheduledJob, err := service.CreateImageJob(ctx, AsyncImageInput{
+		RequestID: "req-image-scheduled-account", ClientKey: key, PublicModel: "grok-imagine-image-quality",
+		Prompt: "scheduled account", Count: 1, Resolution: "1k", ResponseFormat: "url",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preferredAccountID := scheduledJob.AccountID
+	service.processImageJob(ctx, scheduledJob.ID)
+	storedScheduledJob, err := mediaJobRepo.GetMediaJob(ctx, scheduledJob.ID, key.ID)
+	if err != nil || storedScheduledJob.Status != media.StatusCompleted {
+		t.Fatalf("scheduled image job = %#v, err=%v", storedScheduledJob, err)
+	}
+	logs, total, err = auditRepo.List(ctx, 0, 10)
+	if err != nil || logs[0].RequestID != "req-image-scheduled-account" || logs[0].AccountID == nil ||
+		*logs[0].AccountID != preferredAccountID || storedScheduledJob.AccountID != *logs[0].AccountID {
+		t.Fatalf("scheduled image account job=%#v audit=%#v total=%d err=%v", storedScheduledJob, logs[0], total, err)
+	}
+	originalBeforeProtocol, err := accountRepo.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupBeforeProtocol, err := accountRepo.Get(ctx, backupCredential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+drainQuotaSync:
+	for {
+		select {
+		case <-adapter.synced:
+		default:
+			break drainQuotaSync
+		}
+	}
+	service.UpdateMaxAttempts(2)
+	adapter.SetProtocolFailures(2)
+	_, err = service.GenerateImage(ctx, ImageGenerationInput{
+		RequestID: "req-image-protocol-incomplete", ClientKey: key, PublicModel: "grok-imagine-image",
+		Prompt: "test", Count: 1, Resolution: "1k", ResponseFormat: "url",
+	})
+	var protocolFailure *UpstreamFailure
+	if !errors.As(err, &protocolFailure) || protocolFailure.Code != "image_generation_incomplete" {
+		t.Fatalf("protocol failure = %#v, err=%v", protocolFailure, err)
+	}
+	select {
+	case mode := <-adapter.synced:
+		if mode != "fast" {
+			t.Fatalf("protocol failure quota refresh mode = %q", mode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("protocol failure did not refresh upstream quota")
+	}
+	for _, before := range []account.Credential{originalBeforeProtocol, backupBeforeProtocol} {
+		after, getErr := accountRepo.Get(ctx, before.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if after.FailureCount != before.FailureCount || !sameOptionalTime(after.CooldownUntil, before.CooldownUntil) {
+			t.Fatalf("protocol failure changed account health: before=%#v after=%#v", before, after)
+		}
+	}
+	attemptsBeforeModeration := len(adapter.Attempts())
+	adapter.SetTerminalProtocolFailures(1)
+	_, err = service.GenerateImage(ctx, ImageGenerationInput{
+		RequestID: "req-image-moderated", ClientKey: key, PublicModel: "grok-imagine-image",
+		Prompt: "blocked", Count: 1, Resolution: "1k", ResponseFormat: "url",
+	})
+	var moderationFailure *UpstreamFailure
+	if !errors.As(err, &moderationFailure) || moderationFailure.Code != "image_moderated" || moderationFailure.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("moderation failure = %#v, err=%v", moderationFailure, err)
+	}
+	if attempts := len(adapter.Attempts()); attempts != attemptsBeforeModeration+1 {
+		t.Fatalf("moderation attempts = %d, want %d", attempts, attemptsBeforeModeration+1)
+	}
 	service.UpdateMaxAttempts(3)
 	adapter.SetResponseStatuses(http.StatusBadGateway, http.StatusOK)
 	attemptsBeforeRetry := len(adapter.Attempts())
@@ -750,7 +849,7 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 		t.Fatalf("image rate failure = %#v, err=%v", rateFailure, err)
 	}
 	logs, total, err = auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 7 || logs[0].RequestID != "req-image-rate-limited" || logs[0].ErrorCode != "upstream_rate_limited" {
+	if err != nil || total != 10 || logs[0].RequestID != "req-image-rate-limited" || logs[0].ErrorCode != "upstream_rate_limited" {
 		t.Fatalf("image rate audit = %#v, total=%d, err=%v", logs, total, err)
 	}
 	for _, value := range []account.Credential{credential, backupCredential} {
@@ -758,8 +857,8 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
-		if updated.CooldownUntil == nil || !updated.CooldownUntil.After(time.Now().UTC()) {
-			t.Fatalf("rate-limited image account = %#v", updated)
+		if updated.CooldownUntil != nil || updated.LastError != "" || updated.FailureCount != 0 {
+			t.Fatalf("ambiguous image rate limit penalized account = %#v", updated)
 		}
 		windows, quotaErr := accountRepo.GetQuotaWindows(ctx, []uint64{value.ID})
 		if quotaErr != nil {
@@ -790,7 +889,7 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 		t.Fatalf("image failure switched accounts after generation started: %#v", attempts)
 	}
 	logs, total, err = auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 8 || len(logs) != 8 {
+	if err != nil || total != 11 || len(logs) != 10 {
 		t.Fatalf("failure audit logs=%#v total=%d err=%v", logs, total, err)
 	}
 	failureAudit := logs[0]
@@ -801,6 +900,13 @@ func TestImageStreamPropagatesWithoutTouchingChatQuota(t *testing.T) {
 	if err != nil || updatedKey.ReservedUsageUSDTicks != 0 || updatedKey.BilledUsageUSDTicks != billingBeforeFailure.BilledUsageUSDTicks {
 		t.Fatalf("failed image billing key = %#v, err = %v", updatedKey, err)
 	}
+}
+
+func sameOptionalTime(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
 }
 
 func TestSuccessfulWebChatRefreshesCurrentModeQuota(t *testing.T) {
@@ -998,6 +1104,8 @@ type webImageStreamAdapter struct {
 	synced         chan string
 	failureEgress  *infraegress.Manager
 	responseStatus []int
+	protocolErrors int
+	terminalErrors int
 	attempts       []uint64
 }
 
@@ -1049,11 +1157,27 @@ func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provi
 	failureEgress := a.failureEgress
 	a.attempts = append(a.attempts, request.Credential.ID)
 	responseStatus := http.StatusOK
+	protocolError := false
+	if a.protocolErrors > 0 {
+		a.protocolErrors--
+		protocolError = true
+	}
+	terminalError := false
+	if a.terminalErrors > 0 {
+		a.terminalErrors--
+		terminalError = true
+	}
 	if len(a.responseStatus) > 0 {
 		responseStatus = a.responseStatus[0]
 		a.responseStatus = a.responseStatus[1:]
 	}
 	a.mu.Unlock()
+	if terminalError {
+		return nil, provider.NewTerminalMediaProtocolError("image_moderated", errors.New("blocked by content policy"))
+	}
+	if protocolError {
+		return nil, provider.NewMediaProtocolError("image_generation_incomplete", errors.New("missing final image"))
+	}
 	if failureEgress != nil {
 		lease, err := failureEgress.Acquire(ctx, egressdomain.ScopeWeb, "image-failure")
 		if err != nil {
@@ -1108,6 +1232,16 @@ func (a *webImageStreamAdapter) SetResponseStatuses(statuses ...int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.responseStatus = append([]int(nil), statuses...)
+}
+func (a *webImageStreamAdapter) SetProtocolFailures(count int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.protocolErrors = max(0, count)
+}
+func (a *webImageStreamAdapter) SetTerminalProtocolFailures(count int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.terminalErrors = max(0, count)
 }
 func (a *webImageStreamAdapter) Attempts() []uint64 {
 	a.mu.Lock()

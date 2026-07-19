@@ -1,17 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowDown, ArrowUp, Box, BrainCircuit, CircleCheck, CircleDollarSign, CornerDownRight, Database, Info, RefreshCw, Search, type LucideIcon } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, Box, BrainCircuit, CircleCheck, CircleDollarSign, CornerDownRight, Database, GitBranch, Info, RefreshCw, Search, type LucideIcon } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { listModels } from "@/entities/model/model-api";
-import { getRequestAudits, getRequestAuditSummary, type AuditDTO, type AuditPeriod } from "@/features/audits/request-audits-api";
+import { getRequestAudits, getRequestAuditSummary, type AuditDTO, type AuditPeriod, type RoutingTraceDTO, type RoutingTraceEventDTO } from "@/features/audits/request-audits-api";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
@@ -185,6 +186,7 @@ export function RequestAuditsPage() {
                 <TableRow key={audit.id}>
                   <TableCell className="py-3">
                     <span className="block truncate text-xs" title={audit.requestId}>{audit.requestId}</span>
+                    {audit.routingTrace ? <RoutingTraceDialog value={audit.routingTrace} requestId={audit.requestId} locale={i18n.language} /> : null}
                   </TableCell>
                   <TableCell className="py-3">
                     <ModelRouteValue
@@ -209,6 +211,57 @@ export function RequestAuditsPage() {
       </DataTableShell>
     </div>
   );
+}
+
+function RoutingTraceDialog({ value, requestId, locale }: { value: RoutingTraceDTO; requestId: string; locale: string }) {
+  const { t } = useTranslation();
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button type="button" variant="ghost" size="sm" className="mt-1 h-6 px-1.5 text-[10px] font-normal text-muted-foreground"><GitBranch className="size-3" />{t("routingTrace.open")}</Button>
+      </DialogTrigger>
+      <DialogContent className="max-h-[85vh] max-w-3xl overflow-hidden">
+        <DialogHeader>
+          <DialogTitle>{t("routingTrace.title")}</DialogTitle>
+          <DialogDescription>{requestId} · {value.provider} · {value.model}{value.quotaMode ? ` · ${value.quotaMode}` : ""}</DialogDescription>
+        </DialogHeader>
+        <div className="overflow-y-auto pr-1">
+          <div className="space-y-2">
+            {value.events.map((event, index) => <RoutingTraceEvent key={`${event.type}-${event.elapsedMs}-${index}`} value={event} locale={locale} />)}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RoutingTraceEvent({ value, locale }: { value: RoutingTraceEventDTO; locale: string }) {
+  const { t } = useTranslation();
+  const title = value.type === "candidate_pool"
+    ? t("routingTrace.candidates")
+    : value.type === "selected"
+      ? t("routingTrace.selected")
+      : value.type === "selection_failed"
+        ? t("routingTrace.selectionFailed")
+        : t("routingTrace.attempt", { count: value.attempt ?? 0 });
+  return (
+    <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 border-b py-2 last:border-b-0">
+      <span className="pt-0.5 text-right font-mono text-[10px] tabular-nums text-muted-foreground">+{formatNumber(value.elapsedMs, locale, 0)} ms</span>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2"><span className="text-xs font-medium">{title}</span>{value.accountId ? <Badge variant="outline">#{value.accountId}</Badge> : null}{value.statusCode ? <Badge variant="outline">HTTP {value.statusCode}</Badge> : null}</div>
+        <p className="mt-1 break-words text-[11px] text-muted-foreground">{routingEventDetail(value, t)}</p>
+      </div>
+    </div>
+  );
+}
+
+function routingEventDetail(value: RoutingTraceEventDTO, t: ReturnType<typeof useTranslation>["t"]): string {
+  if (value.type === "candidate_pool") {
+    return t("routingTrace.poolDetail", { total: value.total ?? 0, eligible: value.eligible ?? 0, quota: value.quotaExhausted ?? 0, cooling: (value.cooling ?? 0) + (value.modelCooling ?? 0), unsupported: value.unsupported ?? 0, excluded: value.excluded ?? 0 });
+  }
+  if (value.type === "selected") return t("routingTrace.selectedDetail", { selection: value.selection || "-" });
+  if (value.type === "selection_failed") return t("routingTrace.failedDetail", { reason: value.reason || "-" });
+  return t("routingTrace.attemptDetail", { stage: value.stage || "-", code: value.errorCode || "-", action: value.action || "-", duration: value.durationMs ?? 0 });
 }
 
 function EgressValue({ audit }: { audit: AuditDTO }) {

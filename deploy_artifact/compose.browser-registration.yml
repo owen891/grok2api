@@ -1,0 +1,13 @@
+name: grok2api
+
+# Add this overlay only when the browser registration engine is enabled.
+services:
+  grok2api:
+    image: "${GROK2API_BROWSER_IMAGE:?set GROK2API_BROWSER_IMAGE to the matching immutable browser tag or digest}"
+    environment:
+      DISPLAY: ":99"
+      REGISTRATION_BROWSER_MODE: "xvfb"
+      REGISTRATION_BROWSER_PATH: "/usr/bin/chromium"
+      REGISTRATION_BROWSER_WINDOW: "${REGISTRATION_BROWSER_WINDOW:-1280,900}"
+      REGISTRATION_XVFB_SCREEN: "${REGISTRATION_XVFB_SCREEN:-1280x900x24}"
+    shm_size: "2gb"

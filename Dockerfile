@@ -58,7 +58,22 @@ RUN uv venv "$VIRTUAL_ENV" && \
     rm -rf /root/.cache /tmp/registration-requirements.lock
 
 
-FROM python:3.13-slim-bookworm
+FROM python:3.13-slim-bookworm AS browser-registration-builder
+
+ENV VIRTUAL_ENV=/opt/registration-venv \
+    PATH="/opt/registration-venv/bin:$PATH" \
+    UV_HTTP_TIMEOUT=300
+
+COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /uvx /bin/
+COPY registration/requirements.lock /tmp/registration-requirements.lock
+RUN uv venv "$VIRTUAL_ENV" && \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" --require-hashes -r /tmp/registration-requirements.lock && \
+    find "$VIRTUAL_ENV" -type d -name __pycache__ -prune -exec rm -rf {} + && \
+    find "$VIRTUAL_ENV" -type f -name '*.pyc' -delete && \
+    rm -rf /root/.cache /tmp/registration-requirements.lock
+
+
+FROM python:3.13-slim-bookworm AS runtime-base
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -108,3 +123,33 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 
 ENTRYPOINT ["/usr/local/bin/grok2api-entrypoint"]
 CMD ["/app/grok2api", "--config", "/app/config.yaml", "--listen", "0.0.0.0:8000"]
+
+
+FROM runtime-base AS browser-runtime
+
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    apt-get install -y --no-install-recommends \
+        chromium \
+        fonts-liberation \
+        xauth \
+        xvfb && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=browser-registration-builder /opt/registration-venv /opt/registration-venv
+COPY registration/*.py /app/registration/
+COPY registration/config.example.json /app/registration/config.example.json
+COPY registration/cpa_xai/ /app/registration/cpa_xai/
+COPY registration/turnstilePatch/ /app/registration/turnstilePatch/
+COPY --chmod=0755 docker/browser-entrypoint.sh /usr/local/bin/grok2api-browser-entrypoint
+RUN sed -i 's/\r$//' /usr/local/bin/grok2api-browser-entrypoint
+
+ENV DISPLAY=:99 \
+    REGISTRATION_BROWSER_MODE=xvfb \
+    REGISTRATION_BROWSER_PATH=/usr/bin/chromium \
+    REGISTRATION_BROWSER_WINDOW=1280,900 \
+    REGISTRATION_XVFB_SCREEN=1280x900x24
+
+ENTRYPOINT ["/usr/local/bin/grok2api-browser-entrypoint"]
+
+
+FROM runtime-base AS runtime

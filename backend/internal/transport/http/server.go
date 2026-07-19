@@ -8,6 +8,7 @@ import (
 
 	_ "github.com/chenyme/grok2api/backend/docs"
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	inspectionapp "github.com/chenyme/grok2api/backend/internal/application/accountinspection"
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	adminauthapp "github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
@@ -18,9 +19,11 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
+	operationsapp "github.com/chenyme/grok2api/backend/internal/application/operations"
 	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
+	inspectionhttp "github.com/chenyme/grok2api/backend/internal/transport/http/accountinspection"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
 	clientkeyhttp "github.com/chenyme/grok2api/backend/internal/transport/http/clientkey"
@@ -31,6 +34,7 @@ import (
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	modelhttp "github.com/chenyme/grok2api/backend/internal/transport/http/model"
+	operationshttp "github.com/chenyme/grok2api/backend/internal/transport/http/operations"
 	registrationhttp "github.com/chenyme/grok2api/backend/internal/transport/http/registration"
 	settingshttp "github.com/chenyme/grok2api/backend/internal/transport/http/settings"
 	systemhttp "github.com/chenyme/grok2api/backend/internal/transport/http/system"
@@ -48,22 +52,25 @@ type Dependencies struct {
 	PublicAPIBaseURL   string
 	FrontendStaticPath string
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
-	Readiness    func(context.Context) ReadinessSnapshot
-	Ready        func(context.Context) bool
-	TrafficReady func() bool
-	AdminAuth    *adminauthapp.Service
-	Accounts     *accountapp.Service
-	AccountSync  *accountsyncapp.Service
-	Models       *modelapp.Service
-	ClientKeys   *clientkeyapp.Service
-	Audits       *auditapp.Service
-	Dashboard    *dashboardapp.Service
-	Gateway      *gateway.Service
-	Media        *mediaapp.Service
-	Settings     *settingsapp.Service
-	Egress       *egressapp.Service
-	EgressGroups *egressgroupapp.Service
-	Registration *registrationapp.Controller
+	Readiness          func(context.Context) ReadinessSnapshot
+	Ready              func(context.Context) bool
+	TrafficReady       func() bool
+	AdminAuth          *adminauthapp.Service
+	Accounts           *accountapp.Service
+	AccountInspections *inspectionapp.Service
+	AccountSync        *accountsyncapp.Service
+	Models             *modelapp.Service
+	Operations         *operationsapp.Service
+	ClientKeys         *clientkeyapp.Service
+	Audits             *auditapp.Service
+	Dashboard          *dashboardapp.Service
+	Gateway            *gateway.Service
+	Media              *mediaapp.Service
+	Settings           *settingsapp.Service
+	Egress             *egressapp.Service
+	EgressGroups       *egressgroupapp.Service
+	Registration       *registrationapp.Controller
+	Metrics            http.Handler
 }
 
 type ReadinessComponent struct {
@@ -111,8 +118,11 @@ func New(deps Dependencies) *gin.Engine {
 		deps.Logger = slog.Default()
 	}
 	router := gin.New()
-	router.Use(gin.Recovery(), middleware.RequestID(), middleware.SecurityHeaders(), middleware.MaxBodyBytes(deps.MaxBodyBytes), middleware.Timeout(deps.RequestTimeout), middleware.AccessLog(deps.Logger))
+	router.Use(gin.Recovery(), middleware.RequestID(), middleware.SecurityHeaders(), middleware.MaxBodyBytes(deps.MaxBodyBytes), middleware.Timeout(deps.RequestTimeout), middleware.Metrics(), middleware.AccessLog(deps.Logger))
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	if deps.Metrics != nil {
+		router.GET("/metrics", gin.WrapH(deps.Metrics))
+	}
 	router.GET("/readyz", func(c *gin.Context) {
 		if deps.Readiness != nil {
 			snapshot := deps.Readiness(c.Request.Context())
@@ -142,10 +152,16 @@ func New(deps Dependencies) *gin.Engine {
 	adminProtected.Use(middleware.AdminAuth(deps.AdminAuth))
 	authHandler.RegisterAuthenticated(adminProtected)
 	accounthttp.NewHandler(deps.Accounts, deps.AccountSync).Register(adminProtected)
+	if deps.AccountInspections != nil {
+		inspectionhttp.NewHandler(deps.AccountInspections).Register(adminProtected)
+	}
 	modelhttp.NewHandler(deps.Models).Register(adminProtected)
 	clientkeyhttp.NewHandler(deps.ClientKeys).Register(adminProtected)
 	audithttp.NewHandler(deps.Audits).Register(adminProtected)
 	dashboardhttp.NewHandler(deps.Dashboard).Register(adminProtected)
+	if deps.Operations != nil {
+		operationshttp.NewHandler(deps.Operations).Register(adminProtected)
+	}
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)

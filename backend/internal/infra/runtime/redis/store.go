@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +30,56 @@ var rateScript = redisclient.NewScript(`
 local current = redis.call('INCR', KEYS[1])
 if current == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[2]) end
 if current > tonumber(ARGV[1]) then return 0 end
+return 1
+`)
+
+var observeRoutePerformanceScript = redisclient.NewScript(`
+local now = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local alpha = tonumber(ARGV[3])
+local success_sample = tonumber(ARGV[4])
+local latency = tonumber(ARGV[5])
+local circuit_failure = tonumber(ARGV[6])
+local circuit_threshold = tonumber(ARGV[7])
+local circuit_window = tonumber(ARGV[8])
+local circuit_open = tonumber(ARGV[9])
+local updated = tonumber(redis.call('HGET', KEYS[1], 'updated_at') or '0')
+if updated == 0 or now - updated > ttl then redis.call('DEL', KEYS[1]) end
+local samples = tonumber(redis.call('HGET', KEYS[1], 'samples') or '0')
+local success = tonumber(redis.call('HGET', KEYS[1], 'success_ewma') or '0')
+local latency_ewma = tonumber(redis.call('HGET', KEYS[1], 'latency_ewma_ms') or '0')
+if samples == 0 then
+  success = success_sample
+  latency_ewma = latency
+else
+  success = alpha * success_sample + (1 - alpha) * success
+  if latency > 0 then
+    if latency_ewma <= 0 then latency_ewma = latency
+    else latency_ewma = alpha * latency + (1 - alpha) * latency_ewma end
+  end
+end
+samples = samples + 1
+local consecutive = tonumber(redis.call('HGET', KEYS[1], 'consecutive_failures') or '0')
+local last_failure = tonumber(redis.call('HGET', KEYS[1], 'last_circuit_failure_at') or '0')
+local circuit_until = tonumber(redis.call('HGET', KEYS[1], 'circuit_open_until') or '0')
+if success_sample == 1 then
+  consecutive = 0
+  last_failure = 0
+  circuit_until = 0
+elseif circuit_failure == 1 then
+  if last_failure == 0 or now - last_failure > circuit_window then consecutive = 0 end
+  consecutive = consecutive + 1
+  last_failure = now
+  if consecutive >= circuit_threshold then
+    circuit_until = now + circuit_open
+    consecutive = 0
+  end
+end
+redis.call('HSET', KEYS[1],
+  'success_ewma', success, 'latency_ewma_ms', latency_ewma, 'samples', samples,
+  'consecutive_failures', consecutive, 'last_circuit_failure_at', last_failure,
+  'circuit_open_until', circuit_until, 'updated_at', now)
+redis.call('PEXPIRE', KEYS[1], ttl)
 return 1
 `)
 
@@ -308,6 +359,131 @@ func (s *Store) Set(ctx context.Context, key string, accountID uint64, expiresAt
 func (s *Store) DeleteByAccount(ctx context.Context, accountID uint64) error {
 	id := strconv.FormatUint(accountID, 10)
 	return deleteStickyByAccountScript.Run(ctx, s.client, []string{s.key("sticky-account", id)}, id).Err()
+}
+
+func (s *Store) ObserveRoutePerformance(ctx context.Context, observation repository.RoutePerformanceObservation, policy repository.RoutePerformancePolicy) error {
+	key, ok := redisRoutePerformanceKey(observation.Key)
+	if !ok {
+		return repository.ErrInvalid
+	}
+	policy = normalizeRoutePerformancePolicy(policy)
+	now := observation.ObservedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	success, circuitFailure := 0, 0
+	if observation.Success {
+		success = 1
+	}
+	if observation.CircuitFailure {
+		circuitFailure = 1
+	}
+	return observeRoutePerformanceScript.Run(ctx, s.client, []string{s.key("route-performance", key)},
+		now.UnixMilli(), policy.TTL.Milliseconds(), policy.Alpha, success, max(int64(0), observation.Latency.Milliseconds()),
+		circuitFailure, policy.CircuitThreshold, policy.CircuitWindow.Milliseconds(), policy.CircuitOpenDuration.Milliseconds()).Err()
+}
+
+func (s *Store) GetRoutePerformances(ctx context.Context, keys []repository.RoutePerformanceKey, now time.Time) (map[repository.RoutePerformanceKey]repository.RoutePerformance, error) {
+	result := make(map[repository.RoutePerformanceKey]repository.RoutePerformance, len(keys))
+	type pendingRoutePerformance struct {
+		key repository.RoutePerformanceKey
+		cmd *redisclient.MapStringStringCmd
+	}
+	pending := make([]pendingRoutePerformance, 0, len(keys))
+	pipe := s.client.Pipeline()
+	for _, key := range keys {
+		redisKey, ok := redisRoutePerformanceKey(key)
+		if !ok {
+			continue
+		}
+		key.UpstreamModel = strings.TrimSpace(key.UpstreamModel)
+		pending = append(pending, pendingRoutePerformance{key: key, cmd: pipe.HGetAll(ctx, s.key("route-performance", redisKey))})
+	}
+	if len(pending) == 0 {
+		return result, nil
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, err
+	}
+	for _, item := range pending {
+		fields := item.cmd.Val()
+		if len(fields) == 0 {
+			continue
+		}
+		value, ok := parseRoutePerformance(fields)
+		if !ok || (!value.UpdatedAt.IsZero() && now.Sub(value.UpdatedAt) > routePerformanceDefaultTTL) {
+			continue
+		}
+		if value.CircuitOpenUntil != nil && !now.Before(*value.CircuitOpenUntil) {
+			value.CircuitOpenUntil = nil
+		}
+		result[item.key] = value
+	}
+	return result, nil
+}
+
+const routePerformanceDefaultTTL = 30 * time.Minute
+
+func redisRoutePerformanceKey(value repository.RoutePerformanceKey) (string, bool) {
+	model := strings.TrimSpace(value.UpstreamModel)
+	if value.AccountID == 0 || model == "" || len(model) > 255 {
+		return "", false
+	}
+	digest := sha256.Sum256([]byte(model))
+	return strconv.FormatUint(value.AccountID, 10) + ":" + fmt.Sprintf("%x", digest[:12]), true
+}
+
+func normalizeRoutePerformancePolicy(value repository.RoutePerformancePolicy) repository.RoutePerformancePolicy {
+	if value.Alpha <= 0 || value.Alpha > 1 {
+		value.Alpha = .25
+	}
+	if value.TTL <= 0 {
+		value.TTL = routePerformanceDefaultTTL
+	}
+	if value.CircuitThreshold <= 0 {
+		value.CircuitThreshold = 3
+	}
+	if value.CircuitWindow <= 0 {
+		value.CircuitWindow = 2 * time.Minute
+	}
+	if value.CircuitOpenDuration <= 0 {
+		value.CircuitOpenDuration = 2 * time.Minute
+	}
+	return value
+}
+
+func parseRoutePerformance(fields map[string]string) (repository.RoutePerformance, bool) {
+	parseFloat := func(name string) (float64, bool) {
+		value, err := strconv.ParseFloat(fields[name], 64)
+		return value, err == nil
+	}
+	parseInt := func(name string) (int64, bool) {
+		value, err := strconv.ParseInt(fields[name], 10, 64)
+		return value, err == nil
+	}
+	success, successOK := parseFloat("success_ewma")
+	latencyMS, latencyOK := parseFloat("latency_ewma_ms")
+	samples, samplesOK := parseInt("samples")
+	updatedMS, updatedOK := parseInt("updated_at")
+	if !successOK || !latencyOK || !samplesOK || !updatedOK || samples < 0 {
+		return repository.RoutePerformance{}, false
+	}
+	value := repository.RoutePerformance{
+		SuccessEWMA: success, LatencyEWMA: time.Duration(latencyMS * float64(time.Millisecond)), Samples: samples,
+		UpdatedAt: time.UnixMilli(updatedMS).UTC(),
+	}
+	if consecutive, ok := parseInt("consecutive_failures"); ok && consecutive > 0 {
+		value.ConsecutiveFailures = int(consecutive)
+	}
+	if lastFailureMS, ok := parseInt("last_circuit_failure_at"); ok && lastFailureMS > 0 {
+		lastFailure := time.UnixMilli(lastFailureMS).UTC()
+		value.LastCircuitFailureAt = &lastFailure
+	}
+	if circuitUntilMS, ok := parseInt("circuit_open_until"); ok && circuitUntilMS > 0 {
+		circuitUntil := time.UnixMilli(circuitUntilMS).UTC()
+		value.CircuitOpenUntil = &circuitUntil
+	}
+	return value, true
 }
 
 func (s *Store) ScheduleQuotaRecovery(ctx context.Context, value account.QuotaRecoveryEvent) error {

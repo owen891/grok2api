@@ -255,6 +255,40 @@ func TestWebForbiddenStillRebuildsBrowserSession(t *testing.T) {
 	}
 }
 
+func TestUpdateCloudflareSessionSanitizesAndRestoresNode(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCookie, err := cipher.Encrypt("cf_clearance=stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Minute)
+	repository := &mutableEgressRepository{node: domain.Node{
+		ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 0.05, FailureCount: 9,
+		CooldownUntil: &until, LastError: "anti-bot rejection", EncryptedCloudflareCookie: oldCookie,
+	}}
+	manager := NewManager(repository, cipher)
+	manager.clients[1] = cachedClient{}
+	if err := manager.UpdateCloudflareSession(context.Background(), 1, "cf_clearance=fresh; sso=secret; __cf_bm=bm", "Chrome/Fresh"); err != nil {
+		t.Fatal(err)
+	}
+	cookies, err := cipher.Decrypt(repository.node.EncryptedCloudflareCookie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookies != "cf_clearance=fresh; __cf_bm=bm" || repository.node.UserAgent != "Chrome/Fresh" {
+		t.Fatalf("session cookies=%q userAgent=%q", cookies, repository.node.UserAgent)
+	}
+	if repository.updates != 1 || repository.node.Health != 1 || repository.node.FailureCount != 0 || repository.node.CooldownUntil != nil || repository.node.LastError != "" {
+		t.Fatalf("restored node=%#v updates=%d", repository.node, repository.updates)
+	}
+	if _, exists := manager.clients[1]; exists {
+		t.Fatal("stale egress client was not invalidated")
+	}
+}
+
 func TestWebAssetFallsBackToWeb(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {

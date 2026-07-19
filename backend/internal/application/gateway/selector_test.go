@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -42,6 +43,52 @@ func TestSelectorBlocksObservedFreeRollingUsageWithoutRecoveryRow(t *testing.T) 
 	var unavailable *SelectionUnavailableError
 	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionQuotaExhausted {
 		t.Fatalf("error = %v, want quota exhausted", err)
+	}
+}
+
+func TestCapacitySnapshotUsesRoutingPolicyAndFutureRecoveryWindow(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "capacity-snapshot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	now := time.Now().UTC()
+	create := func(name string, remaining int, resetAt *time.Time) uint64 {
+		value, _, createErr := accounts.UpsertByIdentity(ctx, account.Credential{
+			Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: name, SourceKey: name,
+			EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 2,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if saveErr := accounts.SaveQuotaWindows(ctx, value.ID, account.WebTierSuper, now, []account.QuotaWindow{{
+			AccountID: value.ID, Mode: "fast", Remaining: remaining, ResetAt: resetAt, Source: account.QuotaSourceUpstream,
+		}}); saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		return value.ID
+	}
+	past := now.Add(-time.Minute)
+	soon := now.Add(5 * time.Minute)
+	create("expired", 0, &past)
+	create("soon", 0, &soon)
+	readyID := create("ready", 1, nil)
+	limiter := &batchConcurrencyLimiter{values: map[string]int{"account:" + fmt.Sprint(readyID): 1}}
+	selector := NewSelector(accounts, limiter, memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	snapshot, err := selector.CapacitySnapshot(ctx, account.ProviderWeb, "", "fast", 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Total != 3 || snapshot.Eligible != 1 || snapshot.QuotaExhausted != 2 || snapshot.RecoveringSoon != 1 || snapshot.InFlight != 1 || snapshot.TotalSlots != 2 || snapshot.AvailableSlots != 1 || snapshot.EarliestRecovery == nil || !snapshot.EarliestRecovery.Equal(soon) {
+		t.Fatalf("capacity snapshot = %#v", snapshot)
+	}
+	if limiter.batchCalls != 1 || limiter.currentCalls != 0 {
+		t.Fatalf("concurrency reads batch=%d current=%d", limiter.batchCalls, limiter.currentCalls)
 	}
 }
 
@@ -527,6 +574,86 @@ func TestSelectorUsesModelScopedRecentPerformance(t *testing.T) {
 	if values[0].Credential.ID != 1 {
 		t.Fatalf("performance leaked across models: %#v", values)
 	}
+}
+
+func TestSelectorSharesAccountModelCircuitAcrossInstances(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "shared-circuit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "circuit", SourceKey: "circuit", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := memory.NewRoutePerformanceStore()
+	first := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	second := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	first.SetRoutePerformanceRepository(shared)
+	second.SetRoutePerformanceRepository(shared)
+	decision := FailureDecision{Scope: FailureScopeAccount, Action: FailureActionRotateAccount, PenalizeAccount: true, Retryable: true}
+	for range 3 {
+		first.ObserveRouteFailure(value.ID, "grok-test", time.Second, decision)
+	}
+	_, err = second.Acquire(ctx, account.ProviderBuild, "grok-test", "", "", nil, false)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionModelCooling || unavailable.RetryAfter <= 0 {
+		t.Fatalf("shared circuit error=%v", err)
+	}
+	_, err = second.AcquirePinned(ctx, account.ProviderBuild, value.ID, "grok-test", "", true)
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionModelCooling {
+		t.Fatalf("pinned shared circuit error=%v", err)
+	}
+	lease, err := second.Acquire(ctx, account.ProviderBuild, "different-model", "", "", nil, false)
+	if err != nil {
+		t.Fatalf("circuit leaked across models: %v", err)
+	}
+	lease.Release()
+}
+
+func TestSelectorFailsOpenWhenSharedPerformanceStoreIsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "performance-fail-open.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "healthy", SourceKey: "healthy", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	selector.SetRoutePerformanceRepository(failingRoutePerformanceStore{})
+	lease, err := selector.Acquire(ctx, account.ProviderBuild, "grok-test", "", "", nil, false)
+	if err != nil || lease == nil || lease.Credential.ID != value.ID {
+		t.Fatalf("fail-open lease=%#v err=%v", lease, err)
+	}
+	lease.Release()
+}
+
+type failingRoutePerformanceStore struct{}
+
+func (failingRoutePerformanceStore) ObserveRoutePerformance(context.Context, repository.RoutePerformanceObservation, repository.RoutePerformancePolicy) error {
+	return errors.New("runtime store unavailable")
+}
+
+func (failingRoutePerformanceStore) GetRoutePerformances(context.Context, []repository.RoutePerformanceKey, time.Time) (map[repository.RoutePerformanceKey]repository.RoutePerformance, error) {
+	return nil, errors.New("runtime store unavailable")
 }
 
 func TestSelectorRoundRobinsOnlyHealthyAccountsInIDOrder(t *testing.T) {

@@ -67,6 +67,7 @@ type Record struct {
 	ContextOutputTokens     int64
 	DurationMS              int64
 	ErrorCode               string
+	RoutingTraceJSON        string
 	CreatedAt               time.Time
 }
 

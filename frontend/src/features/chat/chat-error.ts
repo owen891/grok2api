@@ -25,6 +25,7 @@ function classifyErrorClass(status: number, code: string, message: string): Chat
   const signal = `${code} ${message}`.toLowerCase();
   if (/invalid_api_key|client[_ -]?key|authentication_error/.test(signal)) return "auth";
   if (/account_permission|permission[_ -]denied|credential_rejected|upstream_unauthorized/.test(signal)) return "account";
+  if (/image[_ -]?moderated|content[_ -]?policy|safety[_ -]?policy/.test(signal)) return "moderation";
   if (/quota|usage[_ -]?limit|额度.*(?:不足|用完)|billing_limit|spending.limit|payment_required|insufficient.*balance/.test(signal)) return "quota";
   if (/model[_ -]not[_ -]found|model_not_allowed|model_unavailable|model_cooling|unsupported[_ -]model/.test(signal)) return "model";
   if (/egress_unavailable|browser_worker_unavailable|proxy|cloudflare|upstream_network_error/.test(signal)) return "egress";
@@ -44,6 +45,8 @@ export function localizeGatewayMessage(errorClass: ChatErrorClass, message: stri
       return "上游账号权限或凭据异常，相关账号已进入健康检查流程。";
     case "quota":
       return "上游账号额度不足或正在等待恢复，请稍后重试。";
+    case "moderation":
+      return "图片被上游内容策略拦截，请调整提示词后重试。";
     case "model":
       return "当前模型路由不可用，请检查模型授权、映射和账号能力。";
     case "egress":

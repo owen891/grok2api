@@ -417,8 +417,14 @@ func (a *Adapter) WarmStatsig(ctx context.Context, credential account.Credential
 			SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL, RequestID: newRequestUUID(),
 			TimeoutSeconds: cfg.ImageTimeoutSeconds, Payload: map[string]any{},
 		}
-		if err := callBrowserWorkerWarm(ctx, cfg.BrowserWorkerURL, value); err != nil {
+		warm, err := callBrowserWorkerWarmState(ctx, cfg.BrowserWorkerURL, value)
+		if err != nil {
 			return 0, fmt.Errorf("Grok Web browser worker 预热: %w", err)
+		}
+		if strings.TrimSpace(warm.CloudflareCookie) != "" || strings.TrimSpace(warm.UserAgent) != "" {
+			if err := a.egress.UpdateCloudflareSession(ctx, lease.NodeID, warm.CloudflareCookie, warm.UserAgent); err != nil {
+				return 0, fmt.Errorf("Grok Web Cloudflare 会话回写: %w", err)
+			}
 		}
 		return 1, nil
 	}

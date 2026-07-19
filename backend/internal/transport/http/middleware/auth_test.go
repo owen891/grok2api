@@ -49,3 +49,21 @@ func TestBearerTokenAcceptsCaseInsensitiveSchemeAndWhitespace(t *testing.T) {
 		}
 	}
 }
+
+func TestImageJobPollingUsesReadOnlyAuthenticationPath(t *testing.T) {
+	for _, test := range []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		{method: http.MethodGet, path: "/v1/images/image_opaque", want: true},
+		{method: http.MethodPost, path: "/v1/images/image_opaque", want: false},
+		{method: http.MethodGet, path: "/v1/images/not-an-image-job", want: false},
+		{method: http.MethodGet, path: "/v1/models", want: false},
+	} {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		if got := isImageJobPoll(request); got != test.want {
+			t.Fatalf("%s %s = %v, want %v", test.method, test.path, got, test.want)
+		}
+	}
+}

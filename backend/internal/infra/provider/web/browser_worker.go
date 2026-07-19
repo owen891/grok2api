@@ -43,23 +43,28 @@ type browserWorkerRequest struct {
 	SSOToken         string         `json:"ssoToken"`
 	StatsigSignerURL string         `json:"statsigSignerURL"`
 	RequestID        string         `json:"requestID"`
+	TraceID          string         `json:"traceID,omitempty"`
 	TimeoutSeconds   int            `json:"timeoutSeconds"`
 	Payload          map[string]any `json:"payload"`
 }
 
 type browserWorkerResponse struct {
-	StatusCode int               `json:"statusCode"`
-	Status     string            `json:"status"`
-	Headers    map[string]string `json:"headers"`
-	BodyBase64 string            `json:"bodyBase64"`
-	Error      string            `json:"error"`
-	Code       string            `json:"code"`
+	StatusCode       int               `json:"statusCode"`
+	Status           string            `json:"status"`
+	Headers          map[string]string `json:"headers"`
+	BodyBase64       string            `json:"bodyBase64"`
+	Error            string            `json:"error"`
+	Code             string            `json:"code"`
+	CloudflareCookie string            `json:"cloudflareCookies"`
+	UserAgent        string            `json:"userAgent"`
 }
 
 type browserWorkerWarmResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
-	Code  string `json:"code"`
+	OK               bool   `json:"ok"`
+	Error            string `json:"error"`
+	Code             string `json:"code"`
+	CloudflareCookie string `json:"cloudflareCookies"`
+	UserAgent        string `json:"userAgent"`
 }
 
 type browserWorkerFailure struct {
@@ -69,16 +74,33 @@ type browserWorkerFailure struct {
 
 func (e *browserWorkerFailure) Error() string { return e.Message }
 
-func (a *Adapter) openLiteImageUpstream(ctx context.Context, credential account.Credential, spec ModelSpec, prompt string) (*http.Response, *infraegress.Lease, string, error) {
-	cfg := a.config()
-	if cfg.BrowserWorkerURL == "" {
-		response, lease, _, target, err := a.openChat(ctx, credential, "", spec, normalizedChatInput{Prompt: "Drawing: " + prompt})
-		return response, lease, target, err
+func browserWorkerTimeoutSeconds(ctx context.Context, maximum int) int {
+	budget := maximum
+	if deadline, ok := ctx.Deadline(); ok {
+		// Leave enough time for the HTTP client to receive and decode the
+		// worker's final response instead of cancelling a browser action mid-DOM
+		// transition. This matters for short-lived account inspection probes.
+		remaining := int((time.Until(deadline) - 2*time.Second).Seconds())
+		if remaining > 0 && remaining < budget {
+			budget = remaining
+		}
 	}
-	return a.openLiteImageWithBrowser(ctx, cfg, credential, spec, prompt)
+	if budget < 5 {
+		budget = 5
+	}
+	return budget
 }
 
-func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, credential account.Credential, spec ModelSpec, prompt string) (*http.Response, *infraegress.Lease, string, error) {
+func (a *Adapter) openLiteImageUpstream(ctx context.Context, credential account.Credential, spec ModelSpec, prompt, requestID string) (*http.Response, *infraegress.Lease, string, error) {
+	cfg := a.config()
+	if cfg.BrowserWorkerURL == "" {
+		response, lease, _, target, err := a.openChat(ctx, credential, "", spec, normalizedChatInput{Prompt: "Drawing: " + prompt}, false)
+		return response, lease, target, err
+	}
+	return a.openLiteImageWithBrowser(ctx, cfg, credential, spec, prompt, requestID)
+}
+
+func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, credential account.Credential, spec ModelSpec, prompt, requestID string) (*http.Response, *infraegress.Lease, string, error) {
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
 	if err != nil {
 		return nil, nil, "", err
@@ -94,7 +116,7 @@ func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, cred
 		value := browserWorkerRequest{
 			BaseURL: cfg.BaseURL, Endpoint: endpoint, ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent,
 			CloudflareCookie: lease.CFCookies, SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL,
-			RequestID: newRequestUUID(), TimeoutSeconds: cfg.ImageTimeoutSeconds,
+			RequestID: newRequestUUID(), TraceID: requestID, TimeoutSeconds: cfg.ImageTimeoutSeconds,
 			Payload: buildWebChatPayload("Drawing: "+prompt, spec.Mode, nil),
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.ImageTimeoutSeconds+30)*time.Second)
@@ -159,8 +181,68 @@ func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, cred
 	}, lease, endpoint, nil
 }
 
+func (a *Adapter) openChatWithBrowser(ctx context.Context, cfg Config, lease *infraegress.Lease, token, endpoint string, payload map[string]any) (*http.Response, error) {
+	value := browserWorkerRequest{
+		BaseURL: cfg.BaseURL, Endpoint: endpoint, ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent,
+		CloudflareCookie: lease.CFCookies, SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL,
+		RequestID: newRequestUUID(), TimeoutSeconds: browserWorkerTimeoutSeconds(ctx, cfg.ChatTimeoutSeconds), Payload: payload,
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.ChatTimeoutSeconds+30)*time.Second)
+	result, err := callBrowserWorkerChat(requestCtx, cfg.BrowserWorkerURL, value)
+	cancel()
+	if err != nil {
+		var workerFailure *browserWorkerFailure
+		if errors.As(err, &workerFailure) && workerFailure.Code == "proxy_unavailable" {
+			return nil, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb, Reason: infraegress.UnavailableProxy, NodeID: lease.NodeID}
+		}
+		if errors.As(err, &workerFailure) && (workerFailure.Code == "browser_unavailable" || workerFailure.Code == "worker_unavailable") {
+			return nil, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb, Reason: infraegress.UnavailableWorker, NodeID: lease.NodeID}
+		}
+		if looksLikeAntiBot([]byte(err.Error())) {
+			return nil, fmt.Errorf("%w: %v", errWebAntiBot, err)
+		}
+		return nil, fmt.Errorf("Grok Web browser worker: %w", err)
+	}
+	if result.Error != "" {
+		message := strings.TrimSpace(result.Error)
+		if looksLikeAntiBot([]byte(message)) {
+			return nil, fmt.Errorf("%w: %s", errWebAntiBot, message)
+		}
+		return nil, fmt.Errorf("Grok Web browser worker: %s", message)
+	}
+	if result.StatusCode < 100 || result.StatusCode > 599 {
+		return nil, fmt.Errorf("Grok Web browser worker returned invalid upstream status")
+	}
+	upstreamBody, err := base64.StdEncoding.DecodeString(result.BodyBase64)
+	if err != nil || len(upstreamBody) > browserWorkerResponseLimit {
+		return nil, fmt.Errorf("Grok Web browser worker returned invalid upstream body")
+	}
+	if result.StatusCode >= http.StatusOK && result.StatusCode < http.StatusBadRequest && lease.NodeID != 0 &&
+		(strings.TrimSpace(result.CloudflareCookie) != "" || strings.TrimSpace(result.UserAgent) != "") {
+		if updateErr := a.egress.UpdateCloudflareSession(context.WithoutCancel(ctx), lease.NodeID, result.CloudflareCookie, result.UserAgent); updateErr != nil {
+			a.log().Warn("web_browser_session_update_failed", "node_id", lease.NodeID, "error", updateErr)
+		}
+	}
+	headers := make(http.Header, len(result.Headers))
+	for name, headerValue := range result.Headers {
+		headers.Set(name, headerValue)
+	}
+	status := strings.TrimSpace(result.Status)
+	if status == "" {
+		status = fmt.Sprintf("%d %s", result.StatusCode, http.StatusText(result.StatusCode))
+	}
+	return &http.Response{
+		StatusCode: result.StatusCode, Status: status, Header: headers,
+		Body: io.NopCloser(bytes.NewReader(upstreamBody)), ContentLength: int64(len(upstreamBody)),
+	}, nil
+}
+
 func callBrowserWorker(ctx context.Context, workerURL string, value browserWorkerRequest) (browserWorkerResponse, error) {
 	return callBrowserWorkerAt(ctx, workerURL, "/v1/grok/fast-image", value)
+}
+
+func callBrowserWorkerChat(ctx context.Context, workerURL string, value browserWorkerRequest) (browserWorkerResponse, error) {
+	return callBrowserWorkerAt(ctx, workerURL, "/v1/grok/chat", value)
 }
 
 func callBrowserWorkerQuota(ctx context.Context, workerURL string, value browserWorkerRequest) (browserWorkerResponse, error) {
@@ -198,14 +280,19 @@ func isTransientBrowserWorkerFailure(err error) bool {
 }
 
 func callBrowserWorkerWarm(ctx context.Context, workerURL string, value browserWorkerRequest) error {
+	_, err := callBrowserWorkerWarmState(ctx, workerURL, value)
+	return err
+}
+
+func callBrowserWorkerWarmState(ctx context.Context, workerURL string, value browserWorkerRequest) (browserWorkerWarmResponse, error) {
 	var result browserWorkerWarmResponse
 	if err := callBrowserWorkerJSON(ctx, workerURL, "/v1/grok/warm", value, &result); err != nil {
-		return err
+		return result, err
 	}
 	if !result.OK {
-		return fmt.Errorf("worker did not become ready")
+		return result, fmt.Errorf("worker did not become ready")
 	}
-	return nil
+	return result, nil
 }
 
 func callBrowserWorkerJSON(ctx context.Context, workerURL, path string, value browserWorkerRequest, result any) error {

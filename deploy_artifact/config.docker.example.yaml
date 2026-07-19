@@ -39,6 +39,8 @@ registration:
   workDir: "/app/registration"
   configPath: "/app/data/registration/config.json"
   command: ["grok2api-registration"]
+  browserMode: ""
+  browserPath: ""
 
 provider:
   web:

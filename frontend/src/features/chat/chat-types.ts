@@ -7,6 +7,7 @@ export type ChatErrorClass =
   | "account"
   | "model"
   | "quota"
+  | "moderation"
   | "egress"
   | "upstream"
   | "timeout"

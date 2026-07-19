@@ -36,6 +36,9 @@ registration:
   workDir: "/app/registration"
   configPath: "/app/data/registration/config.json"
   command: ["grok2api-registration"]
+  # Leave blank with the standard protocol image. The browser overlay supplies Xvfb defaults.
+  browserMode: ""
+  browserPath: ""
 
 provider:
   web:

@@ -143,15 +143,19 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	normalized.Prompt = injectToolPrompt(normalized.Prompt, tools)
 	responseID := newWebID("resp")
 	streaming := input.Stream || request.Streaming
+	useBrowser := !streaming && a.BrowserWorkerEnabled()
 	var parsed parsedChat
 	var previous *inferencedomain.WebResponseState
 	for attempt := 0; attempt < 2; attempt++ {
-		upstream, lease, currentPrevious, statsigTarget, openErr := a.openChat(ctx, request.Credential, input.PreviousResponseID, spec, normalized)
+		upstream, lease, currentPrevious, statsigTarget, openErr := a.openChat(ctx, request.Credential, input.PreviousResponseID, spec, normalized, useBrowser)
 		if openErr != nil {
 			if errors.Is(openErr, errInvalidChatImage) {
 				return jsonProviderResponse(http.StatusBadRequest, map[string]any{"error": map[string]any{
 					"message": openErr.Error(), "type": "invalid_request_error", "code": "invalid_image_input",
 				}}), nil
+			}
+			if errors.Is(openErr, errWebAntiBot) {
+				return antiBotProviderResponse(), nil
 			}
 			return nil, openErr
 		}
@@ -159,7 +163,13 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(upstream.Body, 1<<20))
 			_ = upstream.Body.Close()
-			if isAntiBotStatus(upstream.StatusCode) || looksLikeAntiBot(body) {
+			if isAntiBotResponse(upstream.StatusCode, body) {
+				if attempt == 0 && !useBrowser && a.BrowserWorkerEnabled() {
+					a.invalidateSignedStatsig(http.MethodPost, statsigTarget)
+					lease.Release()
+					useBrowser = true
+					continue
+				}
 				if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, statsigTarget) {
 					lease.Release()
 					continue
@@ -184,6 +194,12 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				body := a.streamOpenAIResponse(ctx, prepared, lease, request.Credential, responseID, input.Model, request.Operation, normalized.Prompt, previous, tools, parallelTools, conversationOptions)
 				return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: streamHeaders(), Body: body}, nil
 			}
+			if errors.Is(preflightErr, errWebAntiBot) && attempt == 0 && !useBrowser && a.BrowserWorkerEnabled() {
+				a.invalidateSignedStatsig(http.MethodPost, statsigTarget)
+				a.releaseStatsigRetry(upstream, lease)
+				useBrowser = true
+				continue
+			}
 			if errors.Is(preflightErr, errWebAntiBot) && attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, statsigTarget) {
 				a.releaseStatsigRetry(upstream, lease)
 				continue
@@ -202,6 +218,12 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 
 		currentParsed, consumeErr := consumeUpstream(upstream.Body, nil)
 		_ = upstream.Body.Close()
+		if errors.Is(consumeErr, errWebAntiBot) && attempt == 0 && !useBrowser && a.BrowserWorkerEnabled() {
+			a.invalidateSignedStatsig(http.MethodPost, statsigTarget)
+			lease.Release()
+			useBrowser = true
+			continue
+		}
 		if errors.Is(consumeErr, errWebAntiBot) && attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, statsigTarget) {
 			lease.Release()
 			continue
@@ -294,7 +316,7 @@ func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 	}
 	return nil, fmt.Errorf("Grok Web 首个流事件超过安全检查上限")
 }
-func (a *Adapter) openChat(ctx context.Context, credential account.Credential, previousResponseID string, spec ModelSpec, input normalizedChatInput) (*http.Response, *infraegress.Lease, *inferencedomain.WebResponseState, string, error) {
+func (a *Adapter) openChat(ctx context.Context, credential account.Credential, previousResponseID string, spec ModelSpec, input normalizedChatInput, useBrowser bool) (*http.Response, *infraegress.Lease, *inferencedomain.WebResponseState, string, error) {
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
 	if err != nil {
@@ -338,6 +360,19 @@ func (a *Adapter) openChat(ctx context.Context, credential account.Credential, p
 	payload := buildWebChatPayload(input.Prompt, mode, attachments)
 	if previous != nil {
 		payload["responseId"] = previous.UpstreamParentResponseID
+	}
+	if useBrowser && cfg.BrowserWorkerURL != "" {
+		response, browserErr := a.openChatWithBrowser(ctx, cfg, lease, token, endpoint, payload)
+		if browserErr != nil {
+			if errors.Is(browserErr, errWebAntiBot) {
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusForbidden, browserErr)
+			} else {
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, browserErr)
+			}
+			lease.Release()
+			return nil, nil, nil, endpoint, browserErr
+		}
+		return response, lease, previous, endpoint, nil
 	}
 	data, _ := json.Marshal(payload)
 	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.ChatTimeoutSeconds)*time.Second)

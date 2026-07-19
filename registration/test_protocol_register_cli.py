@@ -1,8 +1,10 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import protocol_register_cli as worker
@@ -17,6 +19,122 @@ from protocol_register_cli import (
 
 
 class ProtocolCheckpointTests(unittest.TestCase):
+    def test_shared_email_provider_wins_over_legacy_protocol_backend(self):
+        self.assertEqual(
+            ["tempmail"],
+            worker.configured_email_backends(
+                {
+                    "email_provider": "tempmail_lol",
+                    "protocol_email_backend": "yyds",
+                    "email_provider_fallbacks": [],
+                    "yyds_api_key": "stale-key",
+                }
+            ),
+        )
+
+    def test_explicit_email_fallbacks_are_preserved(self):
+        self.assertEqual(
+            ["tempmail", "cloudmail"],
+            worker.configured_email_backends(
+                {
+                    "email_provider": "tempmail_lol",
+                    "protocol_email_backend": "yyds",
+                    "email_provider_fallbacks": ["cloudmail"],
+                }
+            ),
+        )
+
+    def test_legacy_protocol_script_dispatches_browser_worker_flag(self):
+        result = subprocess.run(
+            [sys.executable, "protocol_register_cli.py", "--browser-worker", "--help"],
+            cwd=Path(__file__).resolve().parent,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--inline-mint", result.stdout)
+
+    @patch.object(worker, "check_turnstile_endpoint")
+    def test_local_preflight_accepts_first_healthy_endpoint(self, check_endpoint):
+        check_endpoint.side_effect = [
+            (False, "connection refused"),
+            (True, '{"ok":true,"pool_ready":true}'),
+        ]
+
+        errors = worker.preflight(
+            {
+                "captcha_solver": "local",
+                "captcha_endpoints": [
+                    "http://solver-a:5072",
+                    "http://solver-b:5072",
+                    "http://solver-c:5072",
+                ],
+                "captcha_preflight_timeout": 1.5,
+            }
+        )
+
+        self.assertFalse(any("本地过盾" in error for error in errors), errors)
+        self.assertEqual(
+            [call.args[0] for call in check_endpoint.call_args_list],
+            ["http://solver-a:5072", "http://solver-b:5072"],
+        )
+        self.assertTrue(
+            all(call.kwargs["timeout"] == 1.5 for call in check_endpoint.call_args_list)
+        )
+
+    @patch.object(worker, "check_turnstile_endpoint")
+    def test_local_preflight_rejects_when_all_endpoints_are_unhealthy(self, check_endpoint):
+        check_endpoint.side_effect = [
+            (False, "connection refused"),
+            (False, "health HTTP 503"),
+        ]
+
+        errors = worker.preflight(
+            {
+                "captcha_solver": "local",
+                "captcha_endpoints": "http://solver-a:5072,http://solver-b:5072",
+            }
+        )
+
+        captcha_errors = [error for error in errors if "本地过盾服务不可用" in error]
+        self.assertEqual(len(captcha_errors), 1)
+        self.assertIn("solver-a", captcha_errors[0])
+        self.assertIn("solver-b", captcha_errors[0])
+
+    @patch.object(worker, "check_turnstile_endpoint")
+    def test_invalid_local_endpoint_does_not_start_health_probe(self, check_endpoint):
+        errors = worker.preflight(
+            {
+                "captcha_solver": "local",
+                "captcha_endpoints": ["solver-without-scheme:5072"],
+            }
+        )
+
+        self.assertTrue(any("本地过盾地址格式无效" in error for error in errors), errors)
+        check_endpoint.assert_not_called()
+
+    def test_solve_turnstile_reuses_provider_and_forwards_live_sitekey(self):
+        class Provider:
+            name = "docker"
+
+            def solve(self, **kwargs):
+                self.kwargs = kwargs
+                return SimpleNamespace(token="fresh-token")
+
+        provider = Provider()
+        token = worker.solve_turnstile_token(
+            {},
+            proxy="http://proxy:8080",
+            website_key="live-key",
+            clearance_provider=provider,
+        )
+
+        self.assertEqual(token, "fresh-token")
+        self.assertEqual(provider.kwargs["website_key"], "live-key")
+        self.assertEqual(provider.kwargs["proxy"], "http://proxy:8080")
+
     def test_proxy_pool_deduplicates_and_appends_fallback(self):
         self.assertEqual(
             worker.proxy_pool({"proxy_pool": ["socks5://a:1", "socks5://a:1", "http://b:2"], "proxy": "http://fallback:3"}),
@@ -37,6 +155,8 @@ class ProtocolCheckpointTests(unittest.TestCase):
 
     def test_resolve_sso_falls_back_to_password_session_with_fresh_token(self):
         class FakeClient:
+            turnstile_sitekey = "live-signin-key"
+
             def fetch_sso_token(self, **_kwargs):
                 return ""
 
@@ -61,6 +181,7 @@ class ProtocolCheckpointTests(unittest.TestCase):
         self.assertEqual("fresh-turnstile", client.kwargs["turnstile_token"])
         self.assertEqual(worker.SIGNIN_URL, client.kwargs["referer"])
         self.assertEqual(worker.SIGNIN_URL, solve.call_args.kwargs["website_url"])
+        self.assertEqual("live-signin-key", solve.call_args.kwargs["website_key"])
 
     def test_only_recoverable_jobs_are_resumed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -172,10 +293,14 @@ class ProtocolCheckpointTests(unittest.TestCase):
                 encoding="utf-8",
             )
             calls: list[Path] = []
+            providers = []
+            started_states = []
 
             def fake_register(_index, _cfg, **kwargs):
                 checkpoint_path = kwargs["checkpoint_path"]
                 calls.append(checkpoint_path)
+                providers.append(kwargs["clearance_provider"])
+                started_states.append(json.loads((state_dir / "state.json").read_text(encoding="utf-8")))
                 if len(calls) == 1:
                     write_checkpoint(
                         checkpoint_path,
@@ -215,9 +340,15 @@ class ProtocolCheckpointTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertEqual(2, len(calls))
             self.assertEqual(calls[0], calls[1])
+            self.assertIs(providers[0], providers[1])
+            self.assertEqual(
+                [(state["attempted"], state["active"]) for state in started_states],
+                [(1, 1), (2, 1)],
+            )
             self.assertEqual(1, len(list((state_dir / "jobs").glob("*.json"))))
             state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual({"done": 1, "ok": 1, "attempted": 2, "failed": 1}, {key: state[key] for key in ("done", "ok", "attempted", "failed")})
+            self.assertEqual(state["active"], 0)
 
     def test_main_runtime_proxy_overrides_persisted_proxy(self):
         with tempfile.TemporaryDirectory() as directory:
