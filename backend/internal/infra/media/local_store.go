@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,8 @@ import (
 
 // LocalStore 将媒体对象限制在单一根目录内，并使用原子重命名完成写入。
 type LocalStore struct {
-	root string
+	root            string
+	removeTemporary func(string) error
 }
 
 func NewLocalStore(root string) (*LocalStore, error) {
@@ -24,7 +26,7 @@ func NewLocalStore(root string) (*LocalStore, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("创建媒体存储目录: %w", err)
 	}
-	return &LocalStore{root: absolute}, nil
+	return &LocalStore{root: absolute, removeTemporary: os.Remove}, nil
 }
 
 func (s *LocalStore) SaveImage(ctx context.Context, id, mimeType string, data []byte) (string, error) {
@@ -48,11 +50,13 @@ func (s *LocalStore) SaveImage(ctx context.Context, id, mimeType string, data []
 		return "", fmt.Errorf("创建图片临时文件: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	committed := false
+	cleanupPending := true
 	defer func() {
 		_ = temporary.Close()
-		if !committed {
-			_ = os.Remove(temporaryPath)
+		if cleanupPending {
+			if cleanupErr := s.removeTemporary(temporaryPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+				slog.Warn("media_temp_cleanup_failed", "path", temporaryPath, "error", cleanupErr)
+			}
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
@@ -72,8 +76,8 @@ func (s *LocalStore) SaveImage(ctx context.Context, id, mimeType string, data []
 		return "", fmt.Errorf("提交图片文件: %w", err)
 	}
 	// 临时文件清理失败不影响已提交的永久文件，忽略该错误。
-	_ = os.Remove(temporaryPath)
-	committed = true
+	cleanupErr := s.removeTemporary(temporaryPath)
+	cleanupPending = cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist)
 	return storageKey, nil
 }
 

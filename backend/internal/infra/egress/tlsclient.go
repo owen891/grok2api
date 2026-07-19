@@ -68,7 +68,8 @@ func fromFHTTPResponse(fresponse *fhttp.Response) *http.Response {
 		Status: fresponse.Status, StatusCode: fresponse.StatusCode, Proto: fresponse.Proto,
 		ProtoMajor: fresponse.ProtoMajor, ProtoMinor: fresponse.ProtoMinor, Header: header,
 		Body: fresponse.Body, ContentLength: contentLength, TransferEncoding: transferEncoding,
-		Close: fresponse.Close, Uncompressed: fresponse.Uncompressed, Trailer: http.Header(fresponse.Trailer).Clone(),
+		// fhttp fills declared trailers in place when the body reaches EOF, so keep this map shared.
+		Close: fresponse.Close, Uncompressed: fresponse.Uncompressed, Trailer: http.Header(fresponse.Trailer),
 	}
 }
 

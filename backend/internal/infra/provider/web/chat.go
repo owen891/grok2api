@@ -181,10 +181,11 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
 			lease.Release()
 			return &provider.Response{
-				StatusCode: upstream.StatusCode,
-				Status:     upstream.Status,
-				Header:     http.Header(upstream.Header),
-				Body:       io.NopCloser(bytes.NewReader(body)),
+				StatusCode:  upstream.StatusCode,
+				Status:      upstream.Status,
+				Header:      http.Header(upstream.Header),
+				UpstreamURL: responseUpstreamURL(upstream),
+				Body:        io.NopCloser(bytes.NewReader(body)),
 			}, nil
 		}
 
