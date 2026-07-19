@@ -12,6 +12,11 @@
           "en": "Completed the built-in update center with backend version/check endpoints plus dashboard and Settings UI for current/latest versions and release notes."
         },
         {
+          "type": "feature",
+          "zh": "新增浏览器注册方式，可在真实浏览器环境中完成注册流程，并与现有协议注册方式并行使用。",
+          "en": "Added a browser registration mode that completes the flow in a real browser and can run alongside the existing protocol registration mode."
+        },
+        {
           "type": "improvement",
           "zh": "账号巡检启动前会重新读取可用模型；后端区分模型不可用、参数无效和任务冲突，避免使用过期模型路由导致失败。",
           "en": "Account inspection now refreshes available models before starting and distinguishes unavailable models, invalid input, and active-task conflicts."
