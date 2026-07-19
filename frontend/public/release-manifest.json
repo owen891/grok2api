@@ -1,7 +1,33 @@
 {
-  "latest": "v3.0.9",
+  "latest": "v3.1.0",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.1.0",
+      "date": "2026-07-19",
+      "entries": [
+        {
+          "type": "security",
+          "zh": "升级 quic-go 与 pgx 到官方修复版本，消除 HTTP/3 QPACK 内存耗尽和 PostgreSQL 占位符 SQL 注入风险。",
+          "en": "Updated quic-go and pgx to patched releases, eliminating the HTTP/3 QPACK memory exhaustion and PostgreSQL placeholder SQL injection risks."
+        },
+        {
+          "type": "security",
+          "zh": "SSO、注册账号和协议账本改为原子私有写入，目录权限为 0700，凭据文件权限为 0600。",
+          "en": "SSO, browser-registration, and protocol-registration credentials now use atomic private writes with 0700 directories and 0600 files."
+        },
+        {
+          "type": "improvement",
+          "zh": "合入低风险上游稳定性修复，增强账号检查、浏览器操作、上游请求头隔离、媒体清理和剪贴板回退的可靠性。",
+          "en": "Integrated low-risk upstream stability fixes for account inspection, browser interactions, upstream header isolation, media cleanup, and clipboard fallback behavior."
+        },
+        {
+          "type": "feature",
+          "zh": "代理节点列表新增启用/停用开关，可直接快速控制节点是否参与路由。",
+          "en": "Added an enable/disable switch to the egress-node list for quickly controlling whether a node participates in routing."
+        }
+      ]
+    },
     {
       "version": "v3.0.9",
       "date": "2026-07-18",
