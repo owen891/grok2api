@@ -210,6 +210,24 @@ def browser_registration_page_ready(config: dict[str, Any]) -> tuple[bool, str]:
 
 _stats_lock = threading.Lock()
 _accounts_file_lock = threading.Lock()
+
+
+def _append_private_account(accounts_file: str, line: str) -> None:
+    path = Path(accounts_file).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        # Existing ledgers from older releases may have inherited broad modes.
+        os.chmod(path, 0o600)
+    except OSError:
+        os.close(descriptor)
+        raise
+    with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 _stats = {
     "reg_success": 0,
     "reg_fail": 0,
@@ -709,8 +727,7 @@ def register_one(
         password = profile.get("password", "") or ""
         line = f"{email}----{password}----{sso}\n"
         with _accounts_file_lock:
-            with open(accounts_file, "a", encoding="utf-8") as f:
-                f.write(line)
+            _append_private_account(accounts_file, line)
         log(worker_id, f"+ 注册成功: {email}")
         reg.mark_used(email, password)
 

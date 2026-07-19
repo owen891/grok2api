@@ -823,8 +823,15 @@ def compute_target(count: int, extra: int, ledger_path: Path) -> int:
 
 
 def append_ledger(ledger_path: Path, row: dict[str, Any]) -> None:
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    with ledger_path.open("a", encoding="utf-8", newline="\n") as handle:
+    ledger_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(ledger_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        # Legacy ledgers can predate the private-file policy.
+        os.chmod(ledger_path, 0o600)
+    except OSError:
+        os.close(descriptor)
+        raise
+    with os.fdopen(descriptor, "a", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
         handle.write("\n")
         handle.flush()

@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -272,6 +274,8 @@ class ProtocolCheckpointTests(unittest.TestCase):
                 ["first@example.invalid", "second@example.invalid"],
                 [row["email"] for row in rows],
             )
+            if os.name != "nt":
+                self.assertEqual(0o600, stat.S_IMODE(ledger.stat().st_mode))
             self.assertEqual(0, migrate_legacy_ledger(legacy, ledger))
 
     def test_main_retries_the_same_checkpoint_until_target_is_usable(self):

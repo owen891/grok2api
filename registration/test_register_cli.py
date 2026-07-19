@@ -2,6 +2,7 @@ import json
 import inspect
 import os
 import queue
+import stat
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,17 @@ from unittest.mock import patch
 
 import register_cli as worker
 from register_cli import _run_web_import_job, registration_exit_code, resolve_mint_workers
+
+
+class PrivateAccountLedgerTests(unittest.TestCase):
+    def test_private_account_ledger_is_created_with_private_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "accounts.txt"
+            worker._append_private_account(str(path), "user@example.invalid----secret----session\n")
+
+            self.assertEqual("user@example.invalid----secret----session\n", path.read_text(encoding="utf-8"))
+            if os.name != "nt":
+                self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
 
 
 class ResolveMintWorkersTests(unittest.TestCase):
