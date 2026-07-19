@@ -33,6 +33,7 @@ import base64
 import json
 import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -468,7 +469,10 @@ def save_sso(
         The path to the written file.
     """
     target = Path(output_dir) if output_dir else _default_output_dir()
-    target.mkdir(parents=True, exist_ok=True)
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # The directory contains passwords and session tokens, so also harden an
+    # existing directory that may have been created by an older version.
+    os.chmod(target, 0o700)
 
     # Microsecond + short email salt so concurrent writers don't clobber.
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -488,9 +492,18 @@ def save_sso(
         record["payload"] = payload
 
     filepath = target / filename
-    filepath.write_text(
-        json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".sso-", suffix=".tmp", dir=target)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, filepath)
+        os.chmod(filepath, 0o600)
+    finally:
+        Path(temporary_name).unlink(missing_ok=True)
     return filepath
 
 
