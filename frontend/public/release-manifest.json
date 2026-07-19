@@ -13,8 +13,8 @@
         },
         {
           "type": "feature",
-          "zh": "新增浏览器注册方式，可在真实浏览器环境中完成注册流程，并与现有协议注册方式并行使用。",
-          "en": "Added a browser registration mode that completes the flow in a real browser and can run alongside the existing protocol registration mode."
+          "zh": "新增浏览器注册引擎：注册任务可在协议/浏览器两种方式间选择；浏览器模式通过 Chromium、Turnstile 扩展与预检完成注册，成功结果会经过 SSO、OAuth、spool 导入和首次同步验证。",
+          "en": "Added a browser registration engine with protocol/browser selection. Browser mode uses Chromium, the Turnstile extension, and preflight checks; a success is verified through SSO, OAuth, spool import, and initial sync."
         },
         {
           "type": "improvement",
