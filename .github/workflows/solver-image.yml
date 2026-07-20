@@ -81,8 +81,11 @@ jobs:
             TURNSTILE_SOLVER_VARIANT=camoufox-linux
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
-          provenance: mode=max
-          sbom: true
+          # `load` exports into the local Docker engine, which cannot import
+          # BuildKit's attestation manifest list. The published images retain
+          # provenance and SBOM attestations.
+          provenance: false
+          sbom: false
 
       - name: Smoke test Camoufox Linux solver
         shell: bash
