@@ -21,6 +21,16 @@
 
 Grok2API 是一个纯 Go 实现的 Grok API 网关。本二开版本在原有多 Provider 网关基础上，继续补齐了注册体系、聊天工作区、Grok Web 浏览器链路、媒体任务和一体化管理后台。项目将 Grok Build OAuth、Grok Web SSO 与 Grok Console SSO 组织为独立账号池，对外提供 OpenAI 风格接口、Anthropic Messages 兼容接口，以及账号、模型、密钥、用量、代理和注册流程管理能力。
 
+## v3.1.0 更新
+
+- **浏览器注册引擎**：注册任务可在 `protocol` 与 `browser` 两种引擎间选择。Browser 模式使用 Chromium、Turnstile 扩展和同代理预检；成功结果会经过 SSO、OAuth、spool 导入和首次同步验证，避免只完成注册页面却留下不可用账号。
+- **版本更新中心**：管理台首页与设置页新增当前/最新版本、发布说明和手动检查入口，后端提供版本查询与检查接口。
+- **运行稳定性**：账号巡检会在启动前刷新可用模型；浏览器 worker 增加发送按钮重试与回退；修复 TLS Trailer、Web Provider 异常响应和本地媒体临时文件清理问题。
+- **管理体验**：代理节点列表支持直接启用/停用；不安全 HTTP 环境可使用剪贴板回退；客户端密钥再次查看时能显示并复制实际密钥。
+- **安全加固**：升级 `quic-go` 与 `pgx` 至官方修复版本；SSO、浏览器注册账号和协议账本均使用私有原子写入，Linux 下目录为 `0700`、凭据文件为 `0600`。
+
+完整更新记录见管理台的“版本更新”区域或 [`release-manifest.json`](./frontend/public/release-manifest.json)。
+
 ## 功能概览
 
 - **三 Provider 网关**：`grok_build`、`grok_web` 与 `grok_console` 独立路由、额度隔离、故障状态与模型映射
@@ -32,7 +42,7 @@ Grok2API 是一个纯 Go 实现的 Grok API 网关。本二开版本在原有多
 - **媒体能力**：图片生成、图片编辑、视频生成、图片任务归档与 URL/Base64 返回
 - **Web 浏览器链路**：持久 Chromium 会话、browser worker、Statsig 预热与签名缓存、辅助校验适配
 - **基础设施**：SQLite/PostgreSQL、Memory/Redis、HTTP 与 SOCKS 代理池
-- **安全边界**：AES-256-GCM 凭据加密、客户端密钥哈希、日志脱敏、SSRF 与传输上限
+- **安全边界**：AES-256-GCM 凭据加密、客户端密钥哈希、日志脱敏、SSRF 与传输上限，以及注册凭据的私有原子落盘
 
 ## 二开重点
 
