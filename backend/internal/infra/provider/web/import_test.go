@@ -26,6 +26,23 @@ func TestParseImportedCredentialsAcceptsOneSSOTokenPerLine(t *testing.T) {
 	}
 }
 
+func TestParseImportedCredentialsAcceptsEmailPasswordTokenLines(t *testing.T) {
+	adapter := &Adapter{}
+	values, err := adapter.ParseImportedCredentials([]byte("first@example.com----ignored-password----token-one\nsecond@example.com----ignored----sso=token-two\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 {
+		t.Fatalf("credentials = %#v", values)
+	}
+	if values[0].Name != "first@example.com" || values[0].Email != "first@example.com" || values[0].AccessToken != "token-one" {
+		t.Fatalf("first credential = %#v", values[0])
+	}
+	if values[1].Name != "second@example.com" || values[1].Email != "second@example.com" || values[1].AccessToken != "token-two" {
+		t.Fatalf("second credential = %#v", values[1])
+	}
+}
+
 func TestParseImportedCredentialsRejectsOversizedPlainToken(t *testing.T) {
 	adapter := &Adapter{}
 	_, err := adapter.ParseImportedCredentials([]byte(strings.Repeat("x", maxSSOTokenBytes+1)))

@@ -87,7 +87,7 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 	seen := make(map[string]struct{}, len(lines))
 	result := make([]provider.CredentialSeed, 0, len(lines))
 	for index, line := range lines {
-		token := sanitizeSSOToken(line)
+		name, email, token := parsePlainTextCredential(line)
 		if token == "" {
 			continue
 		}
@@ -98,9 +98,12 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 			continue
 		}
 		seen[token] = struct{}{}
+		if name == "" {
+			name = "Grok Web " + security.HashToken(token)[:8]
+		}
 		result = append(result, provider.CredentialSeed{
 			Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierAuto,
-			Name: "Grok Web " + security.HashToken(token)[:8], SourceKey: "sso:" + security.HashToken(token), AccessToken: token,
+			Name: name, Email: email, SourceKey: "sso:" + security.HashToken(token), AccessToken: token,
 		})
 		if len(result) > maxImportAccounts {
 			return nil, provider.ErrCredentialLimit
@@ -110,6 +113,19 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 		return nil, fmt.Errorf("文本中没有有效的 sso token")
 	}
 	return result, nil
+}
+
+func parsePlainTextCredential(value string) (name, email, token string) {
+	value = strings.TrimSpace(value)
+	parts := strings.Split(value, "----")
+	if len(parts) >= 3 {
+		candidateEmail := strings.TrimSpace(parts[0])
+		candidateToken := sanitizeSSOToken(parts[len(parts)-1])
+		if strings.Contains(candidateEmail, "@") && candidateToken != "" {
+			return candidateEmail, candidateEmail, candidateToken
+		}
+	}
+	return "", "", sanitizeSSOToken(value)
 }
 
 func (a *Adapter) MarshalCredentials(values []provider.CredentialSeed) ([]byte, error) {
