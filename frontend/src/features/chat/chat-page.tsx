@@ -737,12 +737,12 @@ export function ChatPage() {
               </p>
             ) : null}
             {noUpstreamAccounts ? (
-              <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>{t("chat.noUpstreamAccounts")} <Link to="/accounts" className="font-medium underline underline-offset-2">{t("chat.connectAccount")}</Link></span>
               </div>
             ) : noAvailableModels ? (
-              <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>{t("chat.noAvailableModels")} <Link to="/models" className="font-medium underline underline-offset-2">{t("chat.manageModels")}</Link></span>
               </div>
