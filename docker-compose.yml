@@ -16,6 +16,7 @@ services:
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       GROK_WEB_BROWSER_WORKER_URL: "http://grok-web-browser:8192"
+      GROK2API_REGISTRATION_COMMAND: "grok2api-registration"
       REGISTRATION_PROXY: "${REGISTRATION_PROXY:-}"
       REGISTRATION_SOLVER_PROXY: "${REGISTRATION_SOLVER_PROXY:-}"
       REGISTRATION_HTTP_PROXY: "${REGISTRATION_HTTP_PROXY:-}"

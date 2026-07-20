@@ -285,6 +285,11 @@ func Load(path string) (Config, error) {
 	if workerURL := strings.TrimSpace(os.Getenv("GROK_WEB_BROWSER_WORKER_URL")); workerURL != "" {
 		cfg.Provider.Web.BrowserWorkerURL = workerURL
 	}
+	// Container images ship the registration wrapper at a stable path. Keep
+	// deployment-specific command selection out of bind-mounted host configs.
+	if workerCommand := strings.TrimSpace(os.Getenv("GROK2API_REGISTRATION_COMMAND")); workerCommand != "" {
+		cfg.Registration.Command = []string{workerCommand}
+	}
 	if loadedFrom != "" {
 		if err := resolveRelativePaths(&cfg, loadedFrom); err != nil {
 			return Config{}, err

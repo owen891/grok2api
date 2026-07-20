@@ -10,6 +10,7 @@ services:
       - "127.0.0.1:8001:8000"
     environment:
       TZ: "Asia/Shanghai"
+      GROK2API_REGISTRATION_COMMAND: "grok2api-registration"
       HOME: "/app/data/registration/home"
       REGISTRATION_WORKDIR: "/app/registration"
       REGISTRATION_DATA_DIR: "/app/data/registration"
@@ -80,6 +81,8 @@ services:
 
   grok-turnstile-solver:
     image: "${GROK2API_SOLVER_IMAGE:-ghcr.io/owen891/grok2api:solver-0d48ecf8b4ee-fixed}"
+    ports:
+      - "127.0.0.1:${GROK_TURNSTILE_SOLVER_PORT:-5072}:5072"
     entrypoint:
       - /bin/bash
       - /opt/grok2api/turnstile-solver-entrypoint.sh
@@ -92,7 +95,7 @@ services:
       # Keep one Camoufox instance warm in production. Lazy startup can spend
       # the whole 120s registration timeout downloading/initializing a browser.
       TURNSTILE_LAZY: "0"
-      TURNSTILE_IDLE_SEC: "900"
+      TURNSTILE_IDLE_SEC: "${TURNSTILE_IDLE_SEC:-86400}"
       TURNSTILE_DEBUG: "${TURNSTILE_DEBUG:-0}"
       TURNSTILE_PROXY: "${REGISTRATION_SOLVER_PROXY:-}"
     extra_hosts:

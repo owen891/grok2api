@@ -109,6 +109,28 @@ routing:
 	}
 }
 
+func TestLoadUsesContainerRegistrationCommandOverride(t *testing.T) {
+	t.Setenv("GROK2API_REGISTRATION_COMMAND", "grok2api-registration")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`registration:
+  enabled: true
+  command: ["C:/local-dev/.venv/Scripts/python.exe", "-u", "C:/local-dev/register.py"]
+secrets:
+  jwtSecret: "12345678901234567890123456789012"
+  credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Registration.Command) != 1 || cfg.Registration.Command[0] != "grok2api-registration" {
+		t.Fatalf("registration command = %#v", cfg.Registration.Command)
+	}
+}
+
 func TestLoadRejectsMediaRuntimeSettingsInYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte(`secrets:

@@ -11,6 +11,8 @@ services:
 
   grok-turnstile-solver:
     image: "${GROK2API_SOLVER_IMAGE:?set GROK2API_SOLVER_IMAGE in .env}"
+    ports:
+      - "127.0.0.1:${GROK_TURNSTILE_SOLVER_PORT:-5072}:5072"
     entrypoint: ["/bin/bash", "/opt/grok2api/turnstile-solver-entrypoint.sh"]
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
@@ -19,7 +21,7 @@ services:
       TURNSTILE_THREAD: "${TURNSTILE_THREAD:-1}"
       TURNSTILE_BROWSER_TYPE: "camoufox"
       TURNSTILE_LAZY: "0"
-      TURNSTILE_IDLE_SEC: "900"
+      TURNSTILE_IDLE_SEC: "${TURNSTILE_IDLE_SEC:-86400}"
       TURNSTILE_DEBUG: "${TURNSTILE_DEBUG:-0}"
       TURNSTILE_PROXY: "${REGISTRATION_SOLVER_PROXY:-}"
     extra_hosts:

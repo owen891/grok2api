@@ -176,6 +176,8 @@ mkdir -p data
 
 编辑 `config.yaml`：
 
+Docker 部署会自动把注册命令改为镜像内的 `grok2api-registration`，不要把宿主机的 Python 路径写进配置；宿主机开发运行才填写本地 Python 命令。
+
 ```yaml
 secrets:
   jwtSecret: "至少 32 个字符的随机值"

@@ -89,6 +89,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
 
 ENV TZ=Asia/Shanghai \
     GROK2API_CONFIG_SOURCE=/run/grok2api/config.yaml \
+    GROK2API_REGISTRATION_COMMAND=grok2api-registration \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/app/data/registration/home \

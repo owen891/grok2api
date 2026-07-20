@@ -20,6 +20,10 @@ installation, or a host Redis installation. Docker owns those runtime boundaries
 The host requirements are Docker Engine, Compose v2, and enough disk/RAM. Select
 one registration runtime in `.env` before installing:
 
+The Compose files force `GROK2API_REGISTRATION_COMMAND=grok2api-registration` so
+a host-side Python path accidentally left in the mounted config cannot disable
+the container worker.
+
 | `REGISTRATION_RUNTIME` | Images pulled | Use case |
 | --- | --- | --- |
 | `protocol` | standard app + solver | Protocol registration |

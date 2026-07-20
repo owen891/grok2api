@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     VIRTUAL_ENV=/opt/registration-venv \
     PATH="/opt/registration-venv/bin:$PATH" \
+    GROK2API_REGISTRATION_COMMAND=grok2api-registration \
     UV_HTTP_TIMEOUT=300 \
     HOME=/app/data/registration/home \
     REGISTRATION_WORKDIR=/app/registration \
