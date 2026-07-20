@@ -239,7 +239,7 @@ function RoutingTraceEvent({ value, locale }: { value: RoutingTraceEventDTO; loc
   const { t } = useTranslation();
   const title = value.type === "candidate_pool"
     ? t("routingTrace.candidates")
-    : value.type === "selected"
+    : value.type === "shadow_selection" || value.type === "selected"
       ? t("routingTrace.selected")
       : value.type === "selection_failed"
         ? t("routingTrace.selectionFailed")
@@ -259,7 +259,7 @@ function routingEventDetail(value: RoutingTraceEventDTO, t: ReturnType<typeof us
   if (value.type === "candidate_pool") {
     return t("routingTrace.poolDetail", { total: value.total ?? 0, eligible: value.eligible ?? 0, quota: value.quotaExhausted ?? 0, cooling: (value.cooling ?? 0) + (value.modelCooling ?? 0), unsupported: value.unsupported ?? 0, excluded: value.excluded ?? 0 });
   }
-  if (value.type === "selected") return t("routingTrace.selectedDetail", { selection: value.selection || "-" });
+  if (value.type === "shadow_selection" || value.type === "selected") return t("routingTrace.selectedDetail", { selection: value.selection || "-" });
   if (value.type === "selection_failed") return t("routingTrace.failedDetail", { reason: value.reason || "-" });
   return t("routingTrace.attemptDetail", { stage: value.stage || "-", code: value.errorCode || "-", action: value.action || "-", duration: value.durationMs ?? 0 });
 }

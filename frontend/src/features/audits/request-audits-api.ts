@@ -6,7 +6,7 @@ import type { SortOrder } from "@/shared/lib/table-sort";
 export type AuditPeriod = PeriodValue;
 
 export type RoutingTraceEventDTO = {
-  type: "candidate_pool" | "selected" | "selection_failed" | "attempt";
+  type: "candidate_pool" | "shadow_selection" | "selected" | "selection_failed" | "attempt";
   elapsedMs: number;
   attempt?: number;
   accountId?: string;
@@ -115,7 +115,7 @@ export type AuditSummaryDTO = {
 };
 
 const routingTraceEventValidator = hasShape({
-  type: isOneOf("candidate_pool", "selected", "selection_failed", "attempt"), elapsedMs: isNumber,
+  type: isOneOf("candidate_pool", "shadow_selection", "selected", "selection_failed", "attempt"), elapsedMs: isNumber,
   attempt: isOptional(isNumber), accountId: isOptional(isString), selection: isOptional(isString), total: isOptional(isNumber),
   excluded: isOptional(isNumber), eligible: isOptional(isNumber), probe: isOptional(isNumber), cooling: isOptional(isNumber),
   modelCooling: isOptional(isNumber), quotaExhausted: isOptional(isNumber), unsupported: isOptional(isNumber), reason: isOptional(isString),
