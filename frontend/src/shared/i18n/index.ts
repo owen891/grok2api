@@ -489,7 +489,7 @@ const resources = {
         exhausted: "额度耗尽", unavailable: "不可用", running: "运行中", degraded: "异常", stopped: "已停止",
         none: "无", failureCount: "连续失败 {{count}} 次", replenishmentDisabled: "自动补号未启用",
         replenishment_idle: "补号空闲", replenishment_starting: "正在启动补号", replenishment_running: "正在补号", replenishment_verifying: "正在验证新容量",
-        replenishment_cooling: "补号冷却", replenishment_failed: "补号失败", dailyStarts: "今日 {{used}} / {{limit}}",
+        replenishment_cooling: "补号冷却", replenishment_failed: "补号失败", dailyStarts: "今日 {{used}} / {{limit}}", triggerReplenishment: "自动补号", replenishmentRequested: "已请求自动补号检查",
         predictiveThreshold: "预测阈值 ≤{{eligible}} · {{rpm}} RPM / {{minutes}} 分钟",
       },
       routingTrace: {
@@ -1311,7 +1311,7 @@ const resources = {
         exhausted: "Quota exhausted", unavailable: "Unavailable", running: "Running", degraded: "Degraded", stopped: "Stopped",
         none: "None", failureCount: "{{count}} consecutive failures", replenishmentDisabled: "Auto replenishment disabled",
         replenishment_idle: "Replenishment idle", replenishment_starting: "Starting replenishment", replenishment_running: "Replenishing", replenishment_verifying: "Verifying new capacity",
-        replenishment_cooling: "Replenishment cooling", replenishment_failed: "Replenishment failed", dailyStarts: "Today {{used}} / {{limit}}",
+        replenishment_cooling: "Replenishment cooling", replenishment_failed: "Replenishment failed", dailyStarts: "Today {{used}} / {{limit}}", triggerReplenishment: "Auto replenish", replenishmentRequested: "Auto replenishment check requested",
         predictiveThreshold: "Predictive ≤{{eligible}} · {{rpm}} RPM / {{minutes}} min",
       },
       routingTrace: {

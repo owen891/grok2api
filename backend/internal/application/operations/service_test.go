@@ -68,6 +68,30 @@ func TestTaskScheduledHasDecodableInitialState(t *testing.T) {
 	}
 }
 
+func TestTriggerReplenishmentQueuesConfiguredTrigger(t *testing.T) {
+	service := NewService(nil, nil, nil, nil, ReplenishmentConfig{Enabled: true})
+	trigger := &replenishmentTriggerStub{}
+	service.SetReplenishmentTrigger(trigger)
+	if err := service.TriggerReplenishment(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if trigger.calls != 1 {
+		t.Fatalf("trigger calls = %d, want 1", trigger.calls)
+	}
+}
+
+func TestTriggerReplenishmentRejectsDisabledOrUnavailableService(t *testing.T) {
+	disabled := NewService(nil, nil, nil, nil, ReplenishmentConfig{})
+	if err := disabled.TriggerReplenishment(context.Background()); !errors.Is(err, ErrReplenishmentDisabled) {
+		t.Fatalf("disabled trigger error = %v", err)
+	}
+
+	unavailable := NewService(nil, nil, nil, nil, ReplenishmentConfig{Enabled: true})
+	if err := unavailable.TriggerReplenishment(context.Background()); !errors.Is(err, ErrReplenishmentUnavailable) {
+		t.Fatalf("unavailable trigger error = %v", err)
+	}
+}
+
 type modelSourceStub struct{ routes []modeldomain.Route }
 
 func (s modelSourceStub) ListConfiguredEnabled(context.Context) ([]modeldomain.Route, error) {
@@ -83,6 +107,16 @@ func (s capacitySourceStub) CapacitySnapshot(context.Context, account.Provider, 
 type quotaModeSourceStub struct{}
 
 func (quotaModeSourceStub) QuotaMode(account.Provider, string) string { return "fast" }
+
+type replenishmentTriggerStub struct {
+	calls int
+	err   error
+}
+
+func (s *replenishmentTriggerStub) Trigger(context.Context) error {
+	s.calls++
+	return s.err
+}
 
 type replenishmentSourceStub struct {
 	state registrationdomain.ReplenishmentState

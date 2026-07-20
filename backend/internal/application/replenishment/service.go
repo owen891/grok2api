@@ -26,6 +26,8 @@ const (
 	defaultVerifyGrace   = 2 * time.Minute
 )
 
+var ErrManualTriggerDisabled = errors.New("automatic replenishment is disabled")
+
 type Config struct {
 	Enabled               bool
 	DryRun                bool
@@ -110,6 +112,23 @@ func (s *Service) Request(_ context.Context, provider accountdomain.Provider, mo
 	case s.trigger <- struct{}{}:
 	default:
 	}
+}
+
+// Trigger requests an immediate evaluation using the configured replenishment
+// policy. It deliberately keeps the normal capacity, cooldown, and daily-limit
+// checks intact.
+func (s *Service) Trigger(ctx context.Context) error {
+	if !s.config.Enabled {
+		return ErrManualTriggerDisabled
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case s.trigger <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 func (s *Service) Run(ctx context.Context) error {

@@ -118,6 +118,28 @@ func testConfig() Config {
 	}
 }
 
+func TestServiceTriggerQueuesOneManualEvaluation(t *testing.T) {
+	service := NewService(nil, nil, nil, testConfig(), nil)
+	if err := service.Trigger(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Trigger(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if queued := len(service.trigger); queued != 1 {
+		t.Fatalf("queued manual evaluations = %d, want 1", queued)
+	}
+}
+
+func TestServiceTriggerRejectsDisabledConfiguration(t *testing.T) {
+	config := testConfig()
+	config.Enabled = false
+	service := NewService(nil, nil, nil, config, nil)
+	if err := service.Trigger(context.Background()); !errors.Is(err, ErrManualTriggerDisabled) {
+		t.Fatalf("trigger error = %v", err)
+	}
+}
+
 func TestServiceDisabledNeverEvaluatesOrRegisters(t *testing.T) {
 	database, states := openStateRepository(t)
 	defer database.Close()

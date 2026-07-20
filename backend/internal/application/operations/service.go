@@ -17,6 +17,11 @@ import (
 
 const defaultRecoveryLead = 10 * time.Minute
 
+var (
+	ErrReplenishmentDisabled    = errors.New("automatic replenishment is disabled")
+	ErrReplenishmentUnavailable = errors.New("automatic replenishment trigger is unavailable")
+)
+
 type capacitySource interface {
 	CapacitySnapshot(context.Context, account.Provider, string, string, time.Duration) (account.RoutingCapacity, error)
 }
@@ -27,6 +32,10 @@ type quotaModeSource interface {
 
 type modelSource interface {
 	ListConfiguredEnabled(context.Context) ([]modeldomain.Route, error)
+}
+
+type replenishmentTrigger interface {
+	Trigger(context.Context) error
 }
 
 type ReplenishmentConfig struct {
@@ -110,6 +119,7 @@ type Service struct {
 	quotaModes    quotaModeSource
 	replenishment repository.ReplenishmentRepository
 	replenishCfg  ReplenishmentConfig
+	trigger       replenishmentTrigger
 
 	mu    sync.RWMutex
 	tasks map[string]TaskStatus
@@ -121,6 +131,29 @@ func NewService(models modelSource, capacity capacitySource, quotaModes quotaMod
 		models: models, capacity: capacity, quotaModes: quotaModes, replenishment: replenishment,
 		replenishCfg: replenishCfg, tasks: make(map[string]TaskStatus), now: func() time.Time { return time.Now().UTC() },
 	}
+}
+
+// SetReplenishmentTrigger connects the bounded manual wake-up command without
+// giving the operations API direct access to registration internals.
+func (s *Service) SetReplenishmentTrigger(trigger replenishmentTrigger) {
+	s.mu.Lock()
+	s.trigger = trigger
+	s.mu.Unlock()
+}
+
+// TriggerReplenishment schedules an immediate policy evaluation. It does not
+// bypass configured capacity thresholds, cooldowns, or daily limits.
+func (s *Service) TriggerReplenishment(ctx context.Context) error {
+	if !s.replenishCfg.Enabled {
+		return ErrReplenishmentDisabled
+	}
+	s.mu.RLock()
+	trigger := s.trigger
+	s.mu.RUnlock()
+	if trigger == nil {
+		return ErrReplenishmentUnavailable
+	}
+	return trigger.Trigger(ctx)
 }
 
 func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {

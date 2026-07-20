@@ -1,14 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Activity, Box, CircleDollarSign, RefreshCw, Users } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Area, Bar, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Spinner } from "@/components/ui/spinner";
 import { getDashboard, type DashboardPeriod, type DashboardDTO } from "@/features/dashboard/dashboard-api";
-import { getOperations } from "@/features/dashboard/operations-api";
+import { getOperations, triggerReplenishment } from "@/features/dashboard/operations-api";
 import { OperationsPanels } from "@/features/dashboard/operations-panels";
 import { useAuth } from "@/shared/auth/use-auth";
 import { ErrorState } from "@/shared/components/data-state";
@@ -52,6 +53,16 @@ export function DashboardPage() {
     queryKey: ["operations"],
     queryFn: getOperations,
     refetchInterval: 15_000,
+  });
+  const replenishmentTrigger = useMutation({
+    mutationFn: triggerReplenishment,
+    onSuccess: () => {
+      toast.success(t("dashboardOperations.replenishmentRequested"));
+      void operationsQuery.refetch();
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : t("errors.generic"));
+    },
   });
 
   function refreshAll(): void {
@@ -110,7 +121,13 @@ export function DashboardPage() {
 
       <TrendPanel dashboard={dashboard} metric={trendMetric} onMetricChange={setTrendMetric} locale={i18n.language} loading={loading} />
 
-      <OperationsPanels value={operationsQuery.data} loading={operationsQuery.isPending} locale={i18n.language} />
+      <OperationsPanels
+        value={operationsQuery.data}
+        loading={operationsQuery.isPending}
+        locale={i18n.language}
+        triggeringReplenishment={replenishmentTrigger.isPending}
+        onTriggerReplenishment={() => replenishmentTrigger.mutate()}
+      />
 
       <TopModels dashboard={dashboard} locale={i18n.language} loading={loading} />
     </div>

@@ -2,20 +2,27 @@ import { AlertTriangle, CheckCircle2, CirclePause, RefreshCw } from "lucide-reac
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { OperationsDTO, RouteCapacityDTO, TaskStatusDTO } from "@/features/dashboard/operations-api";
 import { cn } from "@/shared/lib/cn";
 import { formatDateTime, formatNumber } from "@/shared/lib/format";
 
-export function OperationsPanels({ value, loading, locale }: { value?: OperationsDTO; loading: boolean; locale: string }) {
+export function OperationsPanels({ value, loading, locale, triggeringReplenishment, onTriggerReplenishment }: {
+  value?: OperationsDTO;
+  loading: boolean;
+  locale: string;
+  triggeringReplenishment: boolean;
+  onTriggerReplenishment: () => void;
+}) {
   const { t } = useTranslation();
   return (
     <>
       <section className="rounded-lg bg-card p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-sm font-medium">{t("dashboardOperations.capacityTitle")}</h2>
-          <ReplenishmentStatus value={value?.replenishment} locale={locale} />
+          <ReplenishmentStatus value={value?.replenishment} locale={locale} triggering={triggeringReplenishment} onTrigger={onTriggerReplenishment} />
         </div>
         <div className="mt-4 overflow-x-auto">
           <Table className="min-w-[980px] table-fixed text-xs">
@@ -106,13 +113,21 @@ function TaskBadge({ state }: { state: TaskStatusDTO["state"] }) {
   return <Badge variant={state === "degraded" ? "destructive" : "outline"} className={cn("gap-1", state === "running" && "border-emerald-500/35 text-emerald-700 dark:text-emerald-300")}><Icon className="size-3" />{t(`dashboardOperations.${state}`)}</Badge>;
 }
 
-function ReplenishmentStatus({ value, locale }: { value?: OperationsDTO["replenishment"]; locale: string }) {
+function ReplenishmentStatus({ value, locale, triggering, onTrigger }: {
+  value?: OperationsDTO["replenishment"];
+  locale: string;
+  triggering: boolean;
+  onTrigger: () => void;
+}) {
   const { t } = useTranslation();
   if (!value) return <Spinner className="size-4" />;
   if (!value.enabled) return <Badge variant="outline" className="text-muted-foreground">{t("dashboardOperations.replenishmentDisabled")}</Badge>;
   return (
     <div className="flex flex-wrap items-center justify-end gap-2 text-[11px] text-muted-foreground">
       <Badge variant={value.state === "failed" ? "destructive" : "outline"} className="gap-1"><RefreshCw className={cn("size-3", (value.state === "starting" || value.state === "running" || value.state === "verifying") && "animate-spin")} />{t(`dashboardOperations.replenishment_${value.state}`)}</Badge>
+      <Button type="button" variant="secondary" size="sm" className="h-7 px-2 text-xs" disabled={triggering || value.state === "starting" || value.state === "running" || value.state === "verifying"} onClick={onTrigger}>
+        <RefreshCw className={cn("size-3", triggering && "animate-spin")} />{t("dashboardOperations.triggerReplenishment")}
+      </Button>
       <span>{t("dashboardOperations.dailyStarts", { used: value.dailyStarts, limit: value.maxDailyRegistrations })}</span>
       {value.predictive ? <span>{t("dashboardOperations.predictiveThreshold", { eligible: value.targetEligible, rpm: formatNumber(value.minDemandRPM, locale, 1), minutes: formatNumber(value.demandWindowSeconds / 60, locale, 0) })}</span> : null}
       {value.nextAttemptAt ? <span>{formatDateTime(value.nextAttemptAt, locale)}</span> : null}

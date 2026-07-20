@@ -355,6 +355,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		MinDemandRPM: cfg.Registration.AutoReplenish.MinDemandRPM, DemandWindow: cfg.Registration.AutoReplenish.DemandWindow.Value(),
 		VerificationGrace: cfg.Registration.AutoReplenish.VerificationGrace.Value(),
 	})
+	operationsService.SetReplenishmentTrigger(replenisher)
 	var notifySettings func(context.Context)
 	if settingsBus != nil {
 		notifySettings = func(notifyCtx context.Context) {

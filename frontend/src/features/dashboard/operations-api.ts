@@ -89,6 +89,12 @@ const decodeOperations = createObjectDecoder<OperationsDTO>("operations", {
   }),
 });
 
+const decodeReplenishmentTrigger = createObjectDecoder<{ triggered: boolean }>("replenishment trigger", { triggered: isBoolean });
+
 export function getOperations(): Promise<OperationsDTO> {
-  return apiRequest("/api/admin/v1/operations", {}, decodeOperations);
+	return apiRequest("/api/admin/v1/operations", {}, decodeOperations);
+}
+
+export function triggerReplenishment(): Promise<{ triggered: boolean }> {
+	return apiRequest("/api/admin/v1/operations/replenishment/trigger", { method: "POST" }, decodeReplenishmentTrigger);
 }
