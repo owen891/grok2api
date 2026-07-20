@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	latestReleaseAPI = "https://api.github.com/repos/chenyme/grok2api/releases/latest"
-	maxReleaseBytes  = 1 << 20
-	maxNotesRunes    = 4096
+	latestManifestURL = "https://raw.githubusercontent.com/owen891/grok2api/main/frontend/public/release-manifest.json"
+	maxReleaseBytes   = 1 << 20
+	maxNotesRunes     = 4096
 )
 
 type Status string
@@ -122,43 +122,72 @@ type latestRelease struct {
 }
 
 func (s *Service) fetchLatest(ctx context.Context) (latestRelease, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, latestReleaseAPI, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, latestManifestURL, nil)
 	if err != nil {
 		return latestRelease{}, err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Cache-Control", "no-cache")
 	request.Header.Set("User-Agent", "grok2api/"+s.current)
-	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	response, err := s.client.Do(request)
 	if err != nil {
-		return latestRelease{}, fmt.Errorf("检查 GitHub Release 失败: %w", err)
+		return latestRelease{}, fmt.Errorf("检查 GitHub 版本清单失败: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return latestRelease{}, fmt.Errorf("GitHub Release 检查失败（HTTP %d）", response.StatusCode)
+		return latestRelease{}, fmt.Errorf("GitHub 版本清单检查失败（HTTP %d）", response.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxReleaseBytes+1))
 	if err != nil {
-		return latestRelease{}, fmt.Errorf("读取 GitHub Release 响应: %w", err)
+		return latestRelease{}, fmt.Errorf("读取 GitHub 版本清单响应: %w", err)
 	}
 	if len(data) > maxReleaseBytes {
-		return latestRelease{}, errors.New("GitHub Release 响应超过安全上限")
+		return latestRelease{}, errors.New("GitHub 版本清单响应超过安全上限")
 	}
 	var payload struct {
-		Tag  string `json:"tag_name"`
-		Body string `json:"body"`
+		Latest        string `json:"latest"`
+		RepositoryURL string `json:"repositoryURL"`
+		Releases      []struct {
+			Version string `json:"version"`
+			Entries []struct {
+				ZH string `json:"zh"`
+				EN string `json:"en"`
+			} `json:"entries"`
+		} `json:"releases"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return latestRelease{}, fmt.Errorf("解析 GitHub Release 响应: %w", err)
+		return latestRelease{}, fmt.Errorf("解析 GitHub 版本清单响应: %w", err)
 	}
-	payload.Tag = strings.TrimSpace(payload.Tag)
-	if payload.Tag == "" {
-		return latestRelease{}, errors.New("GitHub Release 未返回版本号")
+	payload.Latest = strings.TrimSpace(payload.Latest)
+	if payload.Latest == "" {
+		return latestRelease{}, errors.New("GitHub 版本清单未返回版本号")
+	}
+	notes := ""
+	for _, release := range payload.Releases {
+		if strings.TrimSpace(release.Version) != payload.Latest {
+			continue
+		}
+		entries := make([]string, 0, len(release.Entries))
+		for _, entry := range release.Entries {
+			text := strings.TrimSpace(entry.ZH)
+			if text == "" {
+				text = strings.TrimSpace(entry.EN)
+			}
+			if text != "" {
+				entries = append(entries, "- "+text)
+			}
+		}
+		notes = strings.Join(entries, "\n")
+		break
+	}
+	repositoryURL := strings.TrimRight(strings.TrimSpace(payload.RepositoryURL), "/")
+	if repositoryURL == "" {
+		repositoryURL = "https://github.com/owen891/grok2api"
 	}
 	return latestRelease{
-		Tag:   payload.Tag,
-		URL:   "https://github.com/chenyme/grok2api/releases/tag/" + url.PathEscape(payload.Tag),
-		Notes: truncateRunes(strings.TrimSpace(payload.Body), maxNotesRunes),
+		Tag:   payload.Latest,
+		URL:   repositoryURL + "/tree/" + url.PathEscape(payload.Latest),
+		Notes: truncateRunes(notes, maxNotesRunes),
 	}, nil
 }
 

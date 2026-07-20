@@ -16,7 +16,8 @@ export function useVersionUpdate() {
     setChecking(true);
     setCheckFailed(false);
     try {
-      setManifest(await loadManifest());
+      // Manual checks must bypass the manifest bundled into an older image.
+      setManifest(await loadManifest(true));
     } catch {
       setCheckFailed(true);
     } finally {
@@ -27,6 +28,13 @@ export function useVersionUpdate() {
   useEffect(() => {
     let active = true;
     void loadManifest()
+      .then((bundled) => {
+        if (active) {
+          setManifest(bundled);
+          setCheckFailed(false);
+        }
+        return loadManifest(true);
+      })
       .then((next) => {
         if (!active) return;
         setManifest(next);
@@ -69,16 +77,21 @@ function shouldShowReminder(latestVersion: string): boolean {
   return true;
 }
 
-async function loadManifest(): Promise<ReleaseManifest> {
-  // Use the bundled manifest first so a stale GitHub Raw edge cache cannot
-  // make the running application report an older release than its build.
-  const candidates = ["/release-manifest.json", `${remoteManifestURL}?t=${Date.now()}`];
+async function loadManifest(preferRemote = false): Promise<ReleaseManifest> {
+  // Startup should render immediately from the image; an explicit check must
+  // query the repository first so an older image cannot hide a newer release.
+  const remote = `${remoteManifestURL}?t=${Date.now()}`;
+  const candidates = preferRemote ? [remote, "/release-manifest.json"] : ["/release-manifest.json", remote];
   let lastError: unknown;
   for (const url of candidates) {
     try {
       const response = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error(`Release manifest HTTP ${response.status}`);
-      return decodeReleaseManifest(await response.json());
+      const manifest = decodeReleaseManifest(await response.json());
+      if (compareVersions(manifest.latest, currentVersion) < 0) {
+        throw new Error(`Release manifest ${manifest.latest} is older than ${currentVersion}`);
+      }
+      return manifest;
     } catch (error) {
       lastError = error;
     }

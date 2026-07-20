@@ -336,6 +336,7 @@ docker compose exec grok2api sh -lc 'command -v chromium; test -f /app/registrat
 | `No module named DrissionPage` | 旧 runtime 部署需追加 `compose.browser-registration.legacy.yml`，并重新拉取 browser 镜像 |
 | `Chromium ... not found` | 当前仍在运行标准 protocol 镜像，拉取并切换 `main-browser` |
 | `DISPLAY is empty and Xvfb is unavailable` | 浏览器模式需使用 `REGISTRATION_BROWSER_MODE=xvfb` 的 browser overlay |
+| `v3.0.9` 点击“检查更新”仍显示 `v3.0.9` | 该版本会优先读取镜像内旧清单，需先按原 Compose 文件组合执行一次 `pull` 和 `up -d --force-recreate`；升级到 `v3.1.1` 后恢复远端检查 |
 
 修改源码后的本地镜像构建：
 

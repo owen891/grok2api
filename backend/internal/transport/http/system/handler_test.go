@@ -45,7 +45,7 @@ func TestHandlerVersionEndpoints(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.1","body":"Release notes"}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"latest":"v3.0.1","repositoryURL":"https://github.com/owen891/grok2api","releases":[{"version":"v3.0.1","entries":[{"type":"fix","zh":"修复说明","en":"Release notes"}]}]}`)),
 		}, nil
 	})}
 	service := updatecheckapp.NewService("v3.0.0", client)

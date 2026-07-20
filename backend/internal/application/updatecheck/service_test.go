@@ -19,10 +19,10 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 
 func TestCheckFindsLatestRelease(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		if request.URL.String() != latestReleaseAPI || request.Header.Get("User-Agent") != "grok2api/v3.0.0" {
+		if request.URL.String() != latestManifestURL || request.Header.Get("User-Agent") != "grok2api/v3.0.0" {
 			t.Fatalf("request = %#v", request)
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.1","body":"Release notes"}`)), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"latest":"v3.0.1","repositoryURL":"https://github.com/owen891/grok2api","releases":[{"version":"v3.0.1","entries":[{"type":"fix","zh":"修复说明","en":"Release notes"}]}]}`)), Header: make(http.Header)}, nil
 	})}
 	service := NewService("v3.0.0", client)
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
@@ -31,7 +31,7 @@ func TestCheckFindsLatestRelease(t *testing.T) {
 	if snapshot.Status != StatusUpdateAvailable || !snapshot.UpdateAvailable || snapshot.LatestVersion != "v3.0.1" || snapshot.CheckedAt == nil || !snapshot.CheckedAt.Equal(now) {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
-	if snapshot.ReleaseURL != "https://github.com/chenyme/grok2api/releases/tag/v3.0.1" || snapshot.ReleaseNotes != "Release notes" {
+	if snapshot.ReleaseURL != "https://github.com/owen891/grok2api/tree/v3.0.1" || snapshot.ReleaseNotes != "- 修复说明" {
 		t.Fatalf("release = %#v", snapshot)
 	}
 }
@@ -42,7 +42,7 @@ func TestCheckFailureKeepsLastSuccessfulRelease(t *testing.T) {
 		if fail {
 			return nil, errors.New("network down")
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.0","body":"Stable"}`)), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"latest":"v3.0.0","repositoryURL":"https://github.com/owen891/grok2api","releases":[{"version":"v3.0.0","entries":[{"type":"ops","zh":"稳定版","en":"Stable"}]}]}`)), Header: make(http.Header)}, nil
 	})}
 	service := NewService("v3.0.0", client)
 	first := service.Check(context.Background())
@@ -63,7 +63,7 @@ func TestCheckIgnoresCallerCancellationForSharedRefresh(t *testing.T) {
 		mu.Lock()
 		requests++
 		mu.Unlock()
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v3.0.1","body":"Release notes"}`)), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"latest":"v3.0.1","repositoryURL":"https://github.com/owen891/grok2api","releases":[{"version":"v3.0.1","entries":[{"type":"fix","zh":"修复说明","en":"Release notes"}]}]}`)), Header: make(http.Header)}, nil
 	})}
 	service := NewService("v3.0.0", client)
 	cancelled, cancel := context.WithCancel(context.Background())

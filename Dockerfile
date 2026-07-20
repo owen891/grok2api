@@ -105,6 +105,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
 
 COPY --from=backend-builder --chmod=0755 /out/grok2api /app/grok2api
+COPY VERSION /app/VERSION
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
 COPY --from=registration-builder /opt/registration-venv /opt/registration-venv
 COPY registration/protocol_register_cli.py registration/protocol_spool.py registration/yyds_mail.py registration/local_turnstile.py registration/clearance_provider.py /app/registration/
