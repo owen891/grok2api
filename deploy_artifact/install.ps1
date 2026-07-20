@@ -32,17 +32,52 @@ switch ($runtime) {
 
 Write-Host "Registration runtime: $runtime"
 docker compose @composeArgs config --quiet
+if ($LASTEXITCODE -ne 0) { throw 'docker compose config failed.' }
+$services = @(docker compose @composeArgs config --services)
+if ($LASTEXITCODE -ne 0) { throw 'docker compose service discovery failed.' }
+if ($runtime -in @('protocol', 'both') -and 'grok-turnstile-solver' -notin $services) {
+    throw 'Protocol registration selected, but grok-turnstile-solver is missing from the Compose project.'
+}
 docker compose @composeArgs pull
+if ($LASTEXITCODE -ne 0) { throw 'docker compose pull failed.' }
 docker compose @composeArgs up -d
+if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed.' }
+
+function Test-ProtocolRuntime {
+    if ($runtime -notin @('protocol', 'both')) { return $true }
+    $probe = "import urllib.request; response = urllib.request.urlopen('http://grok-turnstile-solver:5072/health', timeout=5); assert 200 <= response.status < 300"
+    docker compose @composeArgs exec -T grok2api /opt/registration-venv/bin/python -c $probe 2>$null | Out-Null
+    return $LASTEXITCODE -eq 0
+}
+
+function Wait-ProtocolRuntime {
+    if ($runtime -notin @('protocol', 'both')) { return $true }
+    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        if (Test-ProtocolRuntime) { return $true }
+        Start-Sleep -Seconds 3
+    }
+    return $false
+}
 
 $port = 8000
 $envFile = Get-Content .env | Where-Object { $_ -match '^GROK2API_PORT=' }
 if ($envFile) { $port = ($envFile -split '=', 2)[1] }
 for ($i = 0; $i -lt 30; $i++) {
+    $healthy = $false
     try {
         $response = Invoke-WebRequest "http://127.0.0.1:$port/healthz" -UseBasicParsing -TimeoutSec 2
-        if ($response.StatusCode -eq 200) { Write-Host 'grok2api is healthy'; exit 0 }
-    } catch { Start-Sleep -Seconds 2 }
+        $healthy = $response.StatusCode -eq 200
+    } catch { }
+    if ($healthy) {
+        if (-not (Wait-ProtocolRuntime)) {
+            docker compose @composeArgs logs --tail=100 grok2api grok-turnstile-solver
+            Write-Error 'grok2api is healthy, but grok-turnstile-solver is not reachable from its Compose network.'
+            exit 1
+        }
+        Write-Host 'grok2api is healthy'
+        exit 0
+    }
+    Start-Sleep -Seconds 2
 }
 Write-Error "grok2api did not become healthy. Inspect: docker compose $($composeArgs -join ' ') logs --tail=100 grok2api"
 exit 1

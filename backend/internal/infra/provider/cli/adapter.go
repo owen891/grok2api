@@ -53,12 +53,9 @@ type Adapter struct {
 func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, MaxConnsPerHost: 256, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
 	httpClient := &http.Client{Transport: transport}
-	// 官方 CLI 使用持久化机器身份。网关不采集机器指纹，改为每个后端
-	// 进程生成一个随机 128-bit hex 身份，在进程生命周期内保持稳定。
-	agentID, err := randomHex(16)
-	if err != nil {
-		agentID = uuid.NewString()
-	}
+	// Keep one official-format agent identity for the process lifetime without
+	// collecting a host fingerprint.
+	agentID := uuid.NewString()
 	return &Adapter{
 		cfg: cfg, http: httpClient, oauth: newOAuthClient(httpClient), cipher: cipher, base: transport,
 		agentID: agentID, modelsETags: make(map[uint64]string),
@@ -540,10 +537,7 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 	req.Header.Set("x-grok-client-mode", "headless")
 
 	if trace {
-		requestID, err := randomHex(16)
-		if err != nil {
-			return err
-		}
+		requestID := uuid.NewString()
 		sessionID, err := grokSessionID(promptCacheKey)
 		if err != nil {
 			return err
@@ -553,19 +547,12 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 		if sessionID != "" {
 			req.Header.Set("x-grok-session-id", sessionID)
 			req.Header.Set("x-grok-conv-id", sessionID)
-			req.Header.Set("x-grok-conversation-id", sessionID)
-			req.Header.Set("x-grok-session-id-legacy", sessionID)
 		}
 		req.Header.Set("x-grok-req-id", requestID)
-		req.Header.Set("x-grok-client-surface", "tui")
-		req.Header.Set("x-grok-client-name", cfg.ClientIdentifier)
-		req.Header.Set("x-grok-request-id", requestID)
-		req.Header.Set("tracestate", "")
 		// 网关无法从无状态 API 请求可靠恢复 CLI prompt index；该字段在
 		// 官方协议中可选，因此不伪造 x-grok-turn-idx。
 		if credential.UserID != "" {
 			req.Header.Set("x-grok-user-id", credential.UserID)
-			req.Header.Set("x-userid", credential.UserID)
 		}
 		traceID, traceErr := randomHex(16)
 		if traceErr != nil {

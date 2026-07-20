@@ -895,7 +895,10 @@ def tempmail_lol_get_oai_code(
     resend_callback=None,
 ):
     deadline = time.time() + timeout
-    seen_ids = set()
+    started_at = time.time()
+    seen_versions = set()
+    received_message_count = 0
+    next_status_at = started_at + 15
     next_resend_at = time.time() + 45
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -911,17 +914,14 @@ def tempmail_lol_get_oai_code(
             messages = tempmail_lol_get_messages(token)
         except Exception as exc:
             if log_callback:
-                log_callback(f"[Debug] TempMail.lol inbox fetch failed: {type(exc).__name__}")
+                log_callback(f"[Debug] TempMail.lol inbox fetch failed: {type(exc).__name__}: {exc}")
             sleep_with_cancel(poll_interval, cancel_callback)
             continue
+        received_message_count = max(received_message_count, len(messages))
         for message in messages:
             message_id = str(message.get("id") or message.get("message_id") or message.get("date") or "")
-            if message_id and message_id in seen_ids:
-                continue
-            if message_id:
-                seen_ids.add(message_id)
             recipients = message.get("to") or []
-            if isinstance(recipients, dict):
+            if isinstance(recipients, (str, bytes, dict)):
                 recipients = [recipients]
             recipient_values = []
             for item in recipients:
@@ -932,13 +932,28 @@ def tempmail_lol_get_oai_code(
             if recipient_values and email.lower() not in recipient_values:
                 continue
             body, subject = tempmail_lol_message_text(message)
+            version = (message_id, subject, len(body))
+            if version in seen_versions:
+                continue
+            seen_versions.add(version)
+            if log_callback:
+                log_callback(f"[Debug] TempMail.lol received email: {subject or '(no subject)'}")
             code = extract_verification_code(body, subject)
             if code:
                 if log_callback:
                     log_callback(f"[*] TempMail.lol received xAI confirmation code: {code}")
                 return code
+        now = time.time()
+        if log_callback and now >= next_status_at:
+            waited = int(now - started_at)
+            if messages:
+                log_callback(f"[*] TempMail.lol waiting for verification code: {len(messages)} email(s), {waited}s elapsed")
+            else:
+                log_callback(f"[*] TempMail.lol waiting for verification code: inbox empty, {waited}s elapsed")
+            next_status_at = now + 15
         sleep_with_cancel(poll_interval, cancel_callback)
-    raise Exception(f"TempMail.lol did not receive a verification email within {timeout}s")
+    detail = "inbox remained empty" if received_message_count == 0 else f"received {received_message_count} email(s) without a recognizable code"
+    raise Exception(f"TempMail.lol did not receive a verification email within {timeout}s ({detail})")
 
 
 def get_yyds_api_key():
@@ -1150,7 +1165,11 @@ def pick_domain(api_key=None):
         return verified_private[0]["domain"]
     public = [d for d in domains if d.get("isVerified")]
     if public:
-        return public[0]["domain"]
+        less_obvious = [
+            d for d in public
+            if not any(marker in str(d.get("domain") or "").lower() for marker in ("duckmail", "tempmail", "mail"))
+        ]
+        return secrets.choice(less_obvious or public)["domain"]
     raise Exception("DuckMail 没有已验证的可用域名")
 
 
@@ -1486,22 +1505,25 @@ def get_oai_code(
 
 
 def extract_verification_code(text, subject=""):
-    if subject:
-        match = re.search(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI", subject, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    match = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", text, re.IGNORECASE)
+    subject = str(subject or "")
+    text = str(text or "")
+
+    # xAI places the current 3-3 code in the subject. Check it before HTML,
+    # where CSS tokens such as "per-100" can look like verification codes.
+    match = re.search(r"(?<![A-Z0-9])([A-Z0-9]{3}-[A-Z0-9]{3})(?![A-Z0-9])", subject, re.IGNORECASE)
     if match:
-        return match.group(1)
+        return match.group(1).upper()
+
+    blob = f"{subject}\n{text}"
     patterns = [
-        r"verification\s+code[:\s]+(\d{4,8})",
-        r"your\s+code[:\s]+(\d{4,8})",
-        r"confirm(?:ation)?\s+code[:\s]+(\d{4,8})",
+        r"(?:confirmation|verification|verify|your)\s+code\s*(?:is\s*)?[:=\-]?\s*([A-Z0-9]{3}-[A-Z0-9]{3}|[A-Z0-9]{4,8})",
+        r"(?:code|otp|\u9a8c\u8bc1\u7801)\s*(?:is\s*)?[:=\-]?\s*([A-Z0-9]{3}-[A-Z0-9]{3}|[A-Z0-9]{4,8})",
+        r"\b([A-Z0-9]{3}-[A-Z0-9]{3}|[A-Z0-9]{4,8})\b\s+is\s+your\s+code",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(pattern, blob, re.IGNORECASE)
         if match:
-            return match.group(1)
+            return match.group(1).upper()
     return None
 
 
@@ -1810,9 +1832,9 @@ def start_browser(log_callback=None):
     raise Exception(f"浏览器启动失败，已重试4次: {last_exc}")
 
 
-def stop_browser():
+def stop_browser(timeout=None):
     """Quit current-thread Chromium (full process exit + del_data)."""
-    TabPool.release_tab()
+    return TabPool.release_tab(timeout=timeout)
 
 
 def prepare_browser_for_next_account(log_callback=None, force_recycle: bool = False):
@@ -1968,7 +1990,7 @@ def fill_email_and_submit(timeout=15, log_callback=None, cancel_callback=None, e
     if not email or not dev_token:
         raise Exception("获取邮箱失败")
     if log_callback:
-        log_callback(f"[*] 宸插垱寤洪偖绠? {email}")
+        log_callback(f"[*] 已创建邮箱: {email}")
     deadline = time.time() + timeout
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)

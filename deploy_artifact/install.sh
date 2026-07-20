@@ -46,8 +46,41 @@ compose() {
 
 echo "Registration runtime: $runtime"
 compose config --quiet
+if [ "$runtime" = "protocol" ] || [ "$runtime" = "both" ]; then
+  if ! compose config --services | grep -qx 'grok-turnstile-solver'; then
+    echo "protocol registration selected, but grok-turnstile-solver is missing from the Compose project" >&2
+    exit 2
+  fi
+fi
 compose pull
 compose up -d
+
+check_protocol_runtime() {
+  if [ "$runtime" != "protocol" ] && [ "$runtime" != "both" ]; then
+    return 0
+  fi
+  if ! compose exec -T grok2api /opt/registration-venv/bin/python -c \
+      "import urllib.request; response = urllib.request.urlopen('http://grok-turnstile-solver:5072/health', timeout=5); assert 200 <= response.status < 300" \
+      >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+wait_protocol_runtime() {
+  if [ "$runtime" != "protocol" ] && [ "$runtime" != "both" ]; then
+    return 0
+  fi
+  attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    if check_protocol_runtime; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 3
+  done
+  return 1
+}
 
 port=${GROK2API_PORT:-}
 if [ -z "$port" ]; then
@@ -57,6 +90,11 @@ port=${port:-8000}
 attempt=0
 while [ "$attempt" -lt 30 ]; do
   if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+    if ! wait_protocol_runtime; then
+      echo "grok2api is healthy, but grok-turnstile-solver is not reachable from its Compose network" >&2
+      compose logs --tail=100 grok2api grok-turnstile-solver >&2 || true
+      exit 1
+    fi
     echo "grok2api is healthy"
     exit 0
   fi

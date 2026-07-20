@@ -577,6 +577,8 @@ export function ChatPage() {
           clientKey: clientSecret,
           model,
           messages: history,
+          promptCacheKey: sessionId,
+          turnIndex: Math.max(0, history.filter((message) => message.role === "user").length - 1),
           signal: controller.signal,
           onDelta: (piece) => {
             setPrefs((prev) => ({

@@ -25,11 +25,13 @@ import (
 const (
 	maxRegistrationLogLines    = 500
 	maxRegistrationLogBytes    = 5 << 20
+	protocolPreflightTimeout   = 20 * time.Second
+	browserPreflightTimeout    = 75 * time.Second
 	registrationEngineProtocol = "protocol"
 	registrationEngineBrowser  = "browser"
 	defaultCaptchaEndpoint     = "http://grok-turnstile-solver:5072"
 	defaultBrowserSignupURL    = "https://accounts.x.ai/sign-up?redirect=grok-com"
-	defaultBrowserEgressURL    = "https://api64.ipify.org?format=json"
+	defaultBrowserEgressURL    = "https://api.ipify.org?format=json"
 )
 
 var (
@@ -106,6 +108,15 @@ type PreflightResult struct {
 	OK     bool             `json:"ok"`
 	Checks []PreflightCheck `json:"checks"`
 	Config WorkerSettings   `json:"config"`
+}
+
+type workerPreflightCheck struct {
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+}
+
+type workerPreflightPayload struct {
+	Checks map[string]workerPreflightCheck `json:"checks"`
 }
 
 type PreflightError struct {
@@ -561,7 +572,14 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	add("spool", spoolErr == nil && directoryWritable(filepath.Join(c.config.SpoolPath, "incoming")), c.config.SpoolPath)
 	add("logDirectory", ensurePrivateDirectory(c.dataPath()) == nil, c.logPath())
 
-	settings := WorkerSettings{}
+	// Keep the response schema valid even when the worker config cannot be
+	// loaded. The preflight endpoint intentionally returns 200 with `ok:false`
+	// so the UI can render individual checks; nil slices would serialize as
+	// `null` and make the frontend reject the otherwise useful response.
+	settings := WorkerSettings{
+		EmailSources:           []EmailSourceSettings{},
+		EmailProviderFallbacks: []string{},
+	}
 	configValue := map[string]any{}
 	if configErr == nil {
 		configValue, _ = readJSONMap(c.config.ConfigPath)
@@ -697,8 +715,13 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 
 	dependencyOK := false
 	dependencyDetail := "worker unavailable"
+	workerChecks := map[string]workerPreflightCheck{}
 	if commandErr == nil && workErr == nil {
-		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		probeTimeout := protocolPreflightTimeout
+		if engine == registrationEngineBrowser {
+			probeTimeout = browserPreflightTimeout
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		defer cancel()
 		probeArguments := []string{
 			"--preflight", "--config", c.config.ConfigPath,
@@ -712,25 +735,65 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		probe.Dir = c.config.WorkDir
 		probe.Env = c.workerEnvironmentForEngine(engine)
 		output, err := probe.CombinedOutput()
+		if engine == registrationEngineBrowser {
+			workerChecks = parseWorkerPreflightChecks(output)
+		}
 		dependencyOK = err == nil
 		dependencyDetail = "ready"
 		if err != nil {
 			dependencyDetail = strings.TrimSpace(string(output))
+			if errors.Is(probeCtx.Err(), context.Canceled) {
+				dependencyDetail = "worker preflight canceled"
+			} else if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+				dependencyDetail = fmt.Sprintf("worker preflight timed out after %s", probeTimeout)
+			}
 			if dependencyDetail == "" {
 				dependencyDetail = err.Error()
 			}
 		}
 	}
-	add("dependencies", dependencyOK, truncateText(dependencyDetail, 500))
 	if engine == registrationEngineBrowser {
-		add("grokRegisterImport", dependencyOK, truncateText(dependencyDetail, 500))
-		add("drissionPage", dependencyOK, truncateText(dependencyDetail, 500))
+		workerDetail := dependencyDetail
+		if len(workerChecks) > 0 {
+			workerDetail = "browser worker preflight failed"
+			if dependencyOK {
+				workerDetail = "ready"
+			}
+		}
+		add("dependencies", dependencyOK, truncateText(workerDetail, 500))
+		addWorkerPreflightCheck := func(name, workerName string) {
+			check, ok := workerChecks[workerName]
+			if !ok {
+				add(name, dependencyOK, truncateText(dependencyDetail, 500))
+				return
+			}
+			add(name, check.OK, truncateText(check.Detail, 500))
+		}
+		addWorkerPreflightCheck("grokRegisterImport", "grok_register_ttk")
+		addWorkerPreflightCheck("drissionPage", "DrissionPage")
+	} else {
+		add("dependencies", dependencyOK, truncateText(dependencyDetail, 500))
 	}
 	result := PreflightResult{OK: true, Checks: checks, Config: settings}
 	for _, check := range checks {
 		result.OK = result.OK && check.OK
 	}
 	return result
+}
+
+func parseWorkerPreflightChecks(output []byte) map[string]workerPreflightCheck {
+	lines := strings.Split(string(output), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var payload workerPreflightPayload
+		if json.Unmarshal([]byte(line), &payload) == nil && payload.Checks != nil {
+			return payload.Checks
+		}
+	}
+	return nil
 }
 
 func oauthConfigReady(config map[string]any) bool {
@@ -2049,8 +2112,10 @@ func boolValue(value any, fallback bool) bool {
 func stringSlice(value any) []string {
 	items, ok := value.([]any)
 	if !ok {
-		if strings, ok := value.([]string); ok {
-			return append([]string(nil), strings...)
+		if values, ok := value.([]string); ok {
+			result := make([]string, len(values))
+			copy(result, values)
+			return result
 		}
 		return []string{}
 	}

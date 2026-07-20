@@ -284,6 +284,25 @@ func TestEmailSourcesMigratePersistAndDriveProviderOrder(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsKeepsEmptyFallbacksAsJSONArray(t *testing.T) {
+	controller := newControllerTest(t, 0)
+	empty := []string{}
+	settings, err := controller.UpdateSettings(WorkerSettingsPatch{EmailProviderFallbacks: &empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.EmailProviderFallbacks == nil {
+		t.Fatal("emailProviderFallbacks is nil; JSON would contain null")
+	}
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"emailProviderFallbacks":[]`) {
+		t.Fatalf("settings response does not preserve an empty JSON array: %s", encoded)
+	}
+}
+
 func TestEmailSourcesRejectDuplicateTypesAndAllDisabled(t *testing.T) {
 	value := map[string]any{"email_provider": "yyds"}
 	duplicate := []EmailSourceSettings{
@@ -649,6 +668,17 @@ func preflightCheck(checks []PreflightCheck, name string) (PreflightCheck, bool)
 	return PreflightCheck{}, false
 }
 
+func TestParseWorkerPreflightChecksUsesStructuredBrowserOutput(t *testing.T) {
+	output := []byte("browser warning\n{\"ok\":false,\"checks\":{\"grok_register_ttk\":{\"ok\":true,\"detail\":\"/app/grok_register_ttk.py\"},\"DrissionPage\":{\"ok\":false,\"detail\":\"module missing\"}}}\n")
+	checks := parseWorkerPreflightChecks(output)
+	if check := checks["grok_register_ttk"]; !check.OK || !strings.Contains(check.Detail, "grok_register_ttk.py") {
+		t.Fatalf("grok_register_ttk check = %+v", check)
+	}
+	if check := checks["DrissionPage"]; check.OK || check.Detail != "module missing" {
+		t.Fatalf("DrissionPage check = %+v", check)
+	}
+}
+
 func TestWorkerEnvironmentInheritsAndOverridesBrowserConfig(t *testing.T) {
 	t.Setenv("REGISTRATION_BROWSER_MODE", "xvfb")
 	t.Setenv("REGISTRATION_BROWSER_PATH", "/usr/bin/chromium")
@@ -708,6 +738,31 @@ func TestDisabledControllerReportsUnavailableWithoutTouchingWorkerFiles(t *testi
 	}
 	if _, err := controller.Settings(); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("disabled controller Settings() error = %v", err)
+	}
+}
+
+func TestPreflightConfigKeepsArrayShapeWhenWorkerConfigCannotLoad(t *testing.T) {
+	controller := newControllerTest(t, 0)
+	if err := os.MkdirAll(controller.config.ConfigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	preflight := controller.Preflight(context.Background())
+	if preflight.OK {
+		t.Fatalf("preflight unexpectedly passed: %+v", preflight)
+	}
+	if preflight.Config.EmailSources == nil {
+		t.Fatal("preflight config emailSources is nil; JSON would contain null")
+	}
+	if preflight.Config.EmailProviderFallbacks == nil {
+		t.Fatal("preflight config emailProviderFallbacks is nil; JSON would contain null")
+	}
+	encoded, err := json.Marshal(preflight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"emailSources":[]`) || !strings.Contains(string(encoded), `"emailProviderFallbacks":[]`) {
+		t.Fatalf("preflight config arrays are not stable: %s", encoded)
 	}
 }
 

@@ -184,7 +184,9 @@ def browser_registration_page_ready(config: dict[str, Any]) -> tuple[bool, str]:
         # Do not use requests/urllib here. Cloudflare can accept their HTTP
         # fingerprint while rejecting the actual Chromium registration tab.
         browser, page = reg.start_browser()
-        page.get(target)
+        loaded = page.get(target, timeout=15)
+        if loaded is False:
+            return False, f"{target}: Chromium page load timed out after 15s"
         time.sleep(0.8)
         current_url = str(getattr(page, "url", "") or "")
         title = str(getattr(page, "title", "") or "").lower()
@@ -201,7 +203,9 @@ def browser_registration_page_ready(config: dict[str, Any]) -> tuple[bool, str]:
     page_text = title + "\n" + html
     if "attention required! | cloudflare" in page_text or "/cdn-cgi/challenge-platform/" in page_text:
         return False, f"{target}: Cloudflare challenge ({current_url or 'no final URL'})"
-    if current_url and "accounts.x.ai" not in current_url.lower():
+    if not current_url:
+        return False, f"{target}: Chromium returned no final URL"
+    if "accounts.x.ai" not in current_url.lower():
         return False, f"{target}: unexpected final URL {current_url[:180]}"
     return True, f"{target}: Chromium loaded {current_url or target}"
 
@@ -773,14 +777,16 @@ def register_one(
         except Exception as exc:
             log(worker_id, f"[Debug] grok2api: {exc}")
 
-        # Release / recycle register browser BEFORE mint so peak browsers ≈ R+M
+        # Inline mint starts a standalone Chromium. Bound cleanup time so a
+        # wedged browser cannot prevent OAuth from starting.
         try:
-            reg.prepare_browser_for_next_account(log_callback=lambda m: log(worker_id, m))
-        except Exception:
-            try:
-                reg.stop_browser()
-            except Exception:
-                pass
+            if do_mint_inline:
+                if not reg.stop_browser(timeout=10):
+                    log(worker_id, "[!] Chromium cleanup timed out; continuing with CPA mint")
+            else:
+                reg.prepare_browser_for_next_account(log_callback=lambda m: log(worker_id, m))
+        except Exception as exc:
+            log(worker_id, f"[Debug] register browser cleanup failed: {exc}")
 
         if account_type == "web":
             import_started = time.monotonic()

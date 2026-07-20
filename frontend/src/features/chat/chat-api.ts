@@ -77,16 +77,22 @@ export async function streamChatCompletion(options: {
   clientKey: string;
   model: string;
   messages: ChatCompletionMessage[];
+  promptCacheKey: string;
+  turnIndex: number;
   signal?: AbortSignal;
   onDelta: (text: string) => void;
 }): Promise<string> {
   const response = await fetch(joinUrl("/v1/chat/completions"), {
     method: "POST",
-    headers: authHeaders(options.clientKey, { "Content-Type": "application/json" }),
+    headers: authHeaders(options.clientKey, {
+      "Content-Type": "application/json",
+      "x-grok-turn-idx": String(options.turnIndex),
+    }),
     body: JSON.stringify({
       model: options.model,
       stream: true,
       messages: options.messages,
+      prompt_cache_key: options.promptCacheKey,
     }),
     signal: options.signal,
   });

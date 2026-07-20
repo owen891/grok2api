@@ -26,6 +26,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify deployment manifests
+        shell: bash
+        run: |
+          bash -n deploy_artifact/install.sh
+          env_file=deploy_artifact/.env.production.example
+          production=deploy_artifact/compose.production.yml
+          docker compose --env-file "$env_file" -f "$production" config --quiet
+          docker compose --env-file "$env_file" -f "$production" -f deploy_artifact/compose.registration.yml config --quiet
+          docker compose --env-file "$env_file" -f "$production" -f deploy_artifact/compose.browser-registration.yml config --quiet
+          docker compose --env-file "$env_file" -f "$production" -f deploy_artifact/compose.registration.yml -f deploy_artifact/compose.browser-registration.yml config --quiet
+
+      - name: Verify PowerShell installer syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'deploy_artifact/install.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

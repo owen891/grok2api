@@ -51,6 +51,16 @@ func TestCallBrowserWorker(t *testing.T) {
 	}
 }
 
+func TestBrowserWorkerRequestMarshalsImageMode(t *testing.T) {
+	data, err := json.Marshal(browserWorkerRequest{ImageMode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"imageMode":true`)) {
+		t.Fatalf("request JSON = %s", data)
+	}
+}
+
 func TestCallBrowserWorkerPropagatesError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusBadGateway)

@@ -188,10 +188,17 @@ class TabPool:
         return int(getattr(cls._thread_local, "served", 0) or 0)
 
     @classmethod
-    def release_tab(cls):
-        """Quit current thread Chromium and unregister it."""
+    def release_tab(cls, timeout: float | None = None) -> bool:
+        """Detach current-thread Chromium and quit it within an optional timeout."""
         browser = getattr(cls._thread_local, "browser", None)
-        if browser is not None:
+        cls._thread_local.browser = None
+        cls._thread_local.tab = None
+        cls._thread_local.served = 0
+        cls._unregister(browser)
+        if browser is None:
+            return True
+
+        def quit_browser():
             try:
                 browser.quit(del_data=True)
             except TypeError:
@@ -201,10 +208,15 @@ class TabPool:
                     pass
             except Exception:
                 pass
-            cls._unregister(browser)
-        cls._thread_local.browser = None
-        cls._thread_local.tab = None
-        cls._thread_local.served = 0
+
+        if timeout is None:
+            quit_browser()
+            return True
+
+        thread = threading.Thread(target=quit_browser, daemon=True, name="chromium-cleanup")
+        thread.start()
+        thread.join(timeout=max(0.0, float(timeout)))
+        return not thread.is_alive()
 
     @classmethod
     def refresh_tab(cls):
@@ -238,5 +250,4 @@ class TabPool:
     @classmethod
     def get_browser(cls):
         return getattr(cls._thread_local, "browser", None)
-
 

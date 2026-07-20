@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/owen891/grok2api/backend/internal/domain/account"
 	"github.com/owen891/grok2api/backend/internal/infra/provider"
 	"github.com/owen891/grok2api/backend/internal/infra/provider/conversation"
@@ -38,22 +40,26 @@ func TestForwardResponseMatchesGrokBuildHeadersAndPreservesReasoning(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("x-grok-client-version") != "0.2.99" || r.Header.Get("x-grok-client-identifier") != "grok-shell" || r.Header.Get("User-Agent") != "grok-shell/0.2.99 (linux; x86_64)" || r.Header.Get("x-grok-conv-id") != expectedSessionID {
+		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" || r.Header.Get("x-authenticateresponse") != "authenticate-response" || r.Header.Get("x-grok-client-version") != "0.2.99" || r.Header.Get("x-grok-client-identifier") != "grok-shell" || r.Header.Get("x-grok-client-mode") != "headless" || r.Header.Get("User-Agent") != "grok-shell/0.2.99 (linux; x86_64)" {
 			t.Fatalf("headers = %#v", r.Header)
 		}
 		requestID := r.Header.Get("x-grok-req-id")
 		sessionID := r.Header.Get("x-grok-session-id")
-		if r.Header.Get("x-grok-client-surface") != "tui" || r.Header.Get("x-grok-client-name") != "grok-shell" || len(r.Header.Get("x-grok-agent-id")) != 32 || len(sessionID) != 36 {
+		requestUUID, requestErr := uuid.Parse(requestID)
+		agentUUID, agentErr := uuid.Parse(r.Header.Get("x-grok-agent-id"))
+		if requestErr != nil || requestUUID.Version() != uuid.Version(4) || agentErr != nil || agentUUID.Version() != uuid.Version(4) || sessionID != expectedSessionID || r.Header.Get("x-grok-conv-id") != sessionID {
 			t.Fatalf("client identity headers = %#v", r.Header)
 		}
-		if r.Header.Get("x-grok-conversation-id") != expectedSessionID || len(requestID) != 32 || r.Header.Get("x-grok-request-id") != requestID || r.Header.Get("x-grok-session-id-legacy") != sessionID {
-			t.Fatalf("request identity headers = %#v", r.Header)
+		for _, legacy := range []string{"x-grok-client-surface", "x-grok-client-name", "x-grok-conversation-id", "x-grok-session-id-legacy", "x-grok-request-id"} {
+			if r.Header.Get(legacy) != "" {
+				t.Fatalf("legacy header %s = %q", legacy, r.Header.Get(legacy))
+			}
 		}
-		if r.Header.Get("x-userid") != "user-123" || r.Header.Get("x-grok-turn-idx") != "7" || r.Header.Get("Accept-Encoding") != "gzip" || len(r.Header.Get("traceparent")) != 55 {
+		if r.Header.Get("x-grok-user-id") != "user-123" || r.Header.Get("x-userid") != "" || r.Header.Get("x-grok-turn-idx") != "7" || r.Header.Get("Accept-Encoding") != "gzip" || len(r.Header.Get("traceparent")) != 55 {
 			t.Fatalf("protocol headers = %#v", r.Header)
 		}
-		if values, ok := r.Header["Tracestate"]; !ok || len(values) != 1 || values[0] != "" {
-			t.Fatalf("tracestate = %#v", values)
+		if _, ok := r.Header["Tracestate"]; ok {
+			t.Fatalf("tracestate = %#v", r.Header["Tracestate"])
 		}
 		body, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(body, &captured); err != nil {

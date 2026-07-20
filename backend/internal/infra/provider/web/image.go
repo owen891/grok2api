@@ -1218,6 +1218,9 @@ func (a *Adapter) imageBytes(ctx context.Context, credential account.Credential,
 			return nil, err
 		}
 	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(image.URL)), "data:") {
+		return decodeImageBlob(image.URL)
+	}
 	return a.downloadImage(ctx, credential, image.URL)
 }
 
@@ -1500,7 +1503,7 @@ func imageIDFromURL(value string) string {
 }
 
 func absoluteAssetURL(value string) string {
-	if strings.HasPrefix(value, "https://") {
+	if strings.HasPrefix(value, "https://") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "data:") {
 		return value
 	}
 	return "https://assets.grok.com/" + strings.TrimPrefix(value, "/")

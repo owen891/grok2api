@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlunparse
 
 MAX_REQUEST_BYTES = 2 << 20
 MAX_RESPONSE_BYTES = 20 << 20
+MIN_FINAL_IMAGE_DIMENSION = 768
 ALLOWED_CF_COOKIES = {"cf_clearance", "__cf_bm", "_cfuvid"}
 CHALLENGE_MARKERS = (
     "just a moment",
@@ -534,6 +535,202 @@ class BrowserSession:
         ]
         return ("\n".join(json.dumps(frame, ensure_ascii=False, separators=(",", ":")) for frame in frames) + "\n").encode()
 
+    @staticmethod
+    def _synthetic_image_response(conversation_id: str, image_url: str) -> bytes:
+        frames = [
+            {"result": {"conversation": {"conversationId": conversation_id}}},
+            {"result": {"response": {
+                "streamingImageGenerationResponse": {
+                    "imageUrl": image_url,
+                    "progress": 100,
+                    "isFinal": True,
+                },
+                "messageTag": "final",
+            }}},
+        ]
+        body = ("\n".join(json.dumps(frame, ensure_ascii=False, separators=(",", ":")) for frame in frames) + "\n").encode()
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise RuntimeError("Generated image response exceeds 20 MiB")
+        return body
+
+    @staticmethod
+    def _image_sources(driver) -> list[dict]:
+        values = driver.execute_script(
+            """
+            return Array.from(document.querySelectorAll('img[alt="Generated image"]')).map((image) => ({
+              src: image.currentSrc || image.src || '',
+              complete: Boolean(image.complete),
+              width: Number(image.naturalWidth || 0),
+              height: Number(image.naturalHeight || 0)
+            }));
+            """
+        )
+        return values if isinstance(values, list) else []
+
+    @staticmethod
+    def _materialize_image_url(driver, source: str) -> str:
+        source = str(source or "").strip()
+        if source.startswith("data:") or source.startswith("https://"):
+            return source
+        if not source.startswith("blob:"):
+            raise RuntimeError("Grok Imagine returned an unsupported image URL")
+        driver.set_script_timeout(30)
+        result = driver.execute_async_script(
+            """
+            const source = arguments[0];
+            const done = arguments[arguments.length - 1];
+            fetch(source).then((response) => {
+              if (!response.ok) throw new Error(`image fetch returned ${response.status}`);
+              return response.blob();
+            }).then((blob) => {
+              const reader = new FileReader();
+              reader.onload = () => done({value: String(reader.result || '')});
+              reader.onerror = () => done({error: 'image blob could not be read'});
+              reader.readAsDataURL(blob);
+            }).catch((error) => done({error: String(error && error.message || error)}));
+            """,
+            source,
+        )
+        if not isinstance(result, dict) or result.get("error") or not str(result.get("value", "")).startswith("data:"):
+            raise RuntimeError("Grok Imagine image blob could not be materialized")
+        return str(result["value"])
+
+    def _select_image_aspect_ratio(self, driver, ratio: str) -> None:
+        control = self._first_visible(driver, "button[aria-label='Aspect Ratio'], [aria-label='Aspect Ratio']")
+        if control is None:
+            raise RuntimeError("Grok Imagine aspect-ratio control was not found")
+        if str(control.text or "").strip().split("\n", 1)[0] == ratio:
+            return
+        control.click()
+        time.sleep(0.35)
+        from selenium.webdriver.common.by import By
+
+        for item in driver.find_elements(
+            By.CSS_SELECTOR,
+            "[role='menuitem'], [role='menuitemradio'], [role='option'], button, li",
+        ):
+            try:
+                if not item.is_displayed():
+                    continue
+                text = str(item.text or "").strip().split("\n", 1)[0]
+                if text != ratio:
+                    continue
+                item.click()
+                time.sleep(0.35)
+                break
+            except Exception:
+                continue
+        if str(control.text or "").strip().split("\n", 1)[0] != ratio:
+            raise RuntimeError(f"Grok Imagine aspect ratio could not be set to {ratio}")
+
+    def _composer_image_fetch(self, driver, value: dict) -> dict:
+        """Generate through Grok's native Imagine UI so the app signs the request."""
+        payload = value["payload"]
+        message = str(payload.get("message", "")).strip()
+        attachments = payload.get("fileAttachments") or payload.get("imageAttachments")
+        if not message:
+            raise RuntimeError("Grok Imagine request is missing a prompt")
+        if attachments:
+            raise RuntimeError("Grok Imagine worker does not support attachments")
+
+        target = str(value["baseURL"]).rstrip("/") + "/imagine"
+        driver.get(target)
+        self.last_navigation = time.monotonic()
+        self._wait_for_challenge(driver, 45)
+        self._dismiss_tos_gate(driver)
+
+        deadline = time.monotonic() + min(int(value["timeoutSeconds"]), 1800)
+        input_box = None
+        while input_box is None and time.monotonic() < deadline:
+            input_box = self._first_visible(
+                driver,
+                "[aria-label='Ask Grok anything'][contenteditable='true'], "
+                "textarea[aria-label='Ask Grok anything'], [aria-label='Ask Grok anything'], "
+                "textarea[placeholder], div[contenteditable='true'], [role='textbox']",
+            )
+            if input_box is None:
+                time.sleep(0.2)
+        if input_box is None:
+            raise RuntimeError("Grok Imagine prompt input was not found")
+
+        self._select_image_aspect_ratio(driver, "1:1")
+        before_images = self._image_sources(driver)
+        before_sources = {str(item.get("src", "")) for item in before_images if isinstance(item, dict)}
+        before_count = len(before_images)
+        try:
+            input_box.clear()
+        except Exception:
+            pass
+        driver.execute_script(
+            """
+            const input = arguments[0];
+            const value = arguments[1];
+            input.focus();
+            if ('value' in input) {
+              const setter = Object.getOwnPropertyDescriptor(
+                input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+                'value'
+              );
+              if (setter && setter.set) setter.set.call(input, value);
+              else input.value = value;
+            } else {
+              input.textContent = value;
+            }
+            try {
+              input.dispatchEvent(new InputEvent('input', {
+                bubbles: true, data: value, inputType: 'insertText'
+              }));
+            } catch (_) {
+              input.dispatchEvent(new Event('input', {bubbles: true}));
+            }
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            input_box,
+            message,
+        )
+        self._click_composer_submit(driver, deadline)
+
+        candidate = ""
+        stable_since = 0.0
+        while time.monotonic() < deadline:
+            images = self._image_sources(driver)
+            selected = ""
+            for index in range(len(images) - 1, -1, -1):
+                item = images[index]
+                if not isinstance(item, dict):
+                    continue
+                source = str(item.get("src", "")).strip()
+                width = int(item.get("width", 0))
+                height = int(item.get("height", 0))
+                if (
+                    not source
+                    or not item.get("complete")
+                    or min(width, height) < MIN_FINAL_IMAGE_DIMENSION
+                ):
+                    continue
+                if index >= before_count or source not in before_sources:
+                    selected = source
+                    break
+            if selected:
+                if selected != candidate:
+                    candidate = selected
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= 2.0:
+                    break
+            time.sleep(0.25)
+        if not candidate:
+            raise RuntimeError("Grok Imagine did not return a final-resolution generated image")
+
+        image_url = self._materialize_image_url(driver, candidate)
+        logging.info("Grok Imagine final image captured (source=%s)", image_url.split(":", 1)[0])
+        body = self._synthetic_image_response("composer_image_" + uuid.uuid4().hex, image_url)
+        return {
+            "statusCode": HTTPStatus.OK,
+            "status": "200 OK",
+            "headers": {"content-type": "application/x-ndjson"},
+            "bodyBase64": base64.b64encode(body).decode(),
+        }
+
     def _composer_fetch(self, driver, value: dict) -> dict:
         """Send the prompt through Grok's own UI and return its response stream.
 
@@ -652,12 +849,22 @@ class BrowserSession:
             driver = self._ensure_driver(value)
             try:
                 self._prepare_page(driver, value)
-                result = self._composer_fetch(driver, value) if value.get("useComposer") else self._fetch(driver, value)
+                if value.get("imageMode"):
+                    result = self._composer_image_fetch(driver, value)
+                elif value.get("useComposer"):
+                    result = self._composer_fetch(driver, value)
+                else:
+                    result = self._fetch(driver, value)
                 if is_antibot_result(result):
                     driver.get(value["baseURL"] + "/")
                     self.last_navigation = time.monotonic()
                     self._wait_for_challenge(driver, 45)
-                    result = self._fetch(driver, value)
+                    if value.get("imageMode"):
+                        result = self._composer_image_fetch(driver, value)
+                    elif value.get("useComposer"):
+                        result = self._composer_fetch(driver, value)
+                    else:
+                        result = self._fetch(driver, value)
                 state = self._cloudflare_state(driver)
                 result.update(state)
                 self._remember_cloudflare_state(value, state)
@@ -778,7 +985,8 @@ class Handler(BaseHTTPRequestHandler):
                 allowed_paths,
                 allow_conversation_responses=self.path == "/v1/grok/chat",
             )
-            value["useComposer"] = self.path == "/v1/grok/chat"
+            value["imageMode"] = self.path == "/v1/grok/fast-image"
+            value["useComposer"] = self.path in {"/v1/grok/chat", "/v1/grok/fast-image"}
             if self.path == "/v1/grok/warm":
                 state = SESSION.warm(value)
                 self._json(HTTPStatus.OK, {"ok": True, **state})

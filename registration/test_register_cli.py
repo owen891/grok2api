@@ -81,6 +81,42 @@ class ResolveMintWorkersTests(unittest.TestCase):
     def test_browser_factory_accepts_cpa_proxy_override(self):
         self.assertIn("proxy_override", inspect.signature(worker._patched_create_browser_options).parameters)
 
+    def test_tempmail_lol_accepts_string_recipient(self):
+        address = "user@example.test"
+        messages = [{
+            "date": 1,
+            "to": address,
+            "subject": "ABC-123 xAI verification code",
+            "body": "Use ABC-123 to verify your account.",
+        }]
+
+        with patch.object(worker.reg, "tempmail_lol_get_messages", return_value=messages):
+            code = worker.reg.tempmail_lol_get_oai_code("token", address, timeout=1, poll_interval=0)
+
+        self.assertEqual("ABC-123", code)
+
+    def test_verification_code_prefers_subject_over_html_css_token(self):
+        code = worker.reg.extract_verification_code(
+            ".helper-100 { padding: 0 } verification code: DQK-VOQ",
+            "SpaceXAI confirmation code: DQK-VOQ",
+        )
+
+        self.assertEqual("DQK-VOQ", code)
+
+    def test_duckmail_prefers_less_obvious_verified_domain(self):
+        domains = [
+            {"domain": "duckmail.sbs", "isVerified": True},
+            {"domain": "baldur.edu.kg", "isVerified": True},
+        ]
+
+        with (
+            patch.object(worker.reg, "get_domains", return_value=domains),
+            patch.object(worker.reg.secrets, "choice", side_effect=lambda values: values[0]),
+        ):
+            domain = worker.reg.pick_domain()
+
+        self.assertEqual("baldur.edu.kg", domain)
+
     def test_browser_preflight_checks_static_runtime_without_starting_chromium(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -104,7 +140,7 @@ class ResolveMintWorkersTests(unittest.TestCase):
             title = "Attention Required! | Cloudflare"
             html = "<title>Attention Required! | Cloudflare</title>"
 
-            def get(self, _url):
+            def get(self, _url, timeout=None):
                 return True
 
         with (
@@ -122,7 +158,7 @@ class ResolveMintWorkersTests(unittest.TestCase):
             title = "blocked"
             html = ""
 
-            def get(self, _url):
+            def get(self, _url, timeout=None):
                 return True
 
         with (
@@ -133,6 +169,26 @@ class ResolveMintWorkersTests(unittest.TestCase):
             ok, detail = worker.browser_registration_page_ready({"signup_url": "https://accounts.x.ai/sign-up"})
         self.assertFalse(ok)
         self.assertIn("unexpected final URL", detail)
+
+    def test_browser_registration_page_preflight_rejects_page_load_timeout(self):
+        class Page:
+            url = ""
+            title = ""
+            html = ""
+
+            def get(self, _url, timeout=None):
+                self.timeout = timeout
+                return False
+
+        page = Page()
+        with (
+            patch.object(worker.reg, "start_browser", return_value=(object(), page)),
+            patch.object(worker.reg, "stop_browser"),
+        ):
+            ok, detail = worker.browser_registration_page_ready({"signup_url": "https://accounts.x.ai/sign-up"})
+        self.assertFalse(ok)
+        self.assertEqual(15, page.timeout)
+        self.assertIn("timed out after 15s", detail)
 
     def test_exit_code_requires_the_requested_number_of_usable_accounts(self):
         partial = {"reg_success": 1, "mint_success": 1}

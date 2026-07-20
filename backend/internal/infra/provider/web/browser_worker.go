@@ -44,6 +44,7 @@ type browserWorkerRequest struct {
 	StatsigSignerURL string         `json:"statsigSignerURL"`
 	RequestID        string         `json:"requestID"`
 	TraceID          string         `json:"traceID,omitempty"`
+	ImageMode        bool           `json:"imageMode,omitempty"`
 	TimeoutSeconds   int            `json:"timeoutSeconds"`
 	Payload          map[string]any `json:"payload"`
 }
@@ -116,8 +117,8 @@ func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, cred
 		value := browserWorkerRequest{
 			BaseURL: cfg.BaseURL, Endpoint: endpoint, ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent,
 			CloudflareCookie: lease.CFCookies, SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL,
-			RequestID: newRequestUUID(), TraceID: requestID, TimeoutSeconds: cfg.ImageTimeoutSeconds,
-			Payload: buildWebChatPayload("Drawing: "+prompt, spec.Mode, nil),
+			RequestID: newRequestUUID(), TraceID: requestID, ImageMode: true, TimeoutSeconds: cfg.ImageTimeoutSeconds,
+			Payload: buildWebChatPayload(prompt, spec.Mode, nil),
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.ImageTimeoutSeconds+30)*time.Second)
 		result, err = callBrowserWorker(requestCtx, cfg.BrowserWorkerURL, value)
