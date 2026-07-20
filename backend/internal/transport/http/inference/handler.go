@@ -196,6 +196,7 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
+		GrokTurnIndex:   c.GetHeader("x-grok-turn-idx"),
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -236,6 +237,7 @@ func (h *Handler) createMessage(c *gin.Context) {
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
+		GrokTurnIndex:   c.GetHeader("x-grok-turn-idx"),
 	})
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
@@ -713,6 +715,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body), PreviousResponseID: request.PreviousResponseID,
+		GrokTurnIndex: c.GetHeader("x-grok-turn-idx"),
 	}
 	var result *gateway.Result
 	if compact {

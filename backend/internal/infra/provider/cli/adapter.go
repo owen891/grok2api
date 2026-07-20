@@ -248,6 +248,7 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 	if err := a.applyHeaders(req, request.Credential, accessToken, request.Model, request.PromptCacheKey, true); err != nil {
 		return nil, "", err
 	}
+	applyGrokTurnIndexHeader(req, request.GrokTurnIndex)
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -265,6 +266,35 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 		return nil, "", err
 	}
 	return resp, req.URL.String(), nil
+}
+
+// applyGrokTurnIndexHeader forwards a real Grok Shell turn only when this
+// request already has a stable Grok session identity.
+func applyGrokTurnIndexHeader(request *http.Request, value string) {
+	if request.Header.Get("x-grok-session-id") == "" {
+		return
+	}
+	if turnIndex := normalizeGrokTurnIndex(value); turnIndex != "" {
+		request.Header.Set("x-grok-turn-idx", turnIndex)
+	}
+}
+
+// normalizeGrokTurnIndex accepts only the non-negative decimal uint64 values
+// issued by the official client. Invalid values are omitted rather than guessed.
+func normalizeGrokTurnIndex(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 20 {
+		return ""
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return ""
+		}
+	}
+	if _, err := strconv.ParseUint(value, 10, 64); err != nil {
+		return ""
+	}
+	return value
 }
 
 // invalidResponsesResponse 将本地协议校验错误转换为标准 OpenAI 错误响应，避免触发上游账号重试。

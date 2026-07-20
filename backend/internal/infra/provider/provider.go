@@ -155,10 +155,13 @@ type ResponseResourceRequest struct {
 	Body           []byte
 	Model          string
 	PromptCacheKey string
-	IdempotencyID  string
-	Streaming      bool
-	NormalizeBody  bool
-	Operation      string
+	// GrokTurnIndex is a client-supplied Grok Shell turn. The Build adapter
+	// validates it before forwarding and the gateway must never fabricate it.
+	GrokTurnIndex string
+	IdempotencyID string
+	Streaming     bool
+	NormalizeBody bool
+	Operation     string
 }
 
 // Response 表示尚未写入下游的上游响应。

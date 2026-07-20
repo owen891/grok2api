@@ -78,6 +78,7 @@ Grok Build Responses 默认保持原生转发，只执行以下改写：
 
 - 将公开模型别名替换为上游模型 ID。
 - 显式 `prompt_cache_key` 优先作为会话种子；未提供时会读取 Claude Code、Codex、Sub2API 常见的 session/conversation Header 与请求字段，再以 system/instructions 和首条 user 消息生成 soft session 兜底。Build 路由会生成跨协议、跨模型稳定且按客户端密钥隔离的上游会话 ID，写入 `prompt_cache_key` 与 CLI 会话 Header；账号 affinity 另按上游模型隔离，保证同一会话粘在同一账号且不发生跨租户碰撞。
+- 对携带原始 Grok Shell 回合号的客户端，非负十进制 `x-grok-turn-idx` 会在稳定会话存在时原样透传到 Build；网关不会根据无状态 OpenAI/Anthropic 请求推算或伪造该值。
 - 将旧式 `response_format` 映射到 Responses `text.format`；`json_schema` 会展开旧的 `json_schema` 包装层。
 - 保留未知字段、encrypted reasoning，以及除下述明确受限的新工具项外的标准 Responses input item。
 

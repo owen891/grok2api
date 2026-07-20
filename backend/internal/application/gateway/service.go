@@ -55,7 +55,10 @@ type Input struct {
 	PromptCacheKey     string
 	PromptCacheSeed    string
 	PreviousResponseID string
-	Operation          audit.Operation
+	// GrokTurnIndex is forwarded only when supplied by a real Grok Shell client.
+	// The gateway never derives or increments it.
+	GrokTurnIndex string
+	Operation     audit.Operation
 }
 
 type Usage struct {
@@ -394,7 +397,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	var lastFailure *UpstreamFailure
 	forwardResponse := func(credential accountdomain.Credential) (*provider.Response, error) {
 		started := time.Now()
-		response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
+		response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
 		elapsed := time.Since(started)
 		timing.markUpstream(elapsed)
 		if err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
