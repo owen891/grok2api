@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
 )
 
 type fallbackMarkerStub struct {

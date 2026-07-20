@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/accountinspection"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/accountinspection"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestAccountInspectionRepositoryClaimsRecoversAndCompletes(t *testing.T) {

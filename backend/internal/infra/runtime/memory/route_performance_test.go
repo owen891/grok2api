@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestRoutePerformanceStoreOpensCircuitAndResetsFailureWindow(t *testing.T) {

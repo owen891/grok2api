@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/media"
+	"github.com/owen891/grok2api/backend/internal/domain/media"
 )
 
 // MediaAssetListQuery 表示管理端媒体资源列表的查询条件。

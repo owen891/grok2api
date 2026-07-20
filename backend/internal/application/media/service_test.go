@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	localmedia "github.com/chenyme/grok2api/backend/internal/infra/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
+	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
+	localmedia "github.com/owen891/grok2api/backend/internal/infra/media"
+	"github.com/owen891/grok2api/backend/internal/infra/persistence/relational"
 )
 
 const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="

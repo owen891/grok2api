@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	registrationdomain "github.com/chenyme/grok2api/backend/internal/domain/registration"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	registrationdomain "github.com/owen891/grok2api/backend/internal/domain/registration"
+	"github.com/owen891/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )

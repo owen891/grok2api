@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
 )
 
 const (

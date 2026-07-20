@@ -1,9 +1,9 @@
 package console
 
 import (
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
 )
 
 // Definition 集中声明 Grok Console 的稳定能力边界；Console 保持无状态 Responses 语义。

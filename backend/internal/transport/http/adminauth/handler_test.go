@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	adminapp "github.com/chenyme/grok2api/backend/internal/application/adminauth"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	adminapp "github.com/owen891/grok2api/backend/internal/application/adminauth"
+	"github.com/owen891/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
 	"github.com/gin-gonic/gin"
 )
 

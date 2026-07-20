@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
 )
 
 func buildHeaders(token string, lease *infraegress.Lease, contentType string) http.Header {

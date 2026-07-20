@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	adminapp "github.com/chenyme/grok2api/backend/internal/application/adminauth"
-	admindomain "github.com/chenyme/grok2api/backend/internal/domain/admin"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
-	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
+	adminapp "github.com/owen891/grok2api/backend/internal/application/adminauth"
+	admindomain "github.com/owen891/grok2api/backend/internal/domain/admin"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
+	"github.com/owen891/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
 

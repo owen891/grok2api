@@ -1,7 +1,18 @@
 {
-  "latest": "v3.1.1",
+  "latest": "v3.1.2",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.1.2",
+      "date": "2026-07-20",
+      "entries": [
+        {
+          "type": "ops",
+          "zh": "统一 Fork 的 Go module、登录入口、部署说明、镜像示例和 Issue 模板到 owen891/grok2api。",
+          "en": "Unified the fork's Go module, login link, deployment docs, image examples, and issue template on owen891/grok2api."
+        }
+      ]
+    },
     {
       "version": "v3.1.1",
       "date": "2026-07-20",

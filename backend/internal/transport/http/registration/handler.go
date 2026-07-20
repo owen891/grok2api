@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strconv"
 
-	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	registrationapp "github.com/owen891/grok2api/backend/internal/application/registration"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

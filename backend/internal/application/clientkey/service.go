@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	clientkeydomain "github.com/owen891/grok2api/backend/internal/domain/clientkey"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 var (

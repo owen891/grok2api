@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	settingsdomain "github.com/owen891/grok2api/backend/internal/domain/settings"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
 )
 

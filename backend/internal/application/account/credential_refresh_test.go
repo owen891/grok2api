@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/runtime/memory"
 )
 
 func TestEnsureCredentialReusesRotatedTokenAndThrottlesForcedRefresh(t *testing.T) {

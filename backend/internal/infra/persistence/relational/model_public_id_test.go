@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
 )
 
 func TestModelNamespaceMigrationPreservesAliasesRouteIDsAndKeyPermissions(t *testing.T) {

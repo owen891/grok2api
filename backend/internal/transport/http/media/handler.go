@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
-	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	mediaapp "github.com/owen891/grok2api/backend/internal/application/media"
+	"github.com/owen891/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

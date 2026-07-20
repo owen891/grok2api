@@ -3,7 +3,7 @@ package inference
 import (
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
 )
 
 // ResponseOwnership 记录上游 Response 资源所属账号，不保存请求或响应正文。

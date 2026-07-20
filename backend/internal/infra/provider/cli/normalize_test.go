@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
 )
 
 func TestNormalizeResponsesRequest(t *testing.T) {

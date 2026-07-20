@@ -29,7 +29,7 @@
 
 发布 CI 产出两个镜像：
 
-- `ghcr.io/chenyme/grok2api:<version>`：应用、前端、registration worker、Python venv。
+- `ghcr.io/owen891/grok2api:<version>`：应用、前端、registration worker、Python venv。
 - `ghcr.io/owen891/grok2api:solver-<pin>`：现有 solver 镜像，继续固定 digest/tag。
 
 生产 Compose 只保留镜像引用，不再使用 `build:` 和 release bind mounts。应用只挂载：

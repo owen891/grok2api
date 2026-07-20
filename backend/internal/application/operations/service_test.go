@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	registrationdomain "github.com/chenyme/grok2api/backend/internal/domain/registration"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	registrationdomain "github.com/owen891/grok2api/backend/internal/domain/registration"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestSnapshotUsesSelectorCapacityAndReplenishmentState(t *testing.T) {

@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	modelapp "github.com/owen891/grok2api/backend/internal/application/model"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

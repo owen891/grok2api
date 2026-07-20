@@ -16,14 +16,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	"github.com/chenyme/grok2api/backend/internal/application/gateway"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	inspectiondomain "github.com/chenyme/grok2api/backend/internal/domain/accountinspection"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/observability"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	accountapp "github.com/owen891/grok2api/backend/internal/application/account"
+	"github.com/owen891/grok2api/backend/internal/application/gateway"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	inspectiondomain "github.com/owen891/grok2api/backend/internal/domain/accountinspection"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/observability"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 const (

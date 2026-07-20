@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	settingsapp "github.com/owen891/grok2api/backend/internal/application/settings"
 )
 
 func TestSettingsDTOExcludesBrowserIdentityFields(t *testing.T) {

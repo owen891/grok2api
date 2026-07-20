@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	operationsapp "github.com/chenyme/grok2api/backend/internal/application/operations"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	operationsapp "github.com/owen891/grok2api/backend/internal/application/operations"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
 	"github.com/gin-gonic/gin"
 )
 

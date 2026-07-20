@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
 )
 
 // Definition 集中声明 Grok Build 的稳定能力边界；上游协议细节仍由 Adapter 维护。

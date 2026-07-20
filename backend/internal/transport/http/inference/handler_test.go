@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/application/gateway"
-	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
+	"github.com/owen891/grok2api/backend/internal/application/gateway"
+	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
 	"github.com/gin-gonic/gin"
 )
 

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
-	"github.com/chenyme/grok2api/backend/internal/pkg/signerurl"
+	clientkeydomain "github.com/owen891/grok2api/backend/internal/domain/clientkey"
+	"github.com/owen891/grok2api/backend/internal/pkg/signerurl"
 	"gopkg.in/yaml.v3"
 )
 

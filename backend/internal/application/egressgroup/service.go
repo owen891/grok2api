@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
-	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	egressapp "github.com/owen891/grok2api/backend/internal/application/egress"
+	domain "github.com/owen891/grok2api/backend/internal/domain/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 var (

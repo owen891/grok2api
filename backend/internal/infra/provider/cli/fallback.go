@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/infra/config"
 )
 
 // FallbackMarker 同时提供 Build XAI 回退资格判定与回退标记持久化。

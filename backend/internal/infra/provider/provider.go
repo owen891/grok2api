@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/media"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
 )
 
 var (

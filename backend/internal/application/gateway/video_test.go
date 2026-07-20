@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/audit"
-	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/audit"
+	"github.com/owen891/grok2api/backend/internal/domain/media"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestRecoverVideoJobsRetriesUsageWithoutRegeneratingVideo(t *testing.T) {

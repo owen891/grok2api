@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
+	inferencedomain "github.com/owen891/grok2api/backend/internal/domain/inference"
 )
 
 // ResponseRepository 定义 Responses 资源与上游账号归属的持久化边界。

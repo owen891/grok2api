@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"time"
 
-	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
-	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
-	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	auditapp "github.com/owen891/grok2api/backend/internal/application/audit"
+	auditdomain "github.com/owen891/grok2api/backend/internal/domain/audit"
+	"github.com/owen891/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

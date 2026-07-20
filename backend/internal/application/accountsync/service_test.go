@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	accountapp "github.com/owen891/grok2api/backend/internal/application/account"
+	modelapp "github.com/owen891/grok2api/backend/internal/application/model"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
 )
 
 type billingStub struct {

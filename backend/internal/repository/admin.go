@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/admin"
+	"github.com/owen891/grok2api/backend/internal/domain/admin"
 )
 
 // AdminRepository 定义管理员持久化能力。

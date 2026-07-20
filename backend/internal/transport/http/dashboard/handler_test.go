@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	dashboardapp "github.com/chenyme/grok2api/backend/internal/application/dashboard"
-	dashboarddomain "github.com/chenyme/grok2api/backend/internal/domain/dashboard"
+	dashboardapp "github.com/owen891/grok2api/backend/internal/application/dashboard"
+	dashboarddomain "github.com/owen891/grok2api/backend/internal/domain/dashboard"
 	"github.com/gin-gonic/gin"
 )
 

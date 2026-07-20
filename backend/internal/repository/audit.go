@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/audit"
+	"github.com/owen891/grok2api/backend/internal/domain/audit"
 )
 
 // AuditRepository 定义请求元数据审计持久化能力。

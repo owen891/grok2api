@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
 )
 
 func TestNewQuotaViewFreeUsesObservedRollingTokens(t *testing.T) {

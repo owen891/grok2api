@@ -11,10 +11,10 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 
-	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	memoryruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	domain "github.com/owen891/grok2api/backend/internal/domain/egress"
+	memoryruntime "github.com/owen891/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestDirectFallbackRebuildsClientAfterAntiBotRejection(t *testing.T) {

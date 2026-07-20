@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	domainegress "github.com/owen891/grok2api/backend/internal/domain/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
 )
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/admin"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/admin"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 var (

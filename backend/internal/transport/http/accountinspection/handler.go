@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"time"
 
-	inspectionapp "github.com/chenyme/grok2api/backend/internal/application/accountinspection"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	inspectiondomain "github.com/chenyme/grok2api/backend/internal/domain/accountinspection"
-	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	inspectionapp "github.com/owen891/grok2api/backend/internal/application/accountinspection"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	inspectiondomain "github.com/owen891/grok2api/backend/internal/domain/accountinspection"
+	"github.com/owen891/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

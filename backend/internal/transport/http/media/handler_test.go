@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
-	localmedia "github.com/chenyme/grok2api/backend/internal/infra/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
+	mediaapp "github.com/owen891/grok2api/backend/internal/application/media"
+	localmedia "github.com/owen891/grok2api/backend/internal/infra/media"
+	"github.com/owen891/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/gin-gonic/gin"
 )
 

@@ -17,11 +17,11 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	domainegress "github.com/owen891/grok2api/backend/internal/domain/egress"
+	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
+	"github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
 )
 
 const (

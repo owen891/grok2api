@@ -14,7 +14,7 @@ import (
 	"os"
 	_ "time/tzdata"
 
-	"github.com/chenyme/grok2api/backend/internal/cli"
+	"github.com/owen891/grok2api/backend/internal/cli"
 )
 
 func main() {

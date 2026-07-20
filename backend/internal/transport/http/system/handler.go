@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	updatecheckapp "github.com/owen891/grok2api/backend/internal/application/updatecheck"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

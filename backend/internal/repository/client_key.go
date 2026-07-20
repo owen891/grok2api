@@ -3,7 +3,7 @@ package repository
 import (
 	"context"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	"github.com/owen891/grok2api/backend/internal/domain/clientkey"
 )
 
 // ClientKeyRepository 定义下游 API Key 持久化能力。

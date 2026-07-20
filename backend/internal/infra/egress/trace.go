@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	domain "github.com/owen891/grok2api/backend/internal/domain/egress"
 )
 
 // Selection 是一次上游请求实际选择的出口快照。它只包含可安全写入审计的元数据，

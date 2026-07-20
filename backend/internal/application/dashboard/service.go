@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	dashboarddomain "github.com/chenyme/grok2api/backend/internal/domain/dashboard"
-	"github.com/chenyme/grok2api/backend/internal/pkg/resultcache"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	dashboarddomain "github.com/owen891/grok2api/backend/internal/domain/dashboard"
+	"github.com/owen891/grok2api/backend/internal/pkg/resultcache"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 var ErrInvalidPeriod = errors.New("Dashboard 时间范围无效")

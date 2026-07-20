@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/audit"
+	"github.com/owen891/grok2api/backend/internal/domain/audit"
 )
 
 func TestRewriteAliasedModelAppliesOperationEffort(t *testing.T) {

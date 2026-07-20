@@ -19,11 +19,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
 )
 
 type Config struct {

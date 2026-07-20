@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
-	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
-	"github.com/chenyme/grok2api/backend/internal/pkg/resultcache"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	auditdomain "github.com/owen891/grok2api/backend/internal/domain/audit"
+	"github.com/owen891/grok2api/backend/internal/pkg/batch"
+	"github.com/owen891/grok2api/backend/internal/pkg/resultcache"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 var (

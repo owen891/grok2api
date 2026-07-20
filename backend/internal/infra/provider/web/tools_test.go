@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/owen891/grok2api/backend/internal/infra/provider/conversation"
 )
 
 func TestParseToolConfigurationSupportsChatAndResponsesSchemas(t *testing.T) {

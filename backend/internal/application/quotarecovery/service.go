@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/pkg/batch"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 const (

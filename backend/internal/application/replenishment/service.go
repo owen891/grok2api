@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	registrationdomain "github.com/chenyme/grok2api/backend/internal/domain/registration"
-	"github.com/chenyme/grok2api/backend/internal/observability"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	registrationapp "github.com/owen891/grok2api/backend/internal/application/registration"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	registrationdomain "github.com/owen891/grok2api/backend/internal/domain/registration"
+	"github.com/owen891/grok2api/backend/internal/observability"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 const (

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/observability"
+	"github.com/owen891/grok2api/backend/internal/observability"
 )
 
 func TestReadinessEndpointReturnsStructuredDegradedStateAsReady(t *testing.T) {

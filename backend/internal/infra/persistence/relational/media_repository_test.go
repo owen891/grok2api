@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestMediaJobRepositoryListMediaJobsPaginatesAndFilters(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	application "github.com/chenyme/grok2api/backend/internal/application/egress"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	application "github.com/owen891/grok2api/backend/internal/application/egress"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
 )
 
 var forbiddenBrowserIdentityFields = []string{

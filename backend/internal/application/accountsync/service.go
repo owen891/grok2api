@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	accountapp "github.com/owen891/grok2api/backend/internal/application/account"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/pkg/batch"
 	"golang.org/x/sync/singleflight"
 )
 

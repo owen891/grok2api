@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
 )
 
 func TestInitializeSchemaUpgradesProviderChecksForConsole(t *testing.T) {

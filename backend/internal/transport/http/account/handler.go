@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	accountapp "github.com/owen891/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/owen891/grok2api/backend/internal/application/accountsync"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

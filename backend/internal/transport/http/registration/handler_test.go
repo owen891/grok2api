@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
+	registrationapp "github.com/owen891/grok2api/backend/internal/application/registration"
 	"github.com/gin-gonic/gin"
 )
 

@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/audit"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/runtime/memory"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/audit"
+	"github.com/owen891/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/owen891/grok2api/backend/internal/infra/runtime/memory"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestSelectorBlocksObservedFreeRollingUsageWithoutRecoveryRow(t *testing.T) {

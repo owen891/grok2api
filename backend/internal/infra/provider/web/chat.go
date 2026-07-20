@@ -17,13 +17,13 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	domainegress "github.com/owen891/grok2api/backend/internal/domain/egress"
+	inferencedomain "github.com/owen891/grok2api/backend/internal/domain/inference"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 const webResponseTTL = 30 * 24 * time.Hour

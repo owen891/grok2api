@@ -6,10 +6,10 @@ import (
 	"strconv"
 	"time"
 
-	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
-	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	"github.com/chenyme/grok2api/backend/internal/repository"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	egressapp "github.com/owen891/grok2api/backend/internal/application/egress"
+	egressdomain "github.com/owen891/grok2api/backend/internal/domain/egress"
+	"github.com/owen891/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

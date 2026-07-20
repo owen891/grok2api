@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	dashboarddomain "github.com/chenyme/grok2api/backend/internal/domain/dashboard"
+	dashboarddomain "github.com/owen891/grok2api/backend/internal/domain/dashboard"
 	"gorm.io/gorm"
 )
 

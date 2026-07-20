@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	repositorypkg "github.com/chenyme/grok2api/backend/internal/repository"
+	settingsdomain "github.com/owen891/grok2api/backend/internal/domain/settings"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	repositorypkg "github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestRuntimeSettingsRepositoryRoundTrip(t *testing.T) {

@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/pkg/signerurl"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	domainegress "github.com/owen891/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/pkg/signerurl"
 	"golang.org/x/net/html"
 	"golang.org/x/sync/singleflight"
 )

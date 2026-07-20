@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
 )
 
 // CredentialStartupReport 汇总启动阶段的凭据调度与恢复结果。

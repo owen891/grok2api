@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/model"
 )
 
 // ModelRepository 定义公开模型路由持久化能力。

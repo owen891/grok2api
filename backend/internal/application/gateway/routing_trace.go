@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/audit"
-	"github.com/chenyme/grok2api/backend/internal/observability"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/audit"
+	"github.com/owen891/grok2api/backend/internal/observability"
 )
 
 const maxRoutingTraceEvents = 32

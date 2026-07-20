@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	registrationapp "github.com/chenyme/grok2api/backend/internal/application/registration"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	registrationdomain "github.com/chenyme/grok2api/backend/internal/domain/registration"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	registrationapp "github.com/owen891/grok2api/backend/internal/application/registration"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	registrationdomain "github.com/owen891/grok2api/backend/internal/domain/registration"
+	"github.com/owen891/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 type starterStub struct {

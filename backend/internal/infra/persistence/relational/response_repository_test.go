@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
-	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	clientkeydomain "github.com/owen891/grok2api/backend/internal/domain/clientkey"
+	inferencedomain "github.com/owen891/grok2api/backend/internal/domain/inference"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestResponseRepositoryScopesOwnershipByClientAndExpiry(t *testing.T) {

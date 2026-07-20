@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
-	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	clientkeydomain "github.com/owen891/grok2api/backend/internal/domain/clientkey"
+	"github.com/owen891/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestCreateUsesG2AClientKeyFormat(t *testing.T) {

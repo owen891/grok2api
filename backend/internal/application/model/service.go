@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	accountapp "github.com/owen891/grok2api/backend/internal/application/account"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	egressdomain "github.com/owen891/grok2api/backend/internal/domain/egress"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/pkg/batch"
+	"github.com/owen891/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
 )
 

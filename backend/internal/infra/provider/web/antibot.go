@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
 )
 
 func isAntiBotStatus(status int) bool {

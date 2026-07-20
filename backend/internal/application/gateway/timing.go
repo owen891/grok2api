@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
 )
 
 // generationTiming 只记录阶段耗时和有限枚举，不保存请求体、凭据或会话键。

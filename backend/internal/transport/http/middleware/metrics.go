@@ -3,7 +3,7 @@ package middleware
 import (
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/observability"
+	"github.com/owen891/grok2api/backend/internal/observability"
 	"github.com/gin-gonic/gin"
 )
 

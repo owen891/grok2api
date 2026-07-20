@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	domainegress "github.com/owen891/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
 )
 
 func grpcWebFrame(payload []byte) []byte {

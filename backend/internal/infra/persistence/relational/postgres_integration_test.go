@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/accountinspection"
-	registrationdomain "github.com/chenyme/grok2api/backend/internal/domain/registration"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/accountinspection"
+	registrationdomain "github.com/owen891/grok2api/backend/internal/domain/registration"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestPostgresRepositoriesIntegration(t *testing.T) {

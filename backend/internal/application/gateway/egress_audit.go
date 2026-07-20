@@ -1,11 +1,11 @@
 package gateway
 
 import (
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/domain/audit"
-	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/audit"
+	egressdomain "github.com/owen891/grok2api/backend/internal/domain/egress"
+	"github.com/owen891/grok2api/backend/internal/domain/media"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
 )
 
 func applyAuditEgress(record *audit.Record, trace *infraegress.Trace, provider accountdomain.Provider) {

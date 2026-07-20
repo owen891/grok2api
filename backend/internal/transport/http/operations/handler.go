@@ -3,8 +3,8 @@ package operations
 import (
 	"net/http"
 
-	operationsapp "github.com/chenyme/grok2api/backend/internal/application/operations"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	operationsapp "github.com/owen891/grok2api/backend/internal/application/operations"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
-	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
-	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
+	inferencedomain "github.com/owen891/grok2api/backend/internal/domain/inference"
+	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestWebResponseStateAndMediaJobRoundTrip(t *testing.T) {

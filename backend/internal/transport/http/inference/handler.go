@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
-	"github.com/chenyme/grok2api/backend/internal/application/gateway"
-	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
-	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
-	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
+	clientkeyapp "github.com/owen891/grok2api/backend/internal/application/clientkey"
+	"github.com/owen891/grok2api/backend/internal/application/gateway"
+	modelapp "github.com/owen891/grok2api/backend/internal/application/model"
+	clientkeydomain "github.com/owen891/grok2api/backend/internal/domain/clientkey"
+	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
 

@@ -13,14 +13,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	egressdomain "github.com/owen891/grok2api/backend/internal/domain/egress"
+	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestCatalogMatchesSupportedSurface(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/media"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/media"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 type MediaJobRepository struct{ db *Database }

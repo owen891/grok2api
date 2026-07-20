@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
-	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
+	accountapp "github.com/owen891/grok2api/backend/internal/application/account"
+	accountsyncapp "github.com/owen891/grok2api/backend/internal/application/accountsync"
 )
 
 const (

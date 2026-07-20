@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	egressdomain "github.com/owen891/grok2api/backend/internal/domain/egress"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
 )
 
 func TestDeleteEgressGroupDetachesModelRoutes(t *testing.T) {

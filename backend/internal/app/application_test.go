@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	"github.com/chenyme/grok2api/backend/internal/repository"
+	domain "github.com/owen891/grok2api/backend/internal/domain/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
+	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
 type registrationProxyRepository struct {

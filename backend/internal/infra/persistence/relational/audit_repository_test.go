@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/audit"
-	repositorypkg "github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/owen891/grok2api/backend/internal/domain/audit"
+	repositorypkg "github.com/owen891/grok2api/backend/internal/repository"
 )
 
 func TestAuditRepositorySumTokensByAccountsSince(t *testing.T) {

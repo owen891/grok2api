@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/accountinspection"
+	"github.com/owen891/grok2api/backend/internal/domain/accountinspection"
 )
 
 var schemaModels = []any{

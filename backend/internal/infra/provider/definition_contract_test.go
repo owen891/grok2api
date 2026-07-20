@@ -4,12 +4,12 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
-	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
-	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
+	cliprovider "github.com/owen891/grok2api/backend/internal/infra/provider/cli"
+	consoleprovider "github.com/owen891/grok2api/backend/internal/infra/provider/console"
+	webprovider "github.com/owen891/grok2api/backend/internal/infra/provider/web"
 )
 
 func TestProductionProviderDefinitionsMatchImplementedCapabilities(t *testing.T) {

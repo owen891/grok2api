@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
-	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
-	"github.com/chenyme/grok2api/backend/internal/shared/response"
+	"github.com/owen891/grok2api/backend/internal/application/adminauth"
+	clientkeyapp "github.com/owen891/grok2api/backend/internal/application/clientkey"
+	"github.com/owen891/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
 

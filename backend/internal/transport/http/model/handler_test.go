@@ -3,8 +3,8 @@ package model
 import (
 	"testing"
 
-	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/owen891/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/owen891/grok2api/backend/internal/domain/model"
 )
 
 func TestNewModelResponseSeparatesPublicAndUpstreamNames(t *testing.T) {

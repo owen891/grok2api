@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/chenyme/grok2api/backend/internal/app"
-	"github.com/chenyme/grok2api/backend/internal/infra/config"
-	"github.com/chenyme/grok2api/backend/internal/infra/observability"
+	"github.com/owen891/grok2api/backend/internal/app"
+	"github.com/owen891/grok2api/backend/internal/infra/config"
+	"github.com/owen891/grok2api/backend/internal/infra/observability"
 )
 
 // Run 解析启动参数并运行后端服务。

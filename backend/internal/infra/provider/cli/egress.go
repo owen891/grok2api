@@ -5,8 +5,8 @@ import (
 	"io"
 	"net/http"
 
-	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	domainegress "github.com/owen891/grok2api/backend/internal/domain/egress"
+	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
 )
 
 type egressTransport struct {
