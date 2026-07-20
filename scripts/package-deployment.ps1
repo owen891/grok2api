@@ -1,6 +1,8 @@
 param(
     [string]$Output = (Join-Path $PSScriptRoot '..\dist\grok2api-deployment'),
-    [switch]$Offline
+    [switch]$Offline,
+    [ValidateSet('protocol', 'browser', 'both', 'none')]
+    [string]$RegistrationRuntime = 'protocol'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,14 +51,11 @@ if ($Offline) {
     $appImage = ((Get-Content $envFile | Where-Object { $_ -match '^GROK2API_IMAGE=' }) -split '=', 2)[1]
     $browserRegistrationImage = ((Get-Content $envFile | Where-Object { $_ -match '^GROK2API_BROWSER_IMAGE=' }) -split '=', 2)[1]
     $browserImage = 'flaresolverr:offline'
-    $images = @(
-        $appImage,
-        $browserRegistrationImage,
-        $solverImage,
-        $browserImage,
-        'postgres:16-alpine',
-        'redis:7-alpine'
-    )
+    $images = @($browserImage, 'postgres:16-alpine', 'redis:7-alpine')
+    if ($RegistrationRuntime -in @('protocol', 'none')) { $images += $appImage }
+    if ($RegistrationRuntime -in @('browser', 'both')) { $images += $browserRegistrationImage }
+    if ($RegistrationRuntime -in @('protocol', 'both')) { $images += $solverImage }
+    $images = $images | Select-Object -Unique
     docker tag 'ghcr.io/flaresolverr/flaresolverr@sha256:139dfee1c6f89249c8d665d1333a42e8ec74ec0a86bc6bb1c8461e10d3a66a47' $browserImage
     foreach ($image in $images) {
         Write-Host "Saving $image"
@@ -65,6 +64,7 @@ if ($Offline) {
     }
     $offlineEnv = Join-Path $outputPath '.env.offline'
     $envText = Get-Content (Join-Path $outputPath '.env.production.example') -Raw
+    $envText = $envText -replace '(?m)^REGISTRATION_RUNTIME=.*$', "REGISTRATION_RUNTIME=$RegistrationRuntime"
     Add-Content -LiteralPath $offlineEnv -Value ($envText + "`r`nFLARESOLVERR_IMAGE=$browserImage`r`n")
 }
 

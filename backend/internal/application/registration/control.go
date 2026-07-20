@@ -27,6 +27,7 @@ const (
 	maxRegistrationLogBytes    = 5 << 20
 	registrationEngineProtocol = "protocol"
 	registrationEngineBrowser  = "browser"
+	defaultCaptchaEndpoint     = "http://grok-turnstile-solver:5072"
 	defaultBrowserSignupURL    = "https://accounts.x.ai/sign-up?redirect=grok-com"
 	defaultBrowserEgressURL    = "https://api64.ipify.org?format=json"
 )
@@ -529,7 +530,7 @@ func preflightCheckLabel(name string) string {
 		"registrationData": "注册数据目录", "spool": "任务队列目录", "engine": "注册引擎", "emailSources": "邮件来源",
 		"emailCredentials": "邮件凭据", "cpaBaseURL": "CPA 地址", "proxy": "代理", "cpaProxy": "CPA 代理",
 		"captchaEndpoint": "清障服务地址", "captchaSolver": "清障方案", "yescaptcha": "YesCaptcha 配置",
-		"protocolWorker": "协议 Worker", "dependencies": "协议依赖", "egressIP": "出口 IP",
+		"protocolWorker": "协议 Worker", "browserRuntime": "浏览器运行环境", "dependencies": "协议依赖", "egressIP": "出口 IP",
 	}
 	if label, ok := labels[name]; ok {
 		return label
@@ -615,17 +616,24 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		browserModule := filepath.Join(c.config.WorkDir, "grok_register_ttk.py")
 		manifest := filepath.Join(c.config.WorkDir, "turnstilePatch", "manifest.json")
 		contentScript := filepath.Join(c.config.WorkDir, "turnstilePatch", "content.js")
+		browserPath, browserErr := resolveBrowserExecutable(c.config.BrowserPath)
+		displayOK, displayDetail := browserDisplayReady(c.workerEnvironmentForEngine(engine))
+		browserRuntimeOK := regularFileReady(workerScript) && regularFileReady(browserModule) &&
+			regularFileReady(manifest) && regularFileReady(contentScript) && browserErr == nil && displayOK
+		browserRuntimeDetail := "ready"
+		if !browserRuntimeOK {
+			browserRuntimeDetail = "browser runtime unavailable; deploy compose.browser-registration.yml with the matching *-browser image"
+		}
+		add("browserRuntime", browserRuntimeOK, browserRuntimeDetail)
 		addRegularFileCheck(add, "browserWorker", workerScript)
 		addRegularFileCheck(add, "browserModule", browserModule)
 		addRegularFileCheck(add, "turnstileManifest", manifest)
 		addRegularFileCheck(add, "turnstileContent", contentScript)
-		browserPath, browserErr := resolveBrowserExecutable(c.config.BrowserPath)
 		browserDetail := browserPath
 		if browserErr != nil {
 			browserDetail = browserErr.Error()
 		}
 		add("chromium", browserErr == nil, browserDetail)
-		displayOK, displayDetail := browserDisplayReady(c.workerEnvironmentForEngine(engine))
 		add("display", displayOK, displayDetail)
 		add("cpaAuthWritable", directoryWritable(cpaDir), cpaDir)
 		add("oauthConfig", browserOAuthConfigReady(configValue), "inline Build OAuth and CPA spool")
@@ -743,8 +751,12 @@ func browserOAuthConfigReady(config map[string]any) bool {
 }
 
 func addRegularFileCheck(add func(string, bool, string), name, path string) {
+	add(name, regularFileReady(path), path)
+}
+
+func regularFileReady(path string) bool {
 	info, err := os.Stat(path)
-	add(name, err == nil && info.Mode().IsRegular(), path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func directoryWritable(path string) bool {
@@ -1218,6 +1230,9 @@ func (c *Controller) forceSafeWorkerSettings(value map[string]any) {
 	if endpoint, ok := os.LookupEnv("REGISTRATION_CAPTCHA_ENDPOINT"); ok {
 		value["captcha_endpoint"] = strings.TrimSpace(endpoint)
 		value["clearance_endpoint"] = strings.TrimSpace(endpoint)
+	} else if strings.EqualFold(strings.TrimSpace(stringValue(value["captcha_endpoint"], "")), "docker://grokcli-2api:5072") {
+		value["captcha_endpoint"] = defaultCaptchaEndpoint
+		value["clearance_endpoint"] = defaultCaptchaEndpoint
 	}
 	if strings.TrimSpace(stringValue(value["clearance_provider"], "")) == "" {
 		if strings.ToLower(strings.TrimSpace(stringValue(value["captcha_solver"], "local"))) == "yescaptcha" {
@@ -1229,7 +1244,7 @@ func (c *Controller) forceSafeWorkerSettings(value map[string]any) {
 	if proxy, ok := os.LookupEnv("REGISTRATION_PROXY"); ok {
 		value["proxy"] = strings.TrimSpace(proxy)
 	}
-	value["registration_config_version"] = 4
+	value["registration_config_version"] = 5
 }
 
 func (c *Controller) workerEnvironment() []string {

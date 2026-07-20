@@ -140,6 +140,12 @@ COPY registration/*.py /app/registration/
 COPY registration/config.example.json /app/registration/config.example.json
 COPY registration/cpa_xai/ /app/registration/cpa_xai/
 COPY registration/turnstilePatch/ /app/registration/turnstilePatch/
+RUN /opt/registration-venv/bin/python -c "import DrissionPage" && \
+    test -x /usr/bin/chromium && \
+    test -f /app/registration/register_cli.py && \
+    test -f /app/registration/grok_register_ttk.py && \
+    test -f /app/registration/turnstilePatch/manifest.json && \
+    test -f /app/registration/turnstilePatch/content.js
 COPY --chmod=0755 docker/browser-entrypoint.sh /usr/local/bin/grok2api-browser-entrypoint
 RUN sed -i 's/\r$//' /usr/local/bin/grok2api-browser-entrypoint
 

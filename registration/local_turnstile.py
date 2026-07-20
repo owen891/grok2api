@@ -4,7 +4,7 @@
 
 captcha_endpoint 示例：
   http://127.0.0.1:5072
-  docker://grokcli-2api:5072
+  http://grok-turnstile-solver:5072
 """
 from __future__ import annotations
 
@@ -471,7 +471,8 @@ def solve_turnstile_local(
     ).strip()
     if not endpoint:
         raise RuntimeError(
-            "本地过盾未配置 captcha_endpoint。可用 http://127.0.0.1:5072 或 docker://grokcli-2api:5072"
+            "本地过盾未配置 captcha_endpoint。Compose 部署使用 http://grok-turnstile-solver:5072；"
+            "显式 Docker 桥接使用 docker://CONTAINER:5072"
         )
     client_key = (client_key or os.environ.get("LOCAL_CAPTCHA_CLIENT_KEY") or "local").strip()
     if client_key.startswith("AC-"):
@@ -483,33 +484,8 @@ def solve_turnstile_local(
         return _docker_solve(endpoint, payload, max(0.1, deadline - time.monotonic()))
 
     pinned_endpoint = _pin_http_endpoint(endpoint.rstrip("/"))
-    try:
-        return _http_solve_with_retries(
-            pinned_endpoint,
-            payload,
-            max(0.1, deadline - time.monotonic()),
-        )
-    except Exception as primary:
-        # An HTTP endpoint may be a remote/container service. Only try the
-        # legacy local-container fallback when Docker is actually available;
-        # otherwise preserve the solver error and actionable environment hint.
-        parsed = urlsplit(endpoint)
-        fallback_enabled = os.environ.get("LOCAL_CAPTCHA_DOCKER_FALLBACK", "1").strip().lower() not in {
-            "0", "false", "no", "off"
-        }
-        if parsed.port == 5072 and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and fallback_enabled:
-            if not _docker_cli_available():
-                raise RuntimeError(
-                    f"HTTP 本地过盾失败: {primary}; 未执行 Docker 回退：服务器未找到 docker 命令。"
-                    "请检查 HTTP solver 的 /health，或配置可用的 docker:// 容器端点"
-                ) from primary
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"HTTP 本地过盾失败且总超时预算已耗尽: {primary}"
-                ) from primary
-            try:
-                return _docker_solve("docker://grokcli-2api:5072", payload, remaining)
-            except Exception as secondary:
-                raise RuntimeError(f"HTTP 本地过盾失败: {primary}; docker 回退失败: {secondary}") from secondary
-        raise
+    return _http_solve_with_retries(
+        pinned_endpoint,
+        payload,
+        max(0.1, deadline - time.monotonic()),
+    )

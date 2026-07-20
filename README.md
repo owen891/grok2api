@@ -98,11 +98,20 @@ bootstrapAdmin:
   password: "替换为强密码"
 ```
 
-3. 启动：
+3. 按实际使用的注册模式启动。只启动需要的组合，避免同时下载两套浏览器运行时：
 
 ```bash
+# 不使用自动注册
 docker compose pull
 docker compose up -d
+
+# 协议注册：标准应用镜像 + Turnstile solver
+docker compose -f docker-compose.yml -f compose.registration.yml pull
+docker compose -f docker-compose.yml -f compose.registration.yml up -d
+
+# 浏览器注册：预构建 browser 镜像，不启动协议 solver
+docker compose -f docker-compose.yml -f compose.browser-registration.yml pull
+docker compose -f docker-compose.yml -f compose.browser-registration.yml up -d
 ```
 
 访问 `http://127.0.0.1:8000`。
@@ -118,14 +127,14 @@ docker compose up -d
 
 注册 worker 的服务器代理通过 Compose 环境变量配置：直连时保持 `REGISTRATION_PROXY=`；宿主机代理使用 `http://host.docker.internal:PORT`；Compose 内代理使用服务名。也可以设置 `REGISTRATION_PROXY=system`，并提供 `REGISTRATION_HTTPS_PROXY`、`REGISTRATION_HTTP_PROXY` 或 `REGISTRATION_ALL_PROXY`。这些注册专用变量不会改变其他 Provider 的出口。容器内的 `127.0.0.1` 指向容器自身，不代表服务器宿主机。
 
-浏览器注册使用单独的 `browser-runtime` 镜像 target，默认 API 镜像仍只包含协议注册依赖。Linux 本地构建时运行：
+浏览器注册使用单独的 `main-browser` 预构建镜像，包含 Chromium、Xvfb、DrissionPage、注册脚本和 Turnstile 扩展。普通服务器部署只执行上面的 `pull/up`。开发当前工作树时才执行：
 
 ```bash
 docker compose -f docker-compose.yml -f compose.browser-registration.yml build grok2api
 docker compose -f docker-compose.yml -f compose.browser-registration.yml up -d
 ```
 
-然后在注册设置中将 `engine` 切为 `browser`。容器以 `DISPLAY=:99` 启动 Xvfb，并用非 headless Chromium 后台运行。HTTP(S) 认证代理由临时 MV3 扩展处理；认证 SOCKS 代理必须先经本地 relay 转成无认证端口。Browser preflight 会通过同一注册代理检查出口 IP、注册页和邮箱 API；出口检查默认使用 `https://api64.ipify.org?format=json`，可用 `REGISTRATION_PREFLIGHT_EGRESS_URL` 覆盖。回滚只需把 `engine` 改回 `protocol`，标准镜像不需要 Chromium。
+然后在注册设置中将 `engine` 切为 `browser`。容器以 `DISPLAY=:99` 启动 Xvfb，并用非 headless Chromium 后台运行。HTTP(S) 认证代理由临时 MV3 扩展处理；认证 SOCKS 代理必须先经本地 relay 转成无认证端口。Browser preflight 会通过同一注册代理检查出口 IP、注册页和邮箱 API；出口检查默认使用 `https://api64.ipify.org?format=json`，可用 `REGISTRATION_PREFLIGHT_EGRESS_URL` 覆盖。需要在管理端随时切换协议与浏览器引擎时，同时加载 `compose.registration.yml` 和 `compose.browser-registration.yml`；此时才会下载两套运行时。
 
 Browser 注册支持与 Protocol 相同的账号类型选择。`Build` 在同一注册线程内完成 OAuth、CPA hotload 和首次同步；`Web` 读取 SSO 后写入 `grok_web` 凭据、导入并完成首次同步，可选 `autoNSFW`。每个已拿到 SSO 的账号最多按 `cpa_mint_retry_attempts` 重试；耗尽后凭据写入数据目录下权限受限的 `browser_pending_oauth.json`，下次相同账号类型的 browser run 会优先 resume，不会重新注册替代账号。收到 `SIGINT`/`SIGTERM` 后 worker 会停止领取新账号、保留已注册账号的 pending 凭据状态并回收浏览器。`browser_state.json` 的 `resumable` 表示当前账号类型待恢复数量；`browser_metrics.json` 只保存阶段和资源统计，不写密码、SSO 或 Cookie。
 
@@ -134,6 +143,203 @@ Browser 注册支持与 Protocol 相同的账号类型选择。`Build` 在同一
 Compose 同时启动 `grok-web-browser` 服务为 Basic 账号的 Fast 生图保持持久 Chromium 会话。Go 服务仍负责账号调度、额度和图片归档，Grok REST 与 Statsig 签名请求在同一浏览器、代理出口和 Cookie Jar 中完成。服务启动时会用一个启用的 Web 账号和实际出口预热 Grok 页面及 Statsig，`/healthz` 检查 worker 进程，`/readyz` 仅在浏览器会话完成初始化后返回成功。管理端 `grok_web` 节点如果使用宿主机 `127.0.0.1` 代理，worker 会在容器内映射为 `host.docker.internal`。源码运行时可在 `provider.web.browserWorkerURL` 配置 `http://127.0.0.1:8192`。Compose 默认固定到已验证的 FlareSolverr v3.5.0 镜像 digest，可通过 `FLARESOLVERR_IMAGE` 显式覆盖。
 
 Basic 账号的 `grok-imagine-image` Fast 路由只承诺提示词、数量和 `1:1`/`1k` 默认规格；其他宽高比或 `2k` 会返回参数错误，不会静默生成默认规格。需要这些规格时启用 `grok-imagine-image-quality` 并使用支持的账号额度。
+
+## 部署教程
+
+下面的流程适用于从 GitHub 拉取仓库后的新机器。生产部署优先使用 GHCR 预构建镜像，普通升级只拉取镜像；源码构建适合开发和修改代码后的本地验证。
+
+### 1. 准备环境
+
+安装 Docker Engine 或 Docker Desktop，并确认 Compose v2 可用：
+
+```bash
+docker version
+docker compose version
+```
+
+拉取仓库并进入目录：
+
+```bash
+git clone https://github.com/owen891/grok2api.git
+cd grok2api
+```
+
+### 2. 单机部署
+
+单机路径使用 SQLite、Memory 和本地媒体目录，适合个人使用或单实例部署：
+
+```bash
+cp config.example.yaml config.yaml
+cp .env.example .env
+mkdir -p data
+```
+
+编辑 `config.yaml`：
+
+```yaml
+secrets:
+  jwtSecret: "至少 32 个字符的随机值"
+  credentialEncryptionKey: "Base64 编码的 32 字节密钥"
+
+bootstrapAdmin:
+  username: "admin"
+  password: "强管理员密码"
+
+registration:
+  enabled: true
+```
+
+启动基础 API：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+访问 `http://服务器地址:8000`，使用 `bootstrapAdmin` 登录。服务器防火墙放行 `8000`，公网部署建议通过 HTTPS 反向代理转发。
+
+### 3. 选择注册引擎
+
+注册引擎对应不同的预构建应用镜像。先选择一种，后续切换时再重新组合 Compose 文件。
+
+协议注册：
+
+```bash
+docker compose -f docker-compose.yml -f compose.registration.yml pull
+docker compose -f docker-compose.yml -f compose.registration.yml up -d --force-recreate
+```
+
+协议模式使用 `http://grok-turnstile-solver:5072`，管理端的“清障服务地址”保持该地址。协议 solver 是独立容器，应用容器内不调用 Docker CLI。
+
+浏览器注册：
+
+```bash
+docker compose -f docker-compose.yml -f compose.browser-registration.yml pull
+docker compose -f docker-compose.yml -f compose.browser-registration.yml up -d --force-recreate
+```
+
+浏览器模式使用 `main-browser` 镜像，镜像内包含 Chromium、Xvfb、DrissionPage、注册脚本和 Turnstile 扩展。进入管理端“注册”，将 `engine` 设为“浏览器注册”，保存后执行“预检”。
+
+需要在管理端来回切换两种引擎时：
+
+```bash
+docker compose -f docker-compose.yml \
+  -f compose.registration.yml \
+  -f compose.browser-registration.yml pull
+docker compose -f docker-compose.yml \
+  -f compose.registration.yml \
+  -f compose.browser-registration.yml up -d --force-recreate
+```
+
+单独使用浏览器注册时，使用 browser overlay；单独使用协议注册时，使用 registration overlay。生产环境执行 `pull/up`，避免执行 `up --build` 触发现场构建。
+
+### 4. 生产部署
+
+多实例或正式服务使用 `deploy_artifact` 中的 PostgreSQL、Redis 和预构建应用镜像：
+
+```bash
+cd deploy_artifact
+cp .env.production.example .env
+cp config.production.example.yaml config.production.yaml
+```
+
+在 `.env` 和 `config.production.yaml` 中设置相同的 PostgreSQL 密码，替换所有 `replace-with` 和 `change-me`，然后选择：
+
+```env
+# protocol、browser、both、none
+REGISTRATION_RUNTIME=protocol
+```
+
+启动：
+
+```bash
+sh ./install.sh
+```
+
+Windows PowerShell：
+
+```powershell
+.\install.ps1
+```
+
+安装脚本会根据 `REGISTRATION_RUNTIME` 组合 Compose 文件：
+
+| 值 | 运行时 |
+| --- | --- |
+| `protocol` | 标准应用镜像 + protocol solver |
+| `browser` | `main-browser` 应用镜像 |
+| `both` | `main-browser` 应用镜像 + protocol solver |
+| `none` | 标准应用镜像 |
+
+### 5. 首次使用
+
+1. 使用 `bootstrapAdmin` 登录管理端。
+2. 在“设置”中确认出口代理、媒体目录和上游服务配置。
+3. 在“上游账号”中导入 Grok Build、Grok Web 或 Grok Console 账号。
+4. 在“模型管理”中确认模型已同步并处于启用状态。
+5. 在“客户端密钥”中创建 `g2a_` API Key。
+6. 使用 API Key 调用 `/v1/models` 和 `/v1/responses`。
+
+示例：
+
+```bash
+curl http://127.0.0.1:8000/v1/models \
+  -H "Authorization: Bearer g2a_xxx_xxx"
+
+curl http://127.0.0.1:8000/v1/responses \
+  -H "Authorization: Bearer g2a_xxx_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"grok-chat-auto","input":"你好"}'
+```
+
+### 6. 升级、回滚和排查
+
+升级前备份 `config.yaml`、`data` 或 PostgreSQL 数据卷。升级时执行：
+
+```bash
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+查看状态和日志：
+
+```bash
+docker compose ps
+docker compose logs --tail=200 grok2api
+docker compose logs --tail=100 grok-turnstile-solver
+```
+
+注册页预检失败时，先检查对应容器：
+
+```bash
+docker compose ps grok2api grok-turnstile-solver
+docker compose exec grok2api sh -lc '/opt/registration-venv/bin/python -c "import DrissionPage"'
+docker compose exec grok2api sh -lc 'command -v chromium; test -f /app/registration/register_cli.py'
+```
+
+常见日志与处理方式：
+
+| 日志 | 处理 |
+| --- | --- |
+| `docker command not found` | 将 endpoint 设置为 `http://grok-turnstile-solver:5072`，并启动 protocol overlay |
+| `register_cli.py: No such file` | 使用 `main-browser` 镜像，重建容器时带 browser overlay |
+| `No module named DrissionPage` | 检查 browser overlay 是否清除了旧 `build:` 和 `/app/registration` release 挂载 |
+| `Chromium ... not found` | 当前仍在运行标准 protocol 镜像，拉取并切换 `main-browser` |
+| `DISPLAY is empty and Xvfb is unavailable` | 浏览器模式需使用 `REGISTRATION_BROWSER_MODE=xvfb` 的 browser overlay |
+
+修改源码后的本地镜像构建：
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+浏览器源码构建：
+
+```bash
+docker compose -f docker-compose.yml -f compose.browser-registration.yml build grok2api
+docker compose -f docker-compose.yml -f compose.browser-registration.yml up -d
+```
 
 常用命令：
 

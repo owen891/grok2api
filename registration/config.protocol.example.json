@@ -11,7 +11,7 @@
   "tempmail_api_key": "",
   "proxy": "",
   "captcha_solver": "local",
-  "captcha_endpoint": "",
+  "captcha_endpoint": "http://grok-turnstile-solver:5072",
   "// captcha_preflight_timeout": "Health-check timeout per solver endpoint before a batch starts.",
   "captcha_preflight_timeout": 3,
   "captcha_client_key": "local",

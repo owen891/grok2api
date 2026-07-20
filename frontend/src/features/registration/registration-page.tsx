@@ -347,7 +347,7 @@ export function RegistrationPage() {
                         { value: "yescaptcha", label: t("registration.captchaYes") },
                       ]} onChange={(value) => updateDraft("captchaSolver", value)} />
                       {settings.captchaSolver === "local" ? (
-                        <TextField label={t("registration.captchaEndpoint")} value={settings.captchaEndpoint} disabled={busy} placeholder="docker://grokcli-2api:5072" onChange={(value) => updateDraft("captchaEndpoint", value)} />
+                        <TextField label={t("registration.captchaEndpoint")} value={settings.captchaEndpoint} disabled={busy} placeholder="http://grok-turnstile-solver:5072" onChange={(value) => updateDraft("captchaEndpoint", value)} />
                       ) : (
                         <SecretField label={t("registration.yescaptchaApiKey")} value={settings.yescaptchaApiKey} configured={settings.yescaptchaApiKeyConfigured} disabled={busy} onChange={(value) => updateDraft("yescaptchaApiKey", value)} />
                       )}

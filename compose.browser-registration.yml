@@ -3,7 +3,7 @@ name: grok2api
 # Optional browser registration runtime. The default image remains protocol-only.
 services:
   grok2api:
-    image: "${GROK2API_BROWSER_IMAGE:-grok2api:browser-runtime}"
+    image: "${GROK2API_BROWSER_IMAGE:-ghcr.io/owen891/grok2api:main-browser}"
     build:
       target: browser-runtime
     environment:

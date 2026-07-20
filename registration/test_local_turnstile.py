@@ -41,11 +41,11 @@ class DockerContainerRecoveryTests(unittest.TestCase):
     def test_stopped_container_is_started_and_waited_for(self, run, sleep):
         run.side_effect = [
             type("Result", (), {"returncode": 0, "stdout": "exited|137|false\n", "stderr": ""})(),
-            type("Result", (), {"returncode": 0, "stdout": "grokcli-2api\n", "stderr": ""})(),
+            type("Result", (), {"returncode": 0, "stdout": "turnstile-solver\n", "stderr": ""})(),
             type("Result", (), {"returncode": 0, "stdout": "running|0|false\n", "stderr": ""})(),
         ]
-        _ensure_docker_container_running("grokcli-2api")
-        self.assertEqual(run.call_args_list[1].args[0][:3], ["docker", "start", "grokcli-2api"])
+        _ensure_docker_container_running("turnstile-solver")
+        self.assertEqual(run.call_args_list[1].args[0][:3], ["docker", "start", "turnstile-solver"])
         sleep.assert_called_once_with(0.5)
 
     @patch.dict("local_turnstile.os.environ", {"LOCAL_CAPTCHA_DOCKER_AUTOSTART": "0"}, clear=False)
@@ -55,7 +55,7 @@ class DockerContainerRecoveryTests(unittest.TestCase):
             "Result", (), {"returncode": 0, "stdout": "exited|137|true\n", "stderr": ""}
         )()
         with self.assertRaisesRegex(RuntimeError, r"exited .*exit=137.*oom=true"):
-            _ensure_docker_container_running("grokcli-2api")
+            _ensure_docker_container_running("turnstile-solver")
         self.assertEqual(run.call_count, 1)
 
 
@@ -139,17 +139,17 @@ class DockerFallbackTests(unittest.TestCase):
         self.assertEqual([call.args[2] for call in http_solve.call_args_list], [10.0, 4.0])
 
     @patch("local_turnstile._http_solve", side_effect=TimeoutError("solver timed out"))
-    @patch("local_turnstile._docker_cli_available", return_value=False)
+    @patch("local_turnstile._docker_cli_available")
     @patch.dict("local_turnstile.os.environ", {"LOCAL_CAPTCHA_RETRIES": "0"}, clear=False)
-    def test_http_timeout_does_not_invoke_missing_docker(self, docker_available, http_solve):
-        with self.assertRaisesRegex(RuntimeError, r"HTTP .*未找到 docker 命令"):
+    def test_http_timeout_does_not_invoke_docker(self, docker_available, http_solve):
+        with self.assertRaisesRegex(TimeoutError, "solver timed out"):
             solve_turnstile_local(
                 endpoint="http://127.0.0.1:5072",
                 website_url="https://grok.com",
                 website_key="site-key",
                 timeout=30,
             )
-        docker_available.assert_called_once()
+        docker_available.assert_not_called()
         http_solve.assert_called_once()
 
     @patch("local_turnstile.requests.get")

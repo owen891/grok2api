@@ -17,23 +17,30 @@ installation, or a host Redis installation. Docker owns those runtime boundaries
 | `grok-web-browser` | browser container | none | Grok Web session automation |
 | `grok-turnstile-solver` | optional browser container | none | Docker clearance only |
 
-The host requirements are Docker Engine, Compose v2, and enough disk/RAM. Use the
-standard stack for a real multi-worker or multi-instance deployment:
+The host requirements are Docker Engine, Compose v2, and enough disk/RAM. Select
+one registration runtime in `.env` before installing:
+
+| `REGISTRATION_RUNTIME` | Images pulled | Use case |
+| --- | --- | --- |
+| `protocol` | standard app + solver | Protocol registration |
+| `browser` | browser app | Browser registration |
+| `both` | browser app + solver | Switch engines without redeploying |
+| `none` | standard app only | Registration is not used |
+
+The default is `protocol`. Use `browser` when browser registration is the only
+required engine; this avoids downloading the separate protocol solver image.
 
 ```sh
 cp .env.production.example .env
 cp config.production.example.yaml config.production.yaml
 # Set the same random PostgreSQL password in .env and config.production.yaml.
 mkdir -p data
-docker compose --env-file .env -f compose.production.yml config
-docker compose --env-file .env -f compose.production.yml pull
-docker compose --env-file .env -f compose.production.yml up -d
+sh ./install.sh
 curl -fsS http://127.0.0.1:8000/healthz
 ```
 
-The same flow is wrapped by `sh ./install.sh` (Linux) or `./install.ps1`
-(Windows PowerShell). Both scripts are idempotent and refuse to start while
-secret placeholders remain.
+Use `./install.ps1` instead on Windows PowerShell. Both scripts are idempotent,
+compose the selected runtime overlays, and stop while secret placeholders remain.
 
 To produce a clean online deployment bundle from the repository, run:
 
@@ -43,15 +50,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package-deployment.ps1
 
 The packager intentionally excludes historical release directories, build
 artifacts, runtime data, and duplicate solver archives. Add `-Offline` only when
-the target cannot pull images from GHCR/Docker Hub; that mode saves one tar per
-required image and is substantially larger.
+the target cannot pull images from GHCR/Docker Hub. Use `-RegistrationRuntime
+protocol|browser|both|none` to save only the selected runtime images; `protocol`
+is the default.
 
 The generated bundle includes `grok_web_browser_worker.py` and rewrites the
 Compose mount to use that local file. For an offline bundle, load every tar in
 `images/`, rename `.env.offline` to `.env`, and then run `install.ps1` or
 `install.sh`.
 
-Enable Docker clearance only when registration requires it:
+The protocol selection composes Docker clearance as follows:
 
 ```sh
 docker compose --env-file .env \
@@ -69,7 +77,8 @@ temporary fallback after verifying the image contains Patchright Chromium.
 
 Browser registration uses the matching `*-browser` application image. It contains
 Chromium, DrissionPage, the Turnstile extension, and Xvfb; the standard image stays
-protocol-only. Enable it with the browser overlay:
+protocol-only. Set `REGISTRATION_RUNTIME=browser` and run the installer, or compose
+the browser overlay manually:
 
 ```sh
 docker compose --env-file .env \
@@ -79,6 +88,11 @@ docker compose --env-file .env \
   -f compose.production.yml -f compose.browser-registration.yml \
   up -d
 ```
+
+When using the deprecated `docker-compose.runtime.yml` fallback, the browser
+overlay deliberately removes its protocol-only `build:` and release-directory
+mounts. This keeps the browser image's Python environment and registration files
+intact; do not add `--build` to that browser deployment.
 
 Set the registration worker `engine` to `browser` in the admin registration settings,
 run preflight, then validate 3 accounts before increasing the batch. Browser mode always

@@ -3,7 +3,7 @@ name: grok2api
 services:
   grok2api:
     container_name: grok2api
-    image: "${GROK2API_IMAGE:-ghcr.io/owen891/grok2api:v3.0.9}"
+    image: "${GROK2API_IMAGE:-ghcr.io/owen891/grok2api:main}"
     build:
       context: .
       dockerfile: Dockerfile

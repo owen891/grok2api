@@ -206,7 +206,7 @@ func TestDeploymentEnvironmentOverridesWorkerNetworkSettings(t *testing.T) {
 	t.Setenv("REGISTRATION_PROXY", "")
 	controller := newControllerTest(t, 0)
 	value := map[string]any{
-		"captcha_endpoint": "docker://grokcli-2api:5072",
+		"captcha_endpoint": "docker://legacy-solver:5072",
 		"proxy":            "http://127.0.0.1:7890",
 	}
 
@@ -217,6 +217,28 @@ func TestDeploymentEnvironmentOverridesWorkerNetworkSettings(t *testing.T) {
 	}
 	if value["proxy"] != "" {
 		t.Fatalf("proxy = %#v, want empty deployment override", value["proxy"])
+	}
+}
+
+func TestLegacyCaptchaEndpointMigratesToComposeService(t *testing.T) {
+	previous, present := os.LookupEnv("REGISTRATION_CAPTCHA_ENDPOINT")
+	if err := os.Unsetenv("REGISTRATION_CAPTCHA_ENDPOINT"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if present {
+			_ = os.Setenv("REGISTRATION_CAPTCHA_ENDPOINT", previous)
+		} else {
+			_ = os.Unsetenv("REGISTRATION_CAPTCHA_ENDPOINT")
+		}
+	})
+
+	controller := newControllerTest(t, 0)
+	value := map[string]any{"captcha_endpoint": "docker://grokcli-2api:5072"}
+	controller.forceSafeWorkerSettings(value)
+
+	if value["captcha_endpoint"] != defaultCaptchaEndpoint || value["clearance_endpoint"] != defaultCaptchaEndpoint {
+		t.Fatalf("legacy captcha endpoint was not migrated: %#v", value)
 	}
 }
 

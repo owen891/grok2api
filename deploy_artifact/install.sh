@@ -17,13 +17,46 @@ if grep -Eq 'replace-with|change-me' .env config.production.yaml; then
   exit 2
 fi
 
-docker compose --env-file .env -f compose.production.yml config --quiet
-docker compose --env-file .env -f compose.production.yml pull
-docker compose --env-file .env -f compose.production.yml up -d
+runtime=${REGISTRATION_RUNTIME:-}
+if [ -z "$runtime" ]; then
+  runtime=$(sed -n 's/^REGISTRATION_RUNTIME=//p' .env | tail -n 1)
+fi
+runtime=${runtime:-protocol}
 
+compose() {
+  case "$runtime" in
+    protocol)
+      docker compose --env-file .env -f compose.production.yml -f compose.registration.yml "$@"
+      ;;
+    browser)
+      docker compose --env-file .env -f compose.production.yml -f compose.browser-registration.yml "$@"
+      ;;
+    both)
+      docker compose --env-file .env -f compose.production.yml -f compose.registration.yml -f compose.browser-registration.yml "$@"
+      ;;
+    none)
+      docker compose --env-file .env -f compose.production.yml "$@"
+      ;;
+    *)
+      echo "REGISTRATION_RUNTIME must be protocol, browser, both, or none" >&2
+      exit 2
+      ;;
+  esac
+}
+
+echo "Registration runtime: $runtime"
+compose config --quiet
+compose pull
+compose up -d
+
+port=${GROK2API_PORT:-}
+if [ -z "$port" ]; then
+  port=$(sed -n 's/^GROK2API_PORT=//p' .env | tail -n 1)
+fi
+port=${port:-8000}
 attempt=0
 while [ "$attempt" -lt 30 ]; do
-  if curl -fsS http://127.0.0.1:"${GROK2API_PORT:-8000}"/healthz >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
     echo "grok2api is healthy"
     exit 0
   fi
@@ -31,5 +64,5 @@ while [ "$attempt" -lt 30 ]; do
   sleep 2
 done
 
-echo "grok2api did not become healthy; inspect: docker compose --env-file .env -f compose.production.yml logs --tail=100 grok2api" >&2
+echo "grok2api did not become healthy; inspect with the same registration runtime: ./install.sh, then compose logs --tail=100 grok2api" >&2
 exit 1
