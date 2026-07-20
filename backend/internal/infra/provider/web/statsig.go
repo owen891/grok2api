@@ -421,7 +421,7 @@ func (a *Adapter) WarmStatsig(ctx context.Context, credential account.Credential
 		if err != nil {
 			return 0, fmt.Errorf("Grok Web browser worker 预热: %w", err)
 		}
-		if strings.TrimSpace(warm.CloudflareCookie) != "" || strings.TrimSpace(warm.UserAgent) != "" {
+		if lease.NodeID != 0 && (strings.TrimSpace(warm.CloudflareCookie) != "" || strings.TrimSpace(warm.UserAgent) != "") {
 			if err := a.egress.UpdateCloudflareSession(ctx, lease.NodeID, warm.CloudflareCookie, warm.UserAgent); err != nil {
 				return 0, fmt.Errorf("Grok Web Cloudflare 会话回写: %w", err)
 			}

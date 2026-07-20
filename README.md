@@ -140,7 +140,7 @@ Browser 注册支持与 Protocol 相同的账号类型选择。`Build` 在同一
 
 官方镜像已经包含前端构建产物，管理端与 API 由同一个 Go 服务提供。Compose 默认将 `config.yaml` 只读挂载到容器，并使用 `grok2api-data` 命名卷保存 SQLite 数据库和本地媒体。
 
-Compose 同时启动 `grok-web-browser` 服务为 Basic 账号的 Fast 生图保持持久 Chromium 会话。Go 服务仍负责账号调度、额度和图片归档，Grok REST 与 Statsig 签名请求在同一浏览器、代理出口和 Cookie Jar 中完成。服务启动时会用一个启用的 Web 账号和实际出口预热 Grok 页面及 Statsig，`/healthz` 检查 worker 进程，`/readyz` 仅在浏览器会话完成初始化后返回成功。管理端 `grok_web` 节点如果使用宿主机 `127.0.0.1` 代理，worker 会在容器内映射为 `host.docker.internal`。源码运行时可在 `provider.web.browserWorkerURL` 配置 `http://127.0.0.1:8192`。Compose 默认固定到已验证的 FlareSolverr v3.5.0 镜像 digest，可通过 `FLARESOLVERR_IMAGE` 显式覆盖。
+Compose 同时启动 `grok-web-browser` 服务为 Basic 账号的 Fast 生图保持持久 Chromium 会话。Go 服务仍负责账号调度、额度和图片归档，Grok REST 与 Statsig 签名请求在同一浏览器、代理出口和 Cookie Jar 中完成。服务启动时会用一个启用的 Web 账号和实际出口预热 Grok 页面及 Statsig，`/healthz` 检查 worker 进程，`/readyz` 仅在浏览器会话完成初始化后返回成功。管理端 `grok_web` 节点如果使用宿主机 `127.0.0.1` 代理，worker 会在容器内映射为 `host.docker.internal`。源码运行时宿主机默认通过 `provider.web.browserWorkerURL` 使用 `http://127.0.0.1:18292`，容器内部仍使用 `grok-web-browser:8192`。Compose 默认固定到已验证的 FlareSolverr v3.5.0 镜像 digest，可通过 `FLARESOLVERR_IMAGE` 显式覆盖。
 
 Basic 账号的 `grok-imagine-image` Fast 路由只承诺提示词、数量和 `1:1`/`1k` 默认规格；其他宽高比或 `2k` 会返回参数错误，不会静默生成默认规格。需要这些规格时启用 `grok-imagine-image-quality` 并使用支持的账号额度。
 
@@ -271,6 +271,8 @@ Windows PowerShell：
 ```powershell
 .\install.ps1
 ```
+
+Windows 本地 supervisor 会在启动时检查 Docker worker 的 HTTP health、避开系统保留端口，并在监听到本机代理但数据库没有 `grok_web` 出口节点时自动创建一个本地 Web 出口。可用环境变量覆盖 `GROK_WEB_BROWSER_WORKER_PORT`、`GROK2API_PROXY_PORT`、`GROK2API_WEB_PROXY_URL`；若 bootstrap 管理员密码已不在 `config.yaml` 中，设置 `GROK2API_ADMIN_PASSWORD`。不希望自动创建节点时设置 `GROK2API_AUTO_CONFIGURE_WEB_EGRESS=0`。
 
 安装脚本会根据 `REGISTRATION_RUNTIME` 组合 Compose 文件：
 

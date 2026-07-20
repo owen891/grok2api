@@ -54,7 +54,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:${GROK_WEB_BROWSER_WORKER_PORT:-8192}:8192"
+      - "127.0.0.1:${GROK_WEB_BROWSER_WORKER_PORT:-18292}:8192"
     volumes:
       - ./scripts/grok_web_browser_worker.py:/opt/grok-worker/grok_web_browser_worker.py:ro
     shm_size: "2gb"

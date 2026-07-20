@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/owen891/grok2api/backend/internal/domain/account"
 	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/security"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -210,6 +213,36 @@ func TestStatsigWarmupFetchesMetaOnceForSharedPaths(t *testing.T) {
 	}
 	if warmedAgain, err := signer.Warm(context.Background(), "https://grok.com", "https://signer.example/sign", "token", nil, targets); err != nil || warmedAgain != 0 || fetches != 1 {
 		t.Fatalf("cached warmup=%d fetches=%d err=%v", warmedAgain, fetches, err)
+	}
+}
+
+func TestWarmStatsigAllowsDirectLeaseWithoutPersistingSession(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/grok/warm" || request.Method != http.MethodPost {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		_ = json.NewEncoder(writer).Encode(browserWorkerWarmResponse{
+			OK: true, CloudflareCookie: "cf_clearance=direct-session", UserAgent: "Chrome/Direct",
+		})
+	}))
+	defer worker.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedToken, err := cipher.Encrypt("direct-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(
+		Config{BaseURL: "https://grok.com", BrowserWorkerURL: worker.URL, ImageTimeoutSeconds: 30},
+		infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil,
+	)
+
+	warmed, err := adapter.WarmStatsig(context.Background(), account.Credential{ID: 1, EncryptedAccessToken: encryptedToken})
+	if err != nil || warmed != 1 {
+		t.Fatalf("warmed=%d err=%v", warmed, err)
 	}
 }
 
