@@ -505,3 +505,21 @@ func TestConvertResponsesStreamMessagesInputTokens(t *testing.T) {
 		t.Fatalf("message_delta should contain input_tokens from response.completed usage:\n%s", text)
 	}
 }
+
+func TestConvertResponsesStreamPreservesCachedTokensAcrossUsageFrames(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_cache","model":"grok-4.5","usage":{"input_tokens_details":{"cached_tokens":80}}}}`, "",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"hello"}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_cache","model":"grok-4.5","status":"completed","usage":{"input_tokens":100,"output_tokens":7}}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationMessages))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(converted), `"cache_read_input_tokens":80`) {
+		t.Fatalf("cached usage was dropped from converted stream:\n%s", converted)
+	}
+}

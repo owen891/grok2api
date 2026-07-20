@@ -635,6 +635,9 @@
                     "type": "string",
                     "example": "grok-chat-fast"
                 },
+                "prompt_cache_key": {
+                    "type": "string"
+                },
                 "stream": {
                     "type": "boolean",
                     "example": false
@@ -741,6 +744,9 @@
                 "model": {
                     "type": "string",
                     "example": "grok-chat-expert"
+                },
+                "prompt_cache_key": {
+                    "type": "string"
                 },
                 "stream": {
                     "type": "boolean",

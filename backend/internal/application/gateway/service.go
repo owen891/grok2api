@@ -347,15 +347,23 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		}
 		return nil, clientkeyapp.ErrModelNotAllowed
 	}
+	affinityKey := ""
 	if route.Provider == accountdomain.ProviderBuild {
-		input.PromptCacheKey = resolvePromptCacheIdentity(
+		identity := resolveBuildSessionIdentity(
 			input.ClientKey.ID,
 			route.Provider,
 			route.UpstreamModel,
-			operation,
 			input.PromptCacheKey,
 			input.PromptCacheSeed,
+			input.Body,
 		)
+		input.PromptCacheKey = identity.upstreamID
+		affinityKey = identity.affinityKey
+		if identity.upstreamID == "" {
+			s.logger.Debug("prompt_cache_session_empty", "request_id", input.RequestID, "model", route.UpstreamModel, "provider", route.Provider)
+		} else if identity.soft {
+			s.logger.Debug("prompt_cache_session_soft", "request_id", input.RequestID, "model", route.UpstreamModel)
+		}
 	}
 	adapter, ok := s.providers.Responses(route.Provider)
 	if !ok {
@@ -410,7 +418,7 @@ attemptLoop:
 		} else {
 			// Client traffic only uses the healthy pool. Quota recovery probes are
 			// handled explicitly and must not consume a normal inference request.
-			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, input.PromptCacheKey, excluded, false)
+			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, affinityKey, excluded, false)
 		}
 		timing.markSelection(time.Since(selectionStarted))
 		if err != nil {

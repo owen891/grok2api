@@ -642,6 +642,9 @@ const docTemplate = `{
                     "type": "string",
                     "example": "grok-chat-fast"
                 },
+                "prompt_cache_key": {
+                    "type": "string"
+                },
                 "stream": {
                     "type": "boolean",
                     "example": false
@@ -748,6 +751,9 @@ const docTemplate = `{
                 "model": {
                     "type": "string",
                     "example": "grok-chat-expert"
+                },
+                "prompt_cache_key": {
+                    "type": "string"
                 },
                 "stream": {
                     "type": "boolean",

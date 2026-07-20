@@ -520,18 +520,16 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 		}
 		req.Header.Set("x-authenticateresponse", "authenticate-response")
 		req.Header.Set("x-grok-agent-id", a.agentID)
-		req.Header.Set("x-grok-session-id", sessionID)
-		conversationID := strings.TrimSpace(promptCacheKey)
-		if conversationID == "" {
-			conversationID = sessionID
+		if sessionID != "" {
+			req.Header.Set("x-grok-session-id", sessionID)
+			req.Header.Set("x-grok-conv-id", sessionID)
+			req.Header.Set("x-grok-conversation-id", sessionID)
+			req.Header.Set("x-grok-session-id-legacy", sessionID)
 		}
-		req.Header.Set("x-grok-conv-id", conversationID)
 		req.Header.Set("x-grok-req-id", requestID)
 		req.Header.Set("x-grok-client-surface", "tui")
 		req.Header.Set("x-grok-client-name", cfg.ClientIdentifier)
-		req.Header.Set("x-grok-conversation-id", conversationID)
 		req.Header.Set("x-grok-request-id", requestID)
-		req.Header.Set("x-grok-session-id-legacy", sessionID)
 		req.Header.Set("tracestate", "")
 		// 网关无法从无状态 API 请求可靠恢复 CLI prompt index；该字段在
 		// 官方协议中可选，因此不伪造 x-grok-turn-idx。
@@ -567,17 +565,13 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 
 func grokSessionID(promptCacheKey string) (string, error) {
 	key := strings.TrimSpace(promptCacheKey)
-	if key != "" {
-		if parsed, err := uuid.Parse(key); err == nil {
-			return parsed.String(), nil
-		}
-		return uuid.NewHash(sha256.New(), uuid.NameSpaceURL, []byte("grok2api:session:"+key), 8).String(), nil
+	if key == "" {
+		return "", nil
 	}
-	value, err := uuid.NewV7()
-	if err != nil {
-		return "", err
+	if parsed, err := uuid.Parse(key); err == nil {
+		return parsed.String(), nil
 	}
-	return value.String(), nil
+	return uuid.NewHash(sha256.New(), uuid.NameSpaceURL, []byte("grok2api:session:"+key), 8).String(), nil
 }
 
 func injectPromptCacheKey(body []byte, clientKey string) ([]byte, error) {

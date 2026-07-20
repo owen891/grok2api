@@ -33,7 +33,11 @@ func TestForwardResponseMatchesGrokBuildHeadersAndPreservesReasoning(t *testing.
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
-		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("x-grok-client-version") != "0.2.99" || r.Header.Get("x-grok-client-identifier") != "grok-shell" || r.Header.Get("User-Agent") != "grok-shell/0.2.99 (linux; x86_64)" || r.Header.Get("x-grok-conv-id") != "isolated-key" {
+		expectedSessionID, err := grokSessionID("isolated-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("x-grok-client-version") != "0.2.99" || r.Header.Get("x-grok-client-identifier") != "grok-shell" || r.Header.Get("User-Agent") != "grok-shell/0.2.99 (linux; x86_64)" || r.Header.Get("x-grok-conv-id") != expectedSessionID {
 			t.Fatalf("headers = %#v", r.Header)
 		}
 		requestID := r.Header.Get("x-grok-req-id")
@@ -41,7 +45,7 @@ func TestForwardResponseMatchesGrokBuildHeadersAndPreservesReasoning(t *testing.
 		if r.Header.Get("x-grok-client-surface") != "tui" || r.Header.Get("x-grok-client-name") != "grok-shell" || len(r.Header.Get("x-grok-agent-id")) != 32 || len(sessionID) != 36 {
 			t.Fatalf("client identity headers = %#v", r.Header)
 		}
-		if r.Header.Get("x-grok-conversation-id") != "isolated-key" || len(requestID) != 32 || r.Header.Get("x-grok-request-id") != requestID || r.Header.Get("x-grok-session-id-legacy") != sessionID {
+		if r.Header.Get("x-grok-conversation-id") != expectedSessionID || len(requestID) != 32 || r.Header.Get("x-grok-request-id") != requestID || r.Header.Get("x-grok-session-id-legacy") != sessionID {
 			t.Fatalf("request identity headers = %#v", r.Header)
 		}
 		if r.Header.Get("x-userid") != "user-123" || r.Header.Get("Accept-Encoding") != "gzip" || len(r.Header.Get("traceparent")) != 55 {
@@ -297,7 +301,11 @@ func TestForwardResponsePreservesClaudeCodeMessagesOptions(t *testing.T) {
 		if payload["instructions"] != "legacy system" || payload["store"] != false || payload["reasoning"].(map[string]any)["effort"] != "high" || payload["prompt_cache_key"] != "messages-cache-key" {
 			t.Fatalf("upstream payload = %#v", payload)
 		}
-		if request.Header.Get("x-grok-conv-id") != "messages-cache-key" {
+		expectedSessionID, err := grokSessionID("messages-cache-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.Header.Get("x-grok-conv-id") != expectedSessionID || request.Header.Get("x-grok-session-id") != expectedSessionID {
 			t.Fatalf("prompt cache headers = %#v", request.Header)
 		}
 		return &http.Response{
@@ -352,7 +360,11 @@ func TestForwardResponseInjectsPromptCacheKeyAfterChatConversion(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload["prompt_cache_key"] != "chat-cache-key" || request.Header.Get("x-grok-conv-id") != "chat-cache-key" {
+		expectedSessionID, err := grokSessionID("chat-cache-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if payload["prompt_cache_key"] != "chat-cache-key" || request.Header.Get("x-grok-conv-id") != expectedSessionID || request.Header.Get("x-grok-session-id") != expectedSessionID {
 			t.Fatalf("prompt cache request: payload=%#v headers=%#v", payload, request.Header)
 		}
 		return &http.Response{
@@ -374,5 +386,28 @@ func TestForwardResponseInjectsPromptCacheKeyAfterChatConversion(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
+	}
+}
+
+func TestGrokSessionIDIsStableAndEmptySafe(t *testing.T) {
+	if value, err := grokSessionID(""); err != nil || value != "" {
+		t.Fatalf("empty session = %q, %v", value, err)
+	}
+
+	first, err := grokSessionID("client-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := grokSessionID("client-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || first != second {
+		t.Fatalf("derived sessions = %q %q", first, second)
+	}
+
+	explicit := "019f6b02-5bae-7cf3-b26e-73e85c861749"
+	if value, err := grokSessionID(explicit); err != nil || value != explicit {
+		t.Fatalf("explicit session = %q, %v", value, err)
 	}
 }

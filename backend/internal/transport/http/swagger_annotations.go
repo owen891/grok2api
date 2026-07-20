@@ -18,17 +18,19 @@ type SwaggerResponsesRequest struct {
 
 // SwaggerChatRequest 表示最小 Chat Completions 请求。
 type SwaggerChatRequest struct {
-	Model    string           `json:"model" example:"grok-chat-fast"`
-	Messages []SwaggerMessage `json:"messages"`
-	Stream   bool             `json:"stream" example:"false"`
+	Model          string           `json:"model" example:"grok-chat-fast"`
+	Messages       []SwaggerMessage `json:"messages"`
+	Stream         bool             `json:"stream" example:"false"`
+	PromptCacheKey string           `json:"prompt_cache_key,omitempty"`
 }
 
 // SwaggerMessagesRequest 表示最小 Anthropic Messages 请求。
 type SwaggerMessagesRequest struct {
-	Model     string           `json:"model" example:"grok-chat-expert"`
-	MaxTokens int              `json:"max_tokens" example:"1024"`
-	Messages  []SwaggerMessage `json:"messages"`
-	Stream    bool             `json:"stream" example:"false"`
+	Model          string           `json:"model" example:"grok-chat-expert"`
+	MaxTokens      int              `json:"max_tokens" example:"1024"`
+	Messages       []SwaggerMessage `json:"messages"`
+	Stream         bool             `json:"stream" example:"false"`
+	PromptCacheKey string           `json:"prompt_cache_key,omitempty"`
 }
 
 // SwaggerImageGenerationRequest 表示图片生成请求。

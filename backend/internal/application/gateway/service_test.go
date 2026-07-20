@@ -93,7 +93,7 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	if len(adapter.attempts) != 2 || adapter.attempts[0] != first.ID || adapter.attempts[1] != second.ID {
 		t.Fatalf("attempts = %#v", adapter.attempts)
 	}
-	expectedCacheKey := resolvePromptCacheIdentity(clientKey.ID, account.ProviderBuild, "grok-test", audit.OperationResponses, "", "claude-session")
+	expectedCacheKey := resolveBuildSessionIdentity(clientKey.ID, account.ProviderBuild, "grok-test", "", "claude-session", nil).upstreamID
 	if adapter.lastPromptCacheKey != expectedCacheKey {
 		t.Fatalf("prompt cache key = %q, want %q", adapter.lastPromptCacheKey, expectedCacheKey)
 	}

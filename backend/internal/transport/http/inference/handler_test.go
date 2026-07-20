@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/owen891/grok2api/backend/internal/application/gateway"
 	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
-	"github.com/gin-gonic/gin"
 )
 
 func TestVideoGenerationUsesOfficialXAIEndpointsAndFields(t *testing.T) {
@@ -371,6 +371,18 @@ func TestExtractUsageFromCompletedEvent(t *testing.T) {
 	}
 }
 
+func TestExtractUsageSupportsChatAndAnthropicCacheFields(t *testing.T) {
+	chat := extractMetadata([]byte(`{"id":"chat_1","model":"grok-4.5","usage":{"prompt_tokens":12,"prompt_tokens_details":{"cached_tokens":7},"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":2},"total_tokens":15}}`))
+	if chat.Usage.InputTokens != 12 || chat.Usage.CachedInputTokens != 7 || chat.Usage.OutputTokens != 3 || chat.Usage.ReasoningTokens != 2 || chat.Usage.TotalTokens != 15 {
+		t.Fatalf("chat usage = %#v", chat.Usage)
+	}
+
+	messages := extractMetadata([]byte(`{"id":"msg_1","model":"grok-4.5","usage":{"input_tokens":20,"cache_read_input_tokens":11,"output_tokens":4}}`))
+	if messages.Usage.InputTokens != 20 || messages.Usage.CachedInputTokens != 11 || messages.Usage.OutputTokens != 4 || messages.Usage.TotalTokens != 24 {
+		t.Fatalf("messages usage = %#v", messages.Usage)
+	}
+}
+
 func TestUsageInspectorHandlesChunkedSSE(t *testing.T) {
 	inspector := &responseInspector{}
 	inspector.Inspect([]byte("data: {\"response\":{\"id\":\"resp_stream\",\"usage\":{\"input_tokens\":2,"))
@@ -392,6 +404,17 @@ func TestUsageInspectorHandlesFinalEventWithoutNewline(t *testing.T) {
 	metadata := inspector.Metadata()
 	if metadata.ResponseID != "resp_final" || metadata.Usage.TotalTokens != 11 {
 		t.Fatalf("metadata = %#v", metadata)
+	}
+}
+
+func TestUsageInspectorMergesCachedOnlyStreamingEvent(t *testing.T) {
+	inspector := &responseInspector{}
+	inspector.Inspect([]byte("data: {\"usage\":{\"cache_read_input_tokens\":9}}\n\n"))
+	inspector.Inspect([]byte("data: {\"usage\":{\"input_tokens\":12,\"output_tokens\":3,\"total_tokens\":15}}\n\n"))
+
+	usage := inspector.Metadata().Usage
+	if usage.InputTokens != 12 || usage.CachedInputTokens != 9 || usage.OutputTokens != 3 || usage.TotalTokens != 15 {
+		t.Fatalf("merged usage = %#v", usage)
 	}
 }
 
