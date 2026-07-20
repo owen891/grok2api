@@ -89,10 +89,24 @@ docker compose --env-file .env \
   up -d
 ```
 
-When using the deprecated `docker-compose.runtime.yml` fallback, the browser
-overlay deliberately removes its protocol-only `build:` and release-directory
-mounts. This keeps the browser image's Python environment and registration files
-intact; do not add `--build` to that browser deployment.
+When using the deprecated `docker-compose.runtime.yml` fallback, add the legacy
+compatibility overlay after the normal browser overlay:
+
+```sh
+docker compose --env-file .env \
+  -f docker-compose.runtime.yml \
+  -f compose.browser-registration.yml \
+  -f compose.browser-registration.legacy.yml \
+  pull grok2api
+docker compose --env-file .env \
+  -f docker-compose.runtime.yml \
+  -f compose.browser-registration.yml \
+  -f compose.browser-registration.legacy.yml \
+  up -d --force-recreate grok2api
+```
+
+The final overlay removes the protocol-only `build:` and release-directory
+mounts. Do not add `--build` to that legacy browser deployment.
 
 Set the registration worker `engine` to `browser` in the admin registration settings,
 run preflight, then validate 3 accounts before increasing the batch. Browser mode always

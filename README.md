@@ -185,9 +185,17 @@ bootstrapAdmin:
   username: "admin"
   password: "强管理员密码"
 
+frontend:
+  publicApiBaseURL: "https://你的域名"
+
+auth:
+  secureCookies: true
+
 registration:
   enabled: true
 ```
+
+纯内网 HTTP 部署可将 `publicApiBaseURL` 写为服务器地址并保持 `secureCookies: false`；通过 HTTPS 域名访问时使用上面的配置。
 
 启动基础 API：
 
@@ -294,12 +302,14 @@ curl http://127.0.0.1:8000/v1/responses \
 
 ### 6. 升级、回滚和排查
 
-升级前备份 `config.yaml`、`data` 或 PostgreSQL 数据卷。升级时执行：
+升级前备份 `config.yaml`、`data` 或 PostgreSQL 数据卷。升级时复用首次部署选择的 Compose 文件组合；生产部署可直接重新运行 `install.sh` 或 `install.ps1`。基础单机模式执行：
 
 ```bash
 docker compose pull
 docker compose up -d --force-recreate
 ```
+
+协议或浏览器模式升级时，命令中继续带上对应的 `compose.registration.yml` 或 `compose.browser-registration.yml`。
 
 查看状态和日志：
 
@@ -323,7 +333,7 @@ docker compose exec grok2api sh -lc 'command -v chromium; test -f /app/registrat
 | --- | --- |
 | `docker command not found` | 将 endpoint 设置为 `http://grok-turnstile-solver:5072`，并启动 protocol overlay |
 | `register_cli.py: No such file` | 使用 `main-browser` 镜像，重建容器时带 browser overlay |
-| `No module named DrissionPage` | 检查 browser overlay 是否清除了旧 `build:` 和 `/app/registration` release 挂载 |
+| `No module named DrissionPage` | 旧 runtime 部署需追加 `compose.browser-registration.legacy.yml`，并重新拉取 browser 镜像 |
 | `Chromium ... not found` | 当前仍在运行标准 protocol 镜像，拉取并切换 `main-browser` |
 | `DISPLAY is empty and Xvfb is unavailable` | 浏览器模式需使用 `REGISTRATION_BROWSER_MODE=xvfb` 的 browser overlay |
 

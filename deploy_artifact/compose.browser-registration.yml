@@ -4,13 +4,6 @@ name: grok2api
 services:
   grok2api:
     image: "${GROK2API_BROWSER_IMAGE:?set GROK2API_BROWSER_IMAGE to the matching immutable browser tag or digest}"
-    # The legacy runtime file defines a protocol-only build. Browser mode must
-    # consume the prebuilt browser image instead of rebuilding that target.
-    build: !reset null
-    # The legacy release mount can hide the browser files shipped in the image.
-    volumes: !override
-      - "${GROK2API_DEPLOY_DIR:-/opt/grok2api-deploy}/config.docker.yaml:/run/grok2api/config.yaml:ro"
-      - "${GROK2API_DATA_DIR:-/opt/grok2api-data}:/app/data"
     environment:
       DISPLAY: ":99"
       REGISTRATION_BROWSER_MODE: "xvfb"
