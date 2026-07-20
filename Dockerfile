@@ -77,8 +77,8 @@ FROM python:3.13-slim-bookworm AS runtime-base
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     apt-get install -y --no-install-recommends \
+        busybox-static \
         ca-certificates \
-        curl \
         gosu \
         tzdata && \
     rm -rf /var/lib/apt/lists/* && \
@@ -103,17 +103,13 @@ ENV TZ=Asia/Shanghai \
 
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+FROM runtime-base AS runtime-common
+
 WORKDIR /app
 
 COPY --from=backend-builder --chmod=0755 /out/grok2api /app/grok2api
 COPY VERSION /app/VERSION
 COPY --from=frontend-builder /src/frontend/dist /app/frontend/dist
-COPY --from=registration-builder /opt/registration-venv /opt/registration-venv
-COPY registration/protocol_register_cli.py registration/protocol_spool.py registration/yyds_mail.py registration/local_turnstile.py registration/clearance_provider.py /app/registration/
-COPY registration/config.protocol.example.json /app/registration/config.example.json
-COPY registration/cpa_xai/__init__.py registration/cpa_xai/schema.py registration/cpa_xai/writer.py /app/registration/cpa_xai/
-COPY registration/protocol_auth/*.py /app/registration/protocol_auth/
-COPY registration/protocol_auth/xconsole_client /app/registration/protocol_auth/xconsole_client
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/grok2api-entrypoint
 COPY --chmod=0755 docker/registration-entrypoint.sh /usr/local/bin/grok2api-registration
 RUN sed -i 's/\r$//' /usr/local/bin/grok2api-entrypoint /usr/local/bin/grok2api-registration
@@ -121,13 +117,13 @@ RUN sed -i 's/\r$//' /usr/local/bin/grok2api-entrypoint /usr/local/bin/grok2api-
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/healthz >/dev/null || exit 1
+    CMD busybox wget -q -O /dev/null http://127.0.0.1:8000/healthz || exit 1
 
 ENTRYPOINT ["/usr/local/bin/grok2api-entrypoint"]
 CMD ["/app/grok2api", "--config", "/app/config.yaml", "--listen", "0.0.0.0:8000"]
 
 
-FROM runtime-base AS browser-runtime
+FROM runtime-common AS browser-runtime
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -141,6 +137,8 @@ COPY --from=browser-registration-builder /opt/registration-venv /opt/registratio
 COPY registration/*.py /app/registration/
 COPY registration/config.example.json /app/registration/config.example.json
 COPY registration/cpa_xai/ /app/registration/cpa_xai/
+COPY registration/protocol_auth/*.py /app/registration/protocol_auth/
+COPY registration/protocol_auth/xconsole_client /app/registration/protocol_auth/xconsole_client
 COPY registration/turnstilePatch/ /app/registration/turnstilePatch/
 RUN /opt/registration-venv/bin/python -c "import DrissionPage" && \
     test -x /usr/bin/chromium && \
@@ -160,4 +158,11 @@ ENV DISPLAY=:99 \
 ENTRYPOINT ["/usr/local/bin/grok2api-browser-entrypoint"]
 
 
-FROM runtime-base AS runtime
+FROM runtime-common AS runtime
+
+COPY --from=registration-builder /opt/registration-venv /opt/registration-venv
+COPY registration/protocol_register_cli.py registration/protocol_spool.py registration/yyds_mail.py registration/local_turnstile.py registration/clearance_provider.py /app/registration/
+COPY registration/config.protocol.example.json /app/registration/config.example.json
+COPY registration/cpa_xai/__init__.py registration/cpa_xai/schema.py registration/cpa_xai/writer.py /app/registration/cpa_xai/
+COPY registration/protocol_auth/*.py /app/registration/protocol_auth/
+COPY registration/protocol_auth/xconsole_client /app/registration/protocol_auth/xconsole_client

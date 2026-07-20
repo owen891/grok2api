@@ -6,6 +6,12 @@ port="${TURNSTILE_PORT:-5072}"
 thread="${TURNSTILE_THREAD:-1}"
 browser_type="${TURNSTILE_BROWSER_TYPE:-camoufox}"
 proxy="${TURNSTILE_PROXY:-}"
+solver_variant="${TURNSTILE_SOLVER_VARIANT:-full}"
+
+if [[ "$solver_variant" == "camoufox-linux" && "$browser_type" != "camoufox" ]]; then
+  echo "[turnstile-solver] camoufox-linux image only supports TURNSTILE_BROWSER_TYPE=camoufox; use the full image for Chromium" >&2
+  exit 64
+fi
 
 args=(
   python /app/api_solver.py

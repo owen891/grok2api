@@ -71,11 +71,14 @@ docker compose --env-file .env \
   up -d
 ```
 
-The registration overlay expects the fixed solver image published by
-`.github/workflows/solver-image.yml`. It starts Camoufox eagerly, so a missing
-browser binary fails the container health check instead of failing on the first
-registration task. Set `TURNSTILE_BROWSER_TYPE=chromium` only as an explicit
-temporary fallback after verifying the image contains Patchright Chromium.
+The registration overlay keeps using the fixed full solver image by default.
+`.github/workflows/solver-image.yml` also publishes a compact
+`*-camoufox-linux` image that keeps only Linux Camoufox fonts and omits
+Patchright. After that tag is published, set `GROK2API_SOLVER_IMAGE` to it for
+Camoufox-only deployments. It starts Camoufox eagerly, so a missing browser binary
+fails the container health check instead of failing on the first registration task.
+The compact image only supports `TURNSTILE_BROWSER_TYPE=camoufox`; retain the
+matching `*-fixed` image for a Chromium fallback.
 
 ## Browser registration engine
 

@@ -45,7 +45,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish solver
+      - name: Build and publish full solver
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -55,6 +55,86 @@ jobs:
           tags: ghcr.io/owen891/grok2api:solver-0d48ecf8b4ee-fixed
           cache-from: type=gha,scope=turnstile-solver
           cache-to: type=gha,scope=turnstile-solver,mode=max
+          build-args: |
+            INSTALL_PATCHRIGHT=true
+            CAMOUFOX_FONT_PROFILE=full
+            TURNSTILE_SOLVER_VARIANT=full
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Build Camoufox Linux solver for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/turnstile-solver.Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: grok2api/solver:camoufox-linux-smoke
+          cache-from: type=gha,scope=turnstile-solver-linux
+          cache-to: type=gha,scope=turnstile-solver-linux,mode=max
+          build-args: |
+            INSTALL_PATCHRIGHT=false
+            CAMOUFOX_FONT_PROFILE=linux
+            TURNSTILE_SOLVER_VARIANT=camoufox-linux
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Smoke test Camoufox Linux solver
+        shell: bash
+        env:
+          IMAGE: grok2api/solver:camoufox-linux-smoke
+        run: |
+          set -euo pipefail
+          docker run --detach --rm --name solver-smoke \
+            -p 127.0.0.1:15072:5072 \
+            -e TURNSTILE_LAZY=0 \
+            -e TURNSTILE_IDLE_SEC=0 \
+            "$IMAGE"
+          trap 'docker logs --tail=200 solver-smoke || true; docker rm -f solver-smoke || true' EXIT
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:15072/health >/tmp/solver-health.json && \
+              python3 -c 'import json; assert json.load(open("/tmp/solver-health.json"))["pool_ready"]'; then
+              break
+            fi
+            sleep 2
+          done
+          python3 -c 'import json; assert json.load(open("/tmp/solver-health.json"))["pool_ready"]'
+
+          docker exec solver-smoke test ! -d /usr/local/lib/python3.12/site-packages/patchright
+          docker exec solver-smoke sh -c 'test ! -d /root/.cache/camoufox/browsers/official/*/fonts/macos'
+          docker exec solver-smoke sh -c 'test ! -d /root/.cache/camoufox/browsers/official/*/fonts/windows'
+          docker exec -i solver-smoke python - <<'PY'
+          import json
+          from pathlib import Path
+          from camoufox.utils import launch_options
+
+          source = Path("/app/api_solver.py").read_text(encoding="utf-8")
+          assert 'camoufox_options["os"] = "linux"' in source
+          options = launch_options(headless=True, os="linux")
+          config = json.loads(options["env"]["CAMOU_CONFIG_1"])
+          assert config["navigator.platform"].startswith("Linux")
+          PY
+
+      - name: Publish Camoufox Linux solver
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/turnstile-solver.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/owen891/grok2api:solver-0d48ecf8b4ee-camoufox-linux
+          cache-from: type=gha,scope=turnstile-solver-linux
+          cache-to: type=gha,scope=turnstile-solver-linux,mode=max
+          build-args: |
+            INSTALL_PATCHRIGHT=false
+            CAMOUFOX_FONT_PROFILE=linux
+            TURNSTILE_SOLVER_VARIANT=camoufox-linux
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
           provenance: mode=max

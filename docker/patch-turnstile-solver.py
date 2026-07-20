@@ -25,6 +25,21 @@ path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 text = replace_once(
     text,
+    "from patchright.async_api import async_playwright",
+    "try:\n    from patchright.async_api import async_playwright\nexcept ImportError:\n    async_playwright = None",
+)
+text = replace_once(
+    text,
+    "        if self.browser_type in ['chromium', 'chrome', 'msedge']:\n            playwright = await async_playwright().start()\n            self._playwright = playwright",
+    "        if self.browser_type in ['chromium', 'chrome', 'msedge']:\n            if async_playwright is None:\n                raise RuntimeError(\n                    'Patchright is unavailable; use a full solver image for Chromium.'\n                )\n            playwright = await async_playwright().start()\n            self._playwright = playwright",
+)
+text = replace_once(
+    text,
+    '        elif self.browser_type == "camoufox":\n            camoufox = AsyncCamoufox(headless=self.headless)\n            self._camoufox = camoufox',
+    '        elif self.browser_type == "camoufox":\n            camoufox_options = {"headless": self.headless}\n            if os.getenv("TURNSTILE_SOLVER_VARIANT", "").strip().lower() == "camoufox-linux":\n                camoufox_options["os"] = "linux"\n            camoufox = AsyncCamoufox(**camoufox_options)\n            self._camoufox = camoufox',
+)
+text = replace_once(
+    text,
     "async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None):",
     "async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None, proxy_override: Optional[str] = None):",
 )

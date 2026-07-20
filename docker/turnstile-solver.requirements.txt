@@ -1,6 +1,5 @@
 quart==0.20.0
 camoufox==0.5.4
-patchright==1.61.2
 rich==15.0.0
 requests==2.34.2
 python-dotenv==1.2.2
