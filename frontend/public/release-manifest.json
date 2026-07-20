@@ -1,39 +1,7 @@
 {
-  "latest": "v3.1.2",
+  "latest": "v3.1.0",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
-    {
-      "version": "v3.1.2",
-      "date": "2026-07-20",
-      "entries": [
-        {
-          "type": "ops",
-          "zh": "统一 Fork 的 Go module、登录入口、部署说明、镜像示例和 Issue 模板到 owen891/grok2api。",
-          "en": "Unified the fork's Go module, login link, deployment docs, image examples, and issue template on owen891/grok2api."
-        }
-      ]
-    },
-    {
-      "version": "v3.1.1",
-      "date": "2026-07-20",
-      "entries": [
-        {
-          "type": "fix",
-          "zh": "修复点击检查更新时只读取旧镜像内置清单、无法发现 GitHub 新版本的问题。",
-          "en": "Fixed manual update checks so an older image cannot hide newer releases in the GitHub manifest."
-        },
-        {
-          "type": "fix",
-          "zh": "统一前后端版本检查来源到本项目仓库，并让容器后端读取构建版本号。",
-          "en": "Unified frontend and backend version checks on this repository and made the container backend read its build version."
-        },
-        {
-          "type": "ops",
-          "zh": "v3.0.9 需执行一次 docker compose pull 和强制重建；升级后可继续使用内置检查更新。",
-          "en": "v3.0.9 requires one manual docker compose pull and forced recreation; built-in update checks work normally afterward."
-        }
-      ]
-    },
     {
       "version": "v3.1.0",
       "date": "2026-07-19",
@@ -92,6 +60,26 @@
           "type": "feature",
           "zh": "代理节点列表新增启用/停用开关，可直接快速控制节点是否参与路由。",
           "en": "Added an enable/disable switch to the egress-node list for quickly controlling whether a node participates in routing."
+        },
+        {
+          "type": "fix",
+          "zh": "修复点击检查更新时只读取旧镜像内置清单、无法发现 GitHub 新版本的问题。",
+          "en": "Fixed manual update checks so an older image cannot hide newer releases in the GitHub manifest."
+        },
+        {
+          "type": "fix",
+          "zh": "统一前后端版本检查来源到本项目仓库，并让容器后端读取构建版本号。",
+          "en": "Unified frontend and backend version checks on this repository and made the container backend read its build version."
+        },
+        {
+          "type": "ops",
+          "zh": "统一 Fork 的 Go module、登录入口、部署说明、镜像示例和 Issue 模板到 owen891/grok2api。",
+          "en": "Unified the fork's Go module, login link, deployment docs, image examples, and issue template on owen891/grok2api."
+        },
+        {
+          "type": "ops",
+          "zh": "v3.0.9 需执行一次 docker compose pull 和强制重建；升级后可继续使用内置检查更新。",
+          "en": "v3.0.9 requires one manual docker compose pull and forced recreation; built-in update checks work normally afterward."
         }
       ]
     },
