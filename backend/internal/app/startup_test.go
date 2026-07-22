@@ -105,3 +105,24 @@ func TestReadinessRestoresPersistedCooldownWithoutUpstreamProbe(t *testing.T) {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }
+
+func TestStartupCandidateUsableRejectsModelHealthIsolation(t *testing.T) {
+	now := time.Now().UTC()
+	base := accountdomain.RoutingCandidate{Credential: accountdomain.Credential{
+		Enabled: true, AuthStatus: accountdomain.AuthStatusActive, EncryptedAccessToken: "encrypted",
+	}}
+	for _, status := range []string{
+		accountdomain.InferenceHealthPermissionDenied,
+		accountdomain.InferenceHealthReauth,
+		accountdomain.InferenceHealthModelUnavailable,
+	} {
+		candidate := base
+		candidate.InferenceHealth = &accountdomain.InferenceHealth{Status: status, UpdatedAt: now}
+		if startupCandidateUsable(candidate, now, provider.NewRegistry()) {
+			t.Fatalf("health status %q was treated as startup-ready", status)
+		}
+	}
+	if !startupCandidateUsable(base, now, provider.NewRegistry()) {
+		t.Fatal("healthy active candidate was not startup-ready")
+	}
+}

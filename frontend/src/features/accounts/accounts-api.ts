@@ -1,4 +1,4 @@
-import { ApiError, apiDownload, apiEventStream, apiRequest, type PaginatedDTO } from "@/shared/api/client";
+import { ApiError, apiDownload, apiEventStream, apiRequest, type DownloadResult, type PaginatedDTO } from "@/shared/api/client";
 import { createObjectDecoder, createPaginatedDecoder, createValidatedDecoder, decodeBooleanResult, decodeCountResult, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
 import { i18n } from "@/shared/i18n";
 import type { SortOrder } from "@/shared/lib/table-sort";
@@ -84,6 +84,14 @@ export type AccountDTO = {
   linkedAccountId?: string;
   linkedAccountName?: string;
   linkedProvider?: "grok_build" | "grok_web";
+  inferenceModel?: string;
+  inferenceHealth?: {
+    status: "pending" | "healthy" | "permission_denied" | "reauth" | "model_unavailable" | "probe_error";
+    verifiedAt?: string;
+    httpStatus?: number;
+    errorCode?: string;
+    updatedAt: string;
+  };
   createdAt: string;
   billing?: BillingDTO;
   quota: QuotaDTO;
@@ -155,6 +163,10 @@ const accountValidator = hasShape({
   lastRefreshErrorCode: isOptional(isString), priority: isNumber, maxConcurrent: isNumber, minimumRemaining: isNumber,
   failureCount: isNumber, cooldownUntil: isOptional(isString), lastError: isOptional(isString), lastUsedAt: isOptional(isString),
   linkedAccountId: isOptional(isString), linkedAccountName: isOptional(isString), linkedProvider: isOptional(isOneOf("grok_build", "grok_web")),
+  inferenceModel: isOptional(isString), inferenceHealth: isOptional(hasShape({
+    status: isOneOf("pending", "healthy", "permission_denied", "reauth", "model_unavailable", "probe_error"),
+    verifiedAt: isOptional(isString), httpStatus: isOptional(isNumber), errorCode: isOptional(isString), updatedAt: isString,
+  })),
   createdAt: isString, billing: isOptional(billingValidator), quota: quotaValidator, quotaWindows: isOptional(isArrayOf(quotaWindowValidator)),
 });
 const decodeBilling = createValidatedDecoder<BillingDTO>("billing", billingValidator);
@@ -393,8 +405,12 @@ export function refreshAccountQuota(id: string): Promise<AccountDTO> {
   return apiRequest(`/api/admin/v1/accounts/${id}/refresh-quota`, { method: "POST" }, decodeAccount);
 }
 
-export function exportAccounts(): Promise<Blob> {
+export function exportAccounts(): Promise<DownloadResult> {
   return apiDownload("/api/admin/v1/accounts/export");
+}
+
+export function exportSub2Accounts(): Promise<DownloadResult> {
+  return apiDownload("/api/admin/v1/accounts/export/sub2api");
 }
 
 export function updateAccountsEnabled(ids: string[], enabled: boolean, provider: AccountProvider): Promise<{ updated: number }> {

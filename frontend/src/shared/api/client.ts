@@ -167,6 +167,13 @@ export type ApiStreamEvent<T> = {
   data: T;
 };
 
+export type DownloadResult = {
+  blob: Blob;
+  exportedCount: number;
+  skippedCount: number;
+  filename?: string;
+};
+
 // apiEventStream 使用现有管理员鉴权发起 POST SSE，并正确处理任意分块边界。
 export async function apiEventStream<T>(path: string, options: RequestOptions, decode: ApiDecoder<T>, onEvent: (value: ApiStreamEvent<T>) => void): Promise<void> {
   const { authenticated = true, retryAuth = true } = options;
@@ -255,7 +262,7 @@ async function readEventStreamChunk(reader: ReadableStreamDefaultReader<Uint8Arr
   }
 }
 
-export async function apiDownload(path: string, retryAuth = true): Promise<Blob> {
+export async function apiDownload(path: string, retryAuth = true): Promise<DownloadResult> {
   const headers = new Headers();
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
   const response = await fetch(`${runtimeConfig.apiBaseUrl}${path}`, {
@@ -273,7 +280,18 @@ export async function apiDownload(path: string, retryAuth = true): Promise<Blob>
     await parseResponse(response, decodeNever);
     throw new ApiError(response.status, "requestFailed", localizedErrorMessage("requestFailed", "The request failed"));
   }
-  return response.blob();
+  const filename = /filename="([^"]+)"/i.exec(response.headers.get("Content-Disposition") ?? "")?.[1];
+  return {
+    blob: await response.blob(),
+    exportedCount: downloadHeaderCount(response, "X-Exported-Accounts"),
+    skippedCount: downloadHeaderCount(response, "X-Skipped-Accounts"),
+    filename,
+  };
+}
+
+function downloadHeaderCount(response: Response, name: string): number {
+  const value = Number.parseInt(response.headers.get(name) ?? "", 10);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 export type AdminDTO = {

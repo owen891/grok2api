@@ -130,6 +130,8 @@ type Credential struct {
 	BuildAPIFallback      bool
 	BuildSuperEntitled    bool
 	BuildRouteMode        BuildRouteMode
+	InferenceModel        string
+	InferenceHealth       *InferenceHealth
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 }
@@ -296,7 +298,31 @@ type RoutingCandidate struct {
 	ObservedTokens       int64
 	ModelCapabilityKnown bool
 	SupportsModel        bool
+	InferenceHealth      *InferenceHealth
 }
+
+// InferenceHealth records whether an account has recently served the exact
+// upstream model. Model discovery alone is not sufficient for routing.
+type InferenceHealth struct {
+	Status     string
+	VerifiedAt *time.Time
+	HTTPStatus int
+	ErrorCode  string
+	UpdatedAt  time.Time
+}
+
+// InferenceHealthMaxAge limits how long a previous model-level inference
+// result may keep an account out of the normal routing pool.
+const InferenceHealthMaxAge = 24 * time.Hour
+
+const (
+	InferenceHealthPending          = "pending"
+	InferenceHealthHealthy          = "healthy"
+	InferenceHealthPermissionDenied = "permission_denied"
+	InferenceHealthReauth           = "reauth"
+	InferenceHealthModelUnavailable = "model_unavailable"
+	InferenceHealthProbeError       = "probe_error"
+)
 
 // RoutingCapacity is a read-only summary produced by the selector's routing policy.
 type RoutingCapacity struct {

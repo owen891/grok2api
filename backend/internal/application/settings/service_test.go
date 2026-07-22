@@ -53,6 +53,10 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	input.ProviderConsole.UserAgent = "console-test-agent"
 	input.ProviderConsole.ChatTimeout = "6m"
 	input.Batch = BatchConfig{ImportConcurrency: 26, ConversionConcurrency: 27, SyncConcurrency: 28, RefreshConcurrency: 29, RandomDelay: "750ms"}
+	input.Accounts.AutoCleanReauthEnabled = true
+	input.Accounts.AutoCleanReauthInterval = "15m"
+	input.Accounts.AutoCleanReauthMinAge = "2h"
+	input.Accounts.AutoCleanDisabledEnabled = true
 
 	snapshot, err := service.Update(context.Background(), service.Get().Revision, input)
 	if err != nil {
@@ -70,6 +74,9 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	if applied.Provider.Console.BaseURL != "https://console.example.com" || applied.Provider.Console.UserAgent != "console-test-agent" || applied.Provider.Console.ChatTimeout.Value() != 6*time.Minute {
 		t.Fatalf("console configuration was not applied: %#v", applied.Provider.Console)
 	}
+	if !applied.Accounts.AutoCleanReauthEnabled || applied.Accounts.AutoCleanReauthInterval.Value() != 15*time.Minute || applied.Accounts.AutoCleanReauthMinAge.Value() != 2*time.Hour || !applied.Accounts.AutoCleanDisabledEnabled {
+		t.Fatalf("account auto-clean configuration was not applied: %#v", applied.Accounts)
+	}
 	if len(snapshot.RestartRequired) != 1 || snapshot.RestartRequired[0] != "audit.bufferSize" {
 		t.Fatalf("restartRequired = %#v", snapshot.RestartRequired)
 	}
@@ -77,7 +84,7 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.Routing.MaxAttempts != 5 || reloaded.Audit.BufferSize != input.Audit.BufferSize || reloaded.Media.MaxTotalBytes != 2<<30 || reloaded.Media.CleanupThresholdPercent != 75 || reloaded.Batch.SyncConcurrency != 28 || reloaded.Batch.RandomDelay.Value() != 750*time.Millisecond || reloaded.Provider.Console.BaseURL != "https://console.example.com" {
+	if reloaded.Routing.MaxAttempts != 5 || reloaded.Audit.BufferSize != input.Audit.BufferSize || reloaded.Media.MaxTotalBytes != 2<<30 || reloaded.Media.CleanupThresholdPercent != 75 || reloaded.Batch.SyncConcurrency != 28 || reloaded.Batch.RandomDelay.Value() != 750*time.Millisecond || reloaded.Provider.Console.BaseURL != "https://console.example.com" || !reloaded.Accounts.AutoCleanReauthEnabled || reloaded.Accounts.AutoCleanReauthInterval.Value() != 15*time.Minute || reloaded.Accounts.AutoCleanReauthMinAge.Value() != 2*time.Hour || !reloaded.Accounts.AutoCleanDisabledEnabled {
 		t.Fatalf("configuration was not persisted")
 	}
 }

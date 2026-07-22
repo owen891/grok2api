@@ -747,7 +747,7 @@ func classifiedResult(result inspectiondomain.Result, failure *gateway.UpstreamF
 		result.Classification = inspectiondomain.ClassificationPermissionDenied
 		result.SuggestedAction = inspectiondomain.ActionReview
 		result.Confidence = inspectiondomain.ConfidenceHigh
-	case failure.HTTPStatus == http.StatusNotFound:
+	case failure.ModelUnavailable:
 		result.Classification = inspectiondomain.ClassificationModelUnavailable
 		result.SuggestedAction = inspectiondomain.ActionKeep
 		result.Confidence = inspectiondomain.ConfidenceHigh
@@ -807,6 +807,20 @@ func (s *Service) applyRunResults(ctx context.Context, run inspectiondomain.Run)
 			result.Skipped++
 			continue
 		}
+		if err := s.applyInferenceEvidence(ctx, value); err != nil {
+			if errors.Is(err, ErrStaleEvidence) {
+				if finishErr := finish(inspectiondomain.ApplyStatusSkipped, "stale_evidence"); finishErr != nil {
+					return result, finishErr
+				}
+				result.Skipped++
+				continue
+			}
+			if finishErr := finish(inspectiondomain.ApplyStatusFailed, err.Error()); finishErr != nil {
+				return result, finishErr
+			}
+			result.Failed++
+			continue
+		}
 		if value.SuggestedAction == inspectiondomain.ActionKeep || value.SuggestedAction == inspectiondomain.ActionReview {
 			if err := finish(inspectiondomain.ApplyStatusSkipped, "action_not_automatic"); err != nil {
 				return result, err
@@ -837,6 +851,30 @@ func (s *Service) applyRunResults(ctx context.Context, run inspectiondomain.Run)
 	return result, nil
 }
 
+func (s *Service) applyInferenceEvidence(ctx context.Context, value inspectiondomain.Result) error {
+	if s.selector == nil {
+		return nil
+	}
+	credential, err := s.accounts.Get(ctx, value.AccountID)
+	if err != nil {
+		return err
+	}
+	if !value.AccountUpdatedAt.IsZero() && credential.UpdatedAt.After(value.AccountUpdatedAt) {
+		return ErrStaleEvidence
+	}
+	switch value.Classification {
+	case inspectiondomain.ClassificationHealthy:
+		return s.selector.ApplyInferenceHealth(ctx, value.AccountID, value.Model, account.InferenceHealthHealthy, value.HTTPStatus, value.ErrorCode)
+	case inspectiondomain.ClassificationPermissionDenied:
+		return s.selector.ApplyInferenceHealth(ctx, value.AccountID, value.Model, account.InferenceHealthPermissionDenied, value.HTTPStatus, value.ErrorCode)
+	case inspectiondomain.ClassificationModelUnavailable:
+		return s.selector.ApplyInferenceHealth(ctx, value.AccountID, value.Model, account.InferenceHealthModelUnavailable, value.HTTPStatus, value.ErrorCode)
+	case inspectiondomain.ClassificationReauth:
+		return s.selector.ApplyInferenceHealth(ctx, value.AccountID, value.Model, account.InferenceHealthReauth, value.HTTPStatus, value.ErrorCode)
+	}
+	return nil
+}
+
 func (s *Service) applyResult(ctx context.Context, value inspectiondomain.Result) error {
 	credential, err := s.accounts.Get(ctx, value.AccountID)
 	if err != nil {
@@ -854,7 +892,7 @@ func (s *Service) applyResult(ctx context.Context, value inspectiondomain.Result
 		if err != nil {
 			return err
 		}
-		return s.selector.ApplyInspectionHealthy(ctx, credential)
+		return s.selector.ApplyInspectionHealthy(ctx, credential, value.Model)
 	case inspectiondomain.ActionRequireReauth:
 		if s.credentials == nil || s.selector == nil {
 			return errors.New("inspection evidence target unavailable")

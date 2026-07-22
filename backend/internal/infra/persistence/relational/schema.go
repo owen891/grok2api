@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/owen891/grok2api/backend/internal/domain/account"
 	"github.com/owen891/grok2api/backend/internal/domain/accountinspection"
+	"gorm.io/gorm/clause"
 )
 
 var schemaModels = []any{
@@ -24,6 +27,7 @@ var schemaModels = []any{
 	&accountModelCapabilityModel{},
 	&accountModelSyncStateModel{},
 	&accountModelQuotaBlockModel{},
+	&accountModelInferenceHealthModel{},
 	&clientKeyModel{},
 	&clientKeyModelPermission{},
 	&billingReservationModel{},
@@ -58,6 +62,7 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_model_route_aliases_route ON model_route_aliases(model_route_id, alias)",
 	"CREATE INDEX IF NOT EXISTS idx_model_route_accounts_account_route ON model_route_accounts(account_id, model_route_id)",
 	"CREATE INDEX IF NOT EXISTS idx_account_model_quota_blocks_due ON account_model_quota_blocks(cooldown_until, account_id)",
+	"CREATE INDEX IF NOT EXISTS idx_account_model_inference_health_status ON account_model_inference_health(upstream_model, status, verified_at, account_id)",
 	"CREATE INDEX IF NOT EXISTS idx_client_keys_created_id ON client_keys(created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_client_keys_status ON client_keys(enabled, expires_at, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_client_key_models_route_key ON client_key_models(model_route_id, client_key_id)",
@@ -100,6 +105,9 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 	if err := db.AutoMigrate(schemaModels...); err != nil {
 		return fmt.Errorf("初始化数据库表: %w", err)
 	}
+	if err := d.backfillInferenceHealth(ctx); err != nil {
+		return fmt.Errorf("backfill model inference health: %w", err)
+	}
 	if err := db.Model(&accountInspectionResultModel{}).
 		Where("applied_at IS NOT NULL AND apply_status = ?", accountinspection.ApplyStatusPending).
 		Updates(map[string]any{"apply_status": accountinspection.ApplyStatusApplied}).Error; err != nil {
@@ -129,6 +137,49 @@ func (d *Database) InitializeSchema(ctx context.Context) error {
 		return fmt.Errorf("迁移模型 Provider 命名空间: %w", err)
 	}
 	return nil
+}
+
+func (d *Database) backfillInferenceHealth(ctx context.Context) error {
+	cutoff := time.Now().UTC().Add(-account.InferenceHealthMaxAge)
+	var results []accountInspectionResultModel
+	if err := d.db.WithContext(ctx).
+		Joins("JOIN provider_accounts ON provider_accounts.id = account_inspection_results.account_id").
+		Where("confidence = ? AND classification IN ?", accountinspection.ConfidenceHigh, []accountinspection.Classification{
+			accountinspection.ClassificationHealthy,
+			accountinspection.ClassificationPermissionDenied,
+			accountinspection.ClassificationReauth,
+			accountinspection.ClassificationModelUnavailable,
+		}).
+		Where("model <> '' AND account_inspection_results.updated_at >= ?", cutoff).
+		Order("account_inspection_results.updated_at DESC, account_inspection_results.run_id DESC").Find(&results).Error; err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(results))
+	rows := make([]accountModelInferenceHealthModel, 0, len(results))
+	for _, result := range results {
+		key := fmt.Sprintf("%d\x00%s", result.AccountID, result.Model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		var verifiedAt *time.Time
+		if result.Classification == string(accountinspection.ClassificationHealthy) {
+			value := result.UpdatedAt.UTC()
+			verifiedAt = &value
+		}
+		rows = append(rows, accountModelInferenceHealthModel{
+			AccountID: result.AccountID, UpstreamModel: result.Model, Status: result.Classification,
+			VerifiedAt: verifiedAt, HTTPStatus: result.HTTPStatus, ErrorCode: result.ErrorCode, UpdatedAt: result.UpdatedAt,
+		})
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return d.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "account_id"}, {Name: "upstream_model"}},
+		DoUpdates: clause.AssignmentColumns([]string{"status", "verified_at", "http_status", "error_code", "updated_at"}),
+		Where:     clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "account_model_inference_health.updated_at < excluded.updated_at"}}},
+	}).CreateInBatches(rows, 200).Error
 }
 
 type consoleConstraint struct {

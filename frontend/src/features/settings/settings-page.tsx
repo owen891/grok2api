@@ -19,7 +19,7 @@ import { useSettings } from "@/features/settings/use-settings";
 import { ErrorState } from "@/shared/components/data-state";
 
 export function SettingsPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { form, settingsQuery, updateMutation, reset } = useSettings();
 
   if (settingsQuery.isError) {
@@ -30,12 +30,24 @@ export function SettingsPage() {
   const loading = settingsQuery.isPending;
   const statsigMode = form.watch("providerWeb.statsigMode");
   const statsigManualConfigured = form.watch("providerWeb.statsigManualConfigured");
+  const autoCleanEnabled = form.watch("accounts.autoCleanReauthEnabled");
   const buildClientVersion = form.watch("providerBuild.clientVersion");
   const buildUserAgent = form.watch("providerBuild.userAgent");
   const recommendedBuild = snapshot?.recommendedProviderBuild;
   const recommendedBuildApplied = recommendedBuild != null
     && buildClientVersion === recommendedBuild.clientVersion
     && buildUserAgent === recommendedBuild.userAgent;
+  const accountCopy = i18n.resolvedLanguage?.startsWith("zh") ? {
+    title: "账号维护", enabled: "自动清理需重新授权账号", includeDisabled: "包含已禁用账号",
+    interval: "清理间隔", minAge: "最短保留时长",
+    enableConfirm: "符合条件的需重新授权账号及其关联记录会在保留期后被永久删除。确定启用自动清理吗？",
+    includeDisabledConfirm: "已禁用且需要重新授权的账号也会被永久删除。确定继续吗？",
+  } : {
+    title: "Account maintenance", enabled: "Automatic invalid-account cleanup", includeDisabled: "Include disabled accounts",
+    interval: "Cleanup interval", minAge: "Minimum retention",
+    enableConfirm: "Eligible reauthorization-required accounts and their associated records will be permanently deleted after the retention period. Enable automatic cleanup?",
+    includeDisabledConfirm: "Disabled accounts that require reauthorization will also be permanently deleted. Continue?",
+  };
   const syncRecommendedBuild = () => {
     if (!recommendedBuild) return;
     form.setValue("providerBuild.clientVersion", recommendedBuild.clientVersion, { shouldDirty: true, shouldTouch: true, shouldValidate: true });
@@ -173,6 +185,30 @@ export function SettingsPage() {
               <SettingsField controlId="batch-sync-concurrency" label={t("settings.batch.syncConcurrency")} error={form.formState.errors.batch?.syncConcurrency?.message}><Input id="batch-sync-concurrency" type="number" min={1} max={50} {...form.register("batch.syncConcurrency", { valueAsNumber: true })} /></SettingsField>
               <SettingsField controlId="batch-refresh-concurrency" label={t("settings.batch.refreshConcurrency")} error={form.formState.errors.batch?.refreshConcurrency?.message}><Input id="batch-refresh-concurrency" type="number" min={1} max={50} {...form.register("batch.refreshConcurrency", { valueAsNumber: true })} /></SettingsField>
               <SettingsField controlId="batch-random-delay" label={t("settings.batch.randomDelay")} error={form.formState.errors.batch?.randomDelay?.message}><Input id="batch-random-delay" type="number" min={0} max={5_000} step={10} {...form.register("batch.randomDelay", { valueAsNumber: true })} /></SettingsField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title={t("settings.accounts.title", { defaultValue: accountCopy.title })}>
+            <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">
+              <SettingsField controlId="accounts-auto-clean-enabled" label={t("settings.accounts.autoCleanReauthEnabled", { defaultValue: accountCopy.enabled })}>
+                <Controller control={form.control} name="accounts.autoCleanReauthEnabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="accounts-auto-clean-enabled" checked={field.value} onCheckedChange={(checked) => {
+                  if (checked && !window.confirm(t("settings.accounts.enableConfirm", { defaultValue: accountCopy.enableConfirm }))) return;
+                  field.onChange(checked);
+                  if (!checked) form.setValue("accounts.autoCleanDisabledEnabled", false, { shouldDirty: true });
+                }} /></div>} />
+              </SettingsField>
+              <SettingsField controlId="accounts-include-disabled" label={t("settings.accounts.autoCleanIncludeDisabled", { defaultValue: accountCopy.includeDisabled })}>
+                <Controller control={form.control} name="accounts.autoCleanDisabledEnabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="accounts-include-disabled" checked={field.value} onCheckedChange={(checked) => {
+                  if (checked && !window.confirm(t("settings.accounts.includeDisabledConfirm", { defaultValue: accountCopy.includeDisabledConfirm }))) return;
+                  field.onChange(checked);
+                }} disabled={!autoCleanEnabled} /></div>} />
+              </SettingsField>
+              <SettingsField controlId="accounts-auto-clean-interval" label={t("settings.accounts.autoCleanReauthInterval", { defaultValue: accountCopy.interval })} error={form.formState.errors.accounts?.autoCleanReauthInterval?.message}>
+                <Controller control={form.control} name="accounts.autoCleanReauthInterval" render={({ field }) => <DurationInput id="accounts-auto-clean-interval" value={field.value} onChange={field.onChange} />} />
+              </SettingsField>
+              <SettingsField controlId="accounts-auto-clean-min-age" label={t("settings.accounts.autoCleanReauthMinAge", { defaultValue: accountCopy.minAge })} error={form.formState.errors.accounts?.autoCleanReauthMinAge?.message}>
+                <Controller control={form.control} name="accounts.autoCleanReauthMinAge" render={({ field }) => <DurationInput id="accounts-auto-clean-min-age" value={field.value} onChange={field.onChange} />} />
+              </SettingsField>
             </div>
           </SettingsSection>
 

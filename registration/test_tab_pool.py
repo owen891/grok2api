@@ -1,6 +1,9 @@
+import sys
 import threading
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from tab_pool import TabPool
 
@@ -33,6 +36,17 @@ class TabPoolReleaseTests(unittest.TestCase):
         self.assertIsNone(TabPool.get_browser())
         self.assertEqual(0, TabPool.live_count())
         release_quit.set()
+
+    def test_browser_creation_hides_background_window(self):
+        browser = SimpleNamespace(process_id=4321)
+        with (
+            patch.dict(sys.modules, {"DrissionPage": SimpleNamespace(Chromium=lambda _options: browser)}),
+            patch("browser_runtime.hide_browser_windows") as hide_windows,
+        ):
+            TabPool.init(lambda: object())
+            self.assertIs(TabPool._create_browser(), browser)
+
+        hide_windows.assert_called_once_with(4321)
 
 
 if __name__ == "__main__":

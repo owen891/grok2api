@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 import requests
 
@@ -120,7 +120,7 @@ class TempmailInbox:
                 code = _extract_code(text)
                 if code:
                     if self.debug:
-                        print(f"  [Tempmail] code found: {code} (from: {email.get('from')})")
+                        print(f"  [Tempmail] code found (from: {email.get('from')})")
                     return code
 
             if time.time() >= deadline:

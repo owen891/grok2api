@@ -13,6 +13,21 @@ $outputPath = if ([System.IO.Path]::IsPathRooted($Output)) {
     [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Output))
 }
 
+$comparison = [System.StringComparison]::OrdinalIgnoreCase
+$directorySeparator = [System.IO.Path]::DirectorySeparatorChar
+$alternateSeparator = [System.IO.Path]::AltDirectorySeparatorChar
+$normalizedRepo = $repo.TrimEnd($directorySeparator, $alternateSeparator)
+$normalizedOutput = $outputPath.TrimEnd($directorySeparator, $alternateSeparator)
+$normalizedRoot = ([System.IO.Path]::GetPathRoot($outputPath)).TrimEnd($directorySeparator, $alternateSeparator)
+if (
+    [string]::IsNullOrWhiteSpace($normalizedOutput) -or
+    $normalizedOutput.Equals($normalizedRoot, $comparison) -or
+    $normalizedRepo.Equals($normalizedOutput, $comparison) -or
+    $normalizedRepo.StartsWith($normalizedOutput + $directorySeparator, $comparison)
+) {
+    throw "Refusing unsafe deployment output path: $outputPath"
+}
+
 if (Test-Path $outputPath) {
     Remove-Item -LiteralPath $outputPath -Recurse -Force
 }

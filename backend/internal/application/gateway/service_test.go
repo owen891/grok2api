@@ -157,6 +157,93 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	}
 }
 
+func TestGatewayMarksInferenceHealthyOnlyAfterSuccessfulFinalization(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "stream-finalization.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	credential, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "stream", SourceKey: "stream", EncryptedAccessToken: "encrypted",
+		ExpiresAt: time.Now().Add(time.Hour), Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const upstreamModel = "grok-stream-finalization"
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{upstreamModel}); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{upstreamModel}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "stream-key", Prefix: "stream-finalization", SecretHash: strings.Repeat("c", 64), EncryptedSecret: "encrypted",
+		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &failoverAdapter{}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
+	healthStatus := func() string {
+		t.Helper()
+		candidates, listErr := accountRepo.ListRoutingCandidates(ctx, account.ProviderBuild, upstreamModel, "")
+		if listErr != nil || len(candidates) != 1 {
+			t.Fatalf("candidates=%#v err=%v", candidates, listErr)
+		}
+		if candidates[0].InferenceHealth == nil {
+			return ""
+		}
+		return candidates[0].InferenceHealth.Status
+	}
+
+	interrupted, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-stream-interrupted", ClientKey: clientKey, PublicModel: upstreamModel,
+		Body: []byte(`{"model":"grok-stream-finalization","stream":true}`), Streaming: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := healthStatus(); status == account.InferenceHealthHealthy {
+		t.Fatalf("HTTP 2xx marked inference healthy before finalization: %q", status)
+	}
+	interrupted.Finalize(Usage{}, "", "stream_interrupted")
+	_ = interrupted.Body.Close()
+	if status := healthStatus(); status == account.InferenceHealthHealthy {
+		t.Fatalf("interrupted stream marked inference healthy: %q", status)
+	}
+
+	completed, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-stream-completed", ClientKey: clientKey, PublicModel: upstreamModel,
+		Body: []byte(`{"model":"grok-stream-finalization","stream":true}`), Streaming: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(completed.Body); err != nil {
+		t.Fatal(err)
+	}
+	completed.Finalize(Usage{}, "", "")
+	_ = completed.Body.Close()
+	if status := healthStatus(); status != account.InferenceHealthHealthy {
+		t.Fatalf("completed stream health=%q", status)
+	}
+}
+
 func TestSelectConversationRouteRespectsClientKeyAcrossSharedPublicModel(t *testing.T) {
 	registry := provider.NewRegistry(&failoverAdapter{}, statelessConsoleAdapter{})
 	service := &Service{
@@ -355,6 +442,85 @@ func TestGatewayPreservesRepeatedSystemicForbiddenWithoutCoolingAccounts(t *test
 	logs, total, err := auditRepo.List(ctx, 0, 10)
 	if err != nil || total != 1 || logs[0].StatusCode != http.StatusForbidden || logs[0].ErrorCode != "upstream_forbidden" || logs[0].AccountID == nil || *logs[0].AccountID != credentials[1].ID {
 		t.Fatalf("audit = %#v, total=%d, err=%v", logs, total, err)
+	}
+}
+
+func TestGatewayPersistsRuntimeModelUnavailableWithoutCoolingAccounts(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "runtime-model-unavailable.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	credentials := make([]account.Credential, 0, 2)
+	for _, name := range []string{"first-model", "second-model"} {
+		credential, _, createErr := accountRepo.UpsertByIdentity(ctx, account.Credential{
+			Provider: account.ProviderBuild, Name: name, SourceKey: name, EncryptedAccessToken: name,
+			ExpiresAt: time.Now().Add(time.Hour), Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		credentials = append(credentials, credential)
+	}
+	const upstreamModel = "grok-runtime-missing"
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{upstreamModel}); err != nil {
+		t.Fatal(err)
+	}
+	for _, credential := range credentials {
+		if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{upstreamModel}, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clientKey, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "model-unavailable-key", Prefix: "model-unavailable", SecretHash: strings.Repeat("d", 64), EncryptedSecret: "encrypted",
+		Enabled: true, RPMLimit: 120, MaxConcurrent: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := modelUnavailableAdapter{statusCode: http.StatusBadRequest}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
+
+	_, err = service.CreateResponse(ctx, Input{
+		RequestID: "req-runtime-model-unavailable", ClientKey: clientKey, PublicModel: upstreamModel,
+		Body: []byte(`{"model":"grok-runtime-missing","input":"hello"}`),
+	})
+	var failure *UpstreamFailure
+	if !errors.As(err, &failure) || !failure.ModelUnavailable || failure.Scope != FailureScopeModel {
+		t.Fatalf("error=%T %v failure=%#v", err, err, failure)
+	}
+	for _, credential := range credentials {
+		current, getErr := accountRepo.Get(ctx, credential.ID)
+		if getErr != nil || current.AuthStatus != account.AuthStatusActive || current.CooldownUntil != nil || current.FailureCount != 0 {
+			t.Fatalf("account %d health=%#v err=%v", credential.ID, current, getErr)
+		}
+	}
+	candidates, err := accountRepo.ListRoutingCandidates(ctx, account.ProviderBuild, upstreamModel, "")
+	if err != nil || len(candidates) != len(credentials) {
+		t.Fatalf("candidates=%#v err=%v", candidates, err)
+	}
+	for _, candidate := range candidates {
+		if candidate.InferenceHealth == nil || candidate.InferenceHealth.Status != account.InferenceHealthModelUnavailable {
+			t.Fatalf("candidate health=%#v", candidate.InferenceHealth)
+		}
+	}
+	_, err = selector.Acquire(ctx, account.ProviderBuild, upstreamModel, "", "", nil, false)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionInferenceDenied {
+		t.Fatalf("selection error=%v", err)
 	}
 }
 
@@ -813,6 +979,9 @@ drainQuotaSync:
 			t.Fatalf("protocol failure changed account health: before=%#v after=%#v", before, after)
 		}
 	}
+	for _, value := range []account.Credential{credential, backupCredential} {
+		selector.MarkInferenceHealthy(ctx, value.ID, "grok-imagine-image")
+	}
 	attemptsBeforeModeration := len(adapter.Attempts())
 	adapter.SetTerminalProtocolFailures(1)
 	_, err = service.GenerateImage(ctx, ImageGenerationInput{
@@ -1034,6 +1203,26 @@ type failoverAdapter struct {
 
 type statelessConsoleAdapter struct{}
 
+type modelUnavailableAdapter struct{ statusCode int }
+
+func (modelUnavailableAdapter) Provider() account.Provider { return account.ProviderBuild }
+func (modelUnavailableAdapter) Definition() provider.Definition {
+	return provider.Definition{
+		Provider:     account.ProviderBuild,
+		Conversation: provider.ConversationSurface{Responses: true},
+	}
+}
+func (a modelUnavailableAdapter) ForwardResponse(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
+	statusCode := a.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusNotFound
+	}
+	return &provider.Response{
+		StatusCode: statusCode, Status: http.StatusText(statusCode), Header: make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`{"error":{"code":"model_not_found","message":"model unavailable"}}`)),
+	}, nil
+}
+
 func (statelessConsoleAdapter) Provider() account.Provider { return account.ProviderConsole }
 func (statelessConsoleAdapter) Definition() provider.Definition {
 	return provider.Definition{
@@ -1103,15 +1292,16 @@ type webRateLimitAdapter struct {
 }
 
 type webImageStreamAdapter struct {
-	mu             sync.Mutex
-	streaming      bool
-	editResolution string
-	synced         chan string
-	failureEgress  *infraegress.Manager
-	responseStatus []int
-	protocolErrors int
-	terminalErrors int
-	attempts       []uint64
+	mu                sync.Mutex
+	streaming         bool
+	editResolution    string
+	synced            chan string
+	failureEgress     *infraegress.Manager
+	responseStatus    []int
+	protocolErrors    int
+	protocolErrorCode string
+	terminalErrors    int
+	attempts          []uint64
 }
 
 type webChatQuotaAdapter struct {
@@ -1163,9 +1353,13 @@ func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provi
 	a.attempts = append(a.attempts, request.Credential.ID)
 	responseStatus := http.StatusOK
 	protocolError := false
+	protocolErrorCode := "image_generation_incomplete"
 	if a.protocolErrors > 0 {
 		a.protocolErrors--
 		protocolError = true
+		if a.protocolErrorCode != "" {
+			protocolErrorCode = a.protocolErrorCode
+		}
 	}
 	terminalError := false
 	if a.terminalErrors > 0 {
@@ -1181,7 +1375,7 @@ func (a *webImageStreamAdapter) GenerateImage(ctx context.Context, request provi
 		return nil, provider.NewTerminalMediaProtocolError("image_moderated", errors.New("blocked by content policy"))
 	}
 	if protocolError {
-		return nil, provider.NewMediaProtocolError("image_generation_incomplete", errors.New("missing final image"))
+		return nil, provider.NewMediaProtocolError(protocolErrorCode, errors.New("missing usable image"))
 	}
 	if failureEgress != nil {
 		lease, err := failureEgress.Acquire(ctx, egressdomain.ScopeWeb, "image-failure")
@@ -1242,6 +1436,7 @@ func (a *webImageStreamAdapter) SetProtocolFailures(count int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.protocolErrors = max(0, count)
+	a.protocolErrorCode = "image_generation_incomplete"
 }
 func (a *webImageStreamAdapter) SetTerminalProtocolFailures(count int) {
 	a.mu.Lock()

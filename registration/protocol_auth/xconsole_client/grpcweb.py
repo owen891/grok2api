@@ -111,13 +111,15 @@ def decode_message(data: bytes) -> List[Dict[str, Any]]:
             val, i = _read_varint(data, i)
             fields.append({"field": field_no, "type": "varint", "value": val})
         elif wt == WT_FIXED64:
-            chunk = data[i:i + 8]; i += 8
+            chunk = data[i:i + 8]
+            i += 8
             fields.append({"field": field_no, "type": "fixed64",
                            "double": struct.unpack("<d", chunk)[0] if len(chunk) == 8 else None,
                            "hex": chunk.hex()})
         elif wt == WT_LEN:
             ln, i = _read_varint(data, i)
-            chunk = data[i:i + ln]; i += ln
+            chunk = data[i:i + ln]
+            i += ln
             try:
                 s = chunk.decode("utf-8")
                 if s.isprintable():
@@ -127,7 +129,8 @@ def decode_message(data: bytes) -> List[Dict[str, Any]]:
                 pass
             fields.append({"field": field_no, "type": "bytes", "hex": chunk.hex(), "len": ln})
         elif wt == WT_FIXED32:
-            chunk = data[i:i + 4]; i += 4
+            chunk = data[i:i + 4]
+            i += 4
             fields.append({"field": field_no, "type": "fixed32",
                            "float": struct.unpack("<f", chunk)[0] if len(chunk) == 4 else None,
                            "uint": struct.unpack("<I", chunk)[0] if len(chunk) == 4 else None,

@@ -48,10 +48,15 @@ __pycache__/
 
 # Registration runtime credentials and reports
 /registration/accounts_cli.txt
+/registration/accounts_*.txt
+/registration/config.json
 /registration/cpa_auths/
 /registration/cookies/
+/registration/emails_error.txt
+/registration/emails_used.txt
 /registration/screenshots/
 /registration/**/*report*.json
+/registration/**/accounts_output/
 /registration/**/oauth_output/
 /registration/**/sso_output/
 
@@ -62,6 +67,7 @@ __pycache__/
 /*.out
 /*.err
 /*.out.bak.*
+/.runtime-*.pid
 
 # Local release/build artifacts
 /build/

@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -92,5 +93,122 @@ func TestExportCredentialsRoundTripsImportFormat(t *testing.T) {
 	}
 	if len(multiProgress) != 3 || multiProgress[0] != [2]int{0, 2} || multiProgress[2] != [2]int{2, 2} {
 		t.Fatalf("multi-file import progress = %#v", multiProgress)
+	}
+}
+
+func TestExportSub2CredentialsMatchesImportContract(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "sub2-export.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessToken, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshToken, err := cipher.Encrypt("refresh-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	exportedAt := time.Date(2026, 7, 21, 9, 30, 0, 0, time.UTC)
+	repository := relational.NewAccountRepository(database)
+	for _, value := range []accountdomain.Credential{
+		{
+			Provider: accountdomain.ProviderBuild, Name: "primary", Email: "user@example.com", SourceKey: "sub2-valid",
+			OIDCClientID: "client-1", EncryptedAccessToken: accessToken, EncryptedRefreshToken: refreshToken,
+			ExpiresAt: expiresAt, Enabled: true, AuthStatus: accountdomain.AuthStatusActive, Priority: 7, MaxConcurrent: 12,
+		},
+		{
+			Provider: accountdomain.ProviderBuild, Name: "not-refreshable", SourceKey: "sub2-no-refresh",
+			EncryptedAccessToken: accessToken, Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
+			Priority: 1, MaxConcurrent: 8,
+		},
+	} {
+		if _, _, err := repository.UpsertByIdentity(ctx, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := NewService(repository, nil, nil, nil, provider.NewRegistry(), cipher, nil)
+	service.now = func() time.Time { return exportedAt }
+
+	result, err := service.ExportSub2Credentials(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "type": "sub2api-data",
+  "version": 1,
+  "exported_at": "2026-07-21T09:30:00Z",
+  "proxies": [],
+  "accounts": [
+    {
+      "name": "primary",
+      "platform": "grok",
+      "type": "oauth",
+      "credentials": {
+        "access_token": "access-token",
+        "refresh_token": "refresh-token",
+        "token_type": "Bearer",
+        "expires_at": "2026-07-12T12:00:00Z",
+        "email": "user@example.com",
+        "client_id": "client-1",
+        "scope": "openid profile email offline_access grok-cli:access api:access",
+        "base_url": "https://cli-chat-proxy.grok.com/v1"
+      },
+      "concurrency": 12,
+      "priority": 50,
+      "rate_multiplier": 1,
+      "auto_pause_on_expired": false,
+      "expires_at": 1783857600
+    }
+  ]
+}
+`
+	if result.Count != 1 || result.Skipped != 1 || string(result.Data) != want {
+		t.Fatalf("export result = %#v, document = %s", result, result.Data)
+	}
+}
+
+func TestSub2PriorityMapReversesPriorityOrderByTier(t *testing.T) {
+	priorities := sub2PriorityMap([]sub2ExportSource{
+		{credential: accountdomain.Credential{Priority: 500}},
+		{credential: accountdomain.Credential{Priority: 100}},
+		{credential: accountdomain.Credential{Priority: 500}},
+		{credential: accountdomain.Credential{Priority: -1}},
+	})
+	if priorities[500] != 50 || priorities[100] != 51 || priorities[-1] != 52 {
+		t.Fatalf("priority mapping = %#v", priorities)
+	}
+}
+
+func TestExportSub2CredentialsRejectsEmptyRefreshableSet(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "sub2-empty.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := relational.NewAccountRepository(database)
+	service := NewService(repository, nil, nil, nil, provider.NewRegistry(), cipher, nil)
+
+	_, err = service.ExportSub2Credentials(ctx)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v", err)
 	}
 }

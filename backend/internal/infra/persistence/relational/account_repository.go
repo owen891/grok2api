@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/owen891/grok2api/backend/internal/domain/account"
+	"github.com/owen891/grok2api/backend/internal/domain/media"
 	"github.com/owen891/grok2api/backend/internal/repository"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -23,13 +24,14 @@ type quotaBreakdownJSON struct {
 }
 
 const (
-	accountPaidBillingPredicate        = `EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.monthly_limit > 0 OR billing.on_demand_cap > 0 OR billing.on_demand_used > 0 OR billing.prepaid_balance > 0 OR billing.credit_usage_percent > 0))`
-	accountFreeSignalPredicate         = `(LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.is_unified_billing_user = TRUE OR billing.usage_period_type <> '' OR billing.top_up_method <> '' OR billing.billing_period_start <> '' OR (billing.history_json <> '' AND billing.history_json <> '[]' AND billing.history_json <> 'null'))))`
-	accountRecoveryPredicate           = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
-	accountFreeQuotaExhaustedPredicate = `(NOT (` + accountPaidBillingPredicate + `) AND (` + accountFreeSignalPredicate + `) AND EXISTS (SELECT 1 FROM request_audits usage WHERE usage.account_id = provider_accounts.id AND usage.created_at >= ? AND usage.total_tokens > 0 GROUP BY usage.account_id HAVING COALESCE(SUM(usage.total_tokens), 0) >= ?))`
-	providerQuotaExhaustedPredicate    = `((provider_accounts.provider = 'grok_web' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining <= 0)) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))`
-	accountTypeSortExpression          = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountPaidBillingPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
-	accountStatusSortExpression        = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
+	accountPaidBillingPredicate          = `EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.monthly_limit > 0 OR billing.on_demand_cap > 0 OR billing.on_demand_used > 0 OR billing.prepaid_balance > 0 OR billing.credit_usage_percent > 0))`
+	accountFreeSignalPredicate           = `(LOWER(TRIM(provider_accounts.observed_model)) LIKE '%-build-free' OR EXISTS (SELECT 1 FROM account_billing_snapshots billing WHERE billing.account_id = provider_accounts.id AND (billing.is_unified_billing_user = TRUE OR billing.usage_period_type <> '' OR billing.top_up_method <> '' OR billing.billing_period_start <> '' OR (billing.history_json <> '' AND billing.history_json <> '[]' AND billing.history_json <> 'null'))))`
+	accountRecoveryPredicate             = `EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status IN ('exhausted', 'probing'))`
+	accountBuildInferenceDeniedPredicate = `(provider_accounts.provider = 'grok_build' AND EXISTS (SELECT 1 FROM account_model_inference_health health WHERE health.account_id = provider_accounts.id AND health.upstream_model = 'grok-4.5' AND health.updated_at >= ? AND health.status IN ('permission_denied', 'reauth', 'model_unavailable')))`
+	accountFreeQuotaExhaustedPredicate   = `(NOT (` + accountPaidBillingPredicate + `) AND (` + accountFreeSignalPredicate + `) AND EXISTS (SELECT 1 FROM request_audits usage WHERE usage.account_id = provider_accounts.id AND usage.created_at >= ? AND usage.total_tokens > 0 GROUP BY usage.account_id HAVING COALESCE(SUM(usage.total_tokens), 0) >= ?))`
+	providerQuotaExhaustedPredicate      = `((provider_accounts.provider = 'grok_web' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining <= 0)) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))`
+	accountTypeSortExpression            = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountPaidBillingPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
+	accountStatusSortExpression          = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
 )
 
 func (r *AccountRepository) List(ctx context.Context, input repository.AccountListQuery) ([]account.Credential, int64, error) {
@@ -54,7 +56,9 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	}
 	switch input.Filter.Status {
 	case "active":
-		query = query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+providerQuotaExhaustedPredicate+" AND NOT "+accountFreeQuotaExhaustedPredicate+" AND (cooldown_until IS NULL OR cooldown_until <= ?)", true, account.AuthStatusActive, input.Filter.Now.Add(-account.FreeUsageWindow), account.EstimatedFreeTokenLimit, input.Filter.Now)
+		query = query.Where("enabled = ? AND auth_status = ? AND NOT "+accountRecoveryPredicate+" AND NOT "+providerQuotaExhaustedPredicate+" AND NOT "+accountFreeQuotaExhaustedPredicate+" AND NOT "+accountBuildInferenceDeniedPredicate+" AND (cooldown_until IS NULL OR cooldown_until <= ?)", true, account.AuthStatusActive, input.Filter.Now.Add(-account.FreeUsageWindow), account.EstimatedFreeTokenLimit, input.Filter.Now.Add(-account.InferenceHealthMaxAge), input.Filter.Now)
+	case "modelDenied":
+		query = query.Where(accountBuildInferenceDeniedPredicate, input.Filter.Now.Add(-account.InferenceHealthMaxAge))
 	case "disabled":
 		query = query.Where("enabled = ?", false)
 	case "reauthRequired":
@@ -99,6 +103,9 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	if err := r.attachAccountLinks(ctx, out); err != nil {
 		return nil, 0, err
 	}
+	if err := r.attachBuildInferenceHealth(ctx, out, input.Filter.Now); err != nil {
+		return nil, 0, err
+	}
 	return out, total, nil
 }
 
@@ -108,7 +115,7 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 	selectFields := `
 		provider,
 		COUNT(*) AS total,
-		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND NOT ` + accountFreeQuotaExhaustedPredicate + ` AND (cooldown_until IS NULL OR cooldown_until <= ?) THEN 1 ELSE 0 END) AS available,
+		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND NOT ` + accountFreeQuotaExhaustedPredicate + ` AND NOT ` + accountBuildInferenceDeniedPredicate + ` AND (cooldown_until IS NULL OR cooldown_until <= ?) THEN 1 ELSE 0 END) AS available,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND NOT ` + accountRecoveryPredicate + ` AND NOT ` + providerQuotaExhaustedPredicate + ` AND NOT ` + accountFreeQuotaExhaustedPredicate + ` AND cooldown_until > ? THEN 1 ELSE 0 END) AS cooldown,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` OR ` + accountFreeQuotaExhaustedPredicate + `) THEN 1 ELSE 0 END) AS waiting_reset,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 1 ELSE 0 END) AS probing,
@@ -116,7 +123,7 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 		SUM(CASE WHEN enabled = ? AND auth_status = ? THEN 1 ELSE 0 END) AS reauth_required`
 	err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select(
 		selectFields,
-		true, account.AuthStatusActive, freeSince, account.EstimatedFreeTokenLimit, now,
+		true, account.AuthStatusActive, freeSince, account.EstimatedFreeTokenLimit, now.Add(-account.InferenceHealthMaxAge), now,
 		true, account.AuthStatusActive, freeSince, account.EstimatedFreeTokenLimit, now,
 		true, account.AuthStatusActive, freeSince, account.EstimatedFreeTokenLimit,
 		true, account.AuthStatusActive,
@@ -128,7 +135,7 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 
 // ListRoutingCandidates 批量加载账号、额度、恢复状态和目标模型能力，避免推理热路径按账号逐条查询。
 func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider account.Provider, upstreamModel, quotaMode string) ([]account.RoutingCandidate, error) {
-	values, err := r.ListEnabled(ctx, provider)
+	values, err := r.listProviderAccounts(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +215,7 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 	known := make(map[uint64]bool, len(ids))
 	supported := make(map[uint64]bool, len(ids))
 	modelQuotaBlocks := make(map[uint64]account.ModelQuotaBlock, len(ids))
+	inferenceHealth := make(map[uint64]account.InferenceHealth, len(ids))
 	if strings.TrimSpace(upstreamModel) != "" && len(ids) > 0 {
 		var states []accountModelSyncStateModel
 		if err := r.db.db.WithContext(ctx).Where("account_id IN ? AND last_success_at IS NOT NULL", ids).Find(&states).Error; err != nil {
@@ -230,6 +238,19 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 		for _, row := range blockRows {
 			modelQuotaBlocks[row.AccountID] = account.ModelQuotaBlock{AccountID: row.AccountID, UpstreamModel: row.UpstreamModel, Reason: row.Reason, CooldownUntil: row.CooldownUntil.UTC(), UpdatedAt: row.UpdatedAt.UTC()}
 		}
+		var healthRows []accountModelInferenceHealthModel
+		healthCutoff := time.Now().UTC().Add(-account.InferenceHealthMaxAge)
+		if err := r.db.db.WithContext(ctx).Where("account_id IN ? AND upstream_model = ? AND updated_at >= ?", ids, upstreamModel, healthCutoff).Find(&healthRows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range healthRows {
+			value := account.InferenceHealth{Status: row.Status, HTTPStatus: row.HTTPStatus, ErrorCode: row.ErrorCode, UpdatedAt: row.UpdatedAt.UTC()}
+			if row.VerifiedAt != nil {
+				verified := row.VerifiedAt.UTC()
+				value.VerifiedAt = &verified
+			}
+			inferenceHealth[row.AccountID] = value
+		}
 	}
 	result := make([]account.RoutingCandidate, 0, len(values))
 	for _, value := range values {
@@ -251,9 +272,41 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 		if block, ok := modelQuotaBlocks[value.ID]; ok {
 			candidate.ModelQuotaBlock = &block
 		}
+		if health, ok := inferenceHealth[value.ID]; ok {
+			candidate.InferenceHealth = &health
+		}
 		result = append(result, candidate)
 	}
 	return result, nil
+}
+
+func (r *AccountRepository) listProviderAccounts(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
+	var rows []accountModel
+	err := r.db.db.WithContext(ctx).
+		Preload("Credential").
+		Preload("WebProfile").
+		Where("provider = ?", provider).
+		Order("priority DESC, id ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	values := make([]account.Credential, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, toAccountDomain(row))
+	}
+	return values, nil
+}
+
+// SetInferenceHealth persists the result of a real inference probe or request
+// for one account and one upstream model.
+func (r *AccountRepository) SetInferenceHealth(ctx context.Context, accountID uint64, upstreamModel, status string, verifiedAt *time.Time, httpStatus int, errorCode string) error {
+	if accountID == 0 || strings.TrimSpace(upstreamModel) == "" || strings.TrimSpace(status) == "" {
+		return repository.ErrConflict
+	}
+	now := time.Now().UTC()
+	row := accountModelInferenceHealthModel{AccountID: accountID, UpstreamModel: truncate(upstreamModel, 255), Status: truncate(status, 32), VerifiedAt: verifiedAt, HTTPStatus: httpStatus, ErrorCode: truncate(errorCode, 100), UpdatedAt: now}
+	return r.db.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "account_id"}, {Name: "upstream_model"}}, DoUpdates: clause.AssignmentColumns([]string{"status", "verified_at", "http_status", "error_code", "updated_at"})}).Create(&row).Error
 }
 
 func isFreeQuotaCandidate(value account.Credential, billing *account.Billing) bool {
@@ -401,6 +454,43 @@ func (r *AccountRepository) attachAccountLinks(ctx context.Context, values []acc
 			values[index].LinkedAccountID = row.WebAccountID
 			values[index].LinkedAccountName = row.WebName
 			values[index].LinkedProvider = account.ProviderWeb
+		}
+	}
+	return nil
+}
+
+func (r *AccountRepository) attachBuildInferenceHealth(ctx context.Context, values []account.Credential, now time.Time) error {
+	if len(values) == 0 {
+		return nil
+	}
+	ids := make([]uint64, 0, len(values))
+	positions := make(map[uint64]int, len(values))
+	for index := range values {
+		if values[index].Provider != account.ProviderBuild {
+			continue
+		}
+		ids = append(ids, values[index].ID)
+		positions[values[index].ID] = index
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var rows []accountModelInferenceHealthModel
+	if err := r.db.db.WithContext(ctx).
+		Where("account_id IN ? AND upstream_model = ? AND updated_at >= ?", ids, "grok-4.5", now.Add(-account.InferenceHealthMaxAge)).
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		index, ok := positions[row.AccountID]
+		if !ok {
+			continue
+		}
+		verifiedAt := row.VerifiedAt
+		values[index].InferenceModel = row.UpstreamModel
+		values[index].InferenceHealth = &account.InferenceHealth{
+			Status: row.Status, VerifiedAt: verifiedAt, HTTPStatus: row.HTTPStatus,
+			ErrorCode: row.ErrorCode, UpdatedAt: row.UpdatedAt.UTC(),
 		}
 	}
 	return nil
@@ -570,22 +660,82 @@ func (r *AccountRepository) UpdateMany(ctx context.Context, ids []uint64, update
 }
 
 func (r *AccountRepository) Delete(ctx context.Context, id uint64) error {
-	result := r.db.db.WithContext(ctx).Delete(&accountModel{}, id)
-	if result.Error != nil {
-		return mapError(result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return repository.ErrNotFound
-	}
-	return nil
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := deleteAccountDependents(tx, []uint64{id}); err != nil {
+			return err
+		}
+		result := tx.Delete(&accountModel{}, id)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return repository.ErrNotFound
+		}
+		return nil
+	})
+	return mapError(err)
 }
 
 func (r *AccountRepository) DeleteMany(ctx context.Context, ids []uint64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	result := r.db.db.WithContext(ctx).Where("id IN ?", ids).Delete(&accountModel{})
-	return result.RowsAffected, result.Error
+	var deleted int64
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := deleteAccountDependents(tx, ids); err != nil {
+			return err
+		}
+		result := tx.Where("id IN ?", ids).Delete(&accountModel{})
+		deleted = result.RowsAffected
+		return result.Error
+	})
+	return deleted, mapError(err)
+}
+
+func (r *AccountRepository) ListAutoCleanReauthIDs(ctx context.Context, updatedBefore time.Time, includeDisabled bool, afterID uint64, limit int) ([]uint64, error) {
+	if limit < 1 || limit > 1000 {
+		limit = 100
+	}
+	query := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Select("id").
+		Where("auth_status = ? AND updated_at < ? AND id > ?", account.AuthStatusReauthRequired, updatedBefore.UTC(), afterID).
+		Where("NOT EXISTS (SELECT 1 FROM media_jobs job WHERE job.account_id = provider_accounts.id AND job.status IN ?)", []string{string(media.StatusQueued), string(media.StatusInProgress)})
+	if !includeDisabled {
+		query = query.Where("enabled = ?", true)
+	}
+	var ids []uint64
+	err := query.Order("id ASC").Limit(limit).Pluck("id", &ids).Error
+	return ids, err
+}
+
+func (r *AccountRepository) DeleteAutoCleanReauthIDs(ctx context.Context, updatedBefore time.Time, includeDisabled bool, ids []uint64) ([]uint64, error) {
+	if len(ids) == 0 {
+		return []uint64{}, nil
+	}
+	deletedIDs := make([]uint64, 0, len(ids))
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx.Model(&accountModel{}).Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id").
+			Where("id IN ? AND auth_status = ? AND updated_at < ?", ids, account.AuthStatusReauthRequired, updatedBefore.UTC()).
+			Where("NOT EXISTS (SELECT 1 FROM media_jobs job WHERE job.account_id = provider_accounts.id AND job.status IN ?)", []string{string(media.StatusQueued), string(media.StatusInProgress)})
+		if !includeDisabled {
+			query = query.Where("enabled = ?", true)
+		}
+		if err := query.Order("id ASC").Pluck("id", &deletedIDs).Error; err != nil || len(deletedIDs) == 0 {
+			return err
+		}
+		if err := deleteAccountDependents(tx, deletedIDs); err != nil {
+			return err
+		}
+		return tx.Where("id IN ?", deletedIDs).Delete(&accountModel{}).Error
+	})
+	return deletedIDs, mapError(err)
+}
+
+func deleteAccountDependents(tx *gorm.DB, ids []uint64) error {
+	// media_jobs keeps a restrictive foreign key so historical async jobs must
+	// be removed before the owning account row can be deleted.
+	return tx.Where("account_id IN ?", ids).Delete(&mediaJobModel{}).Error
 }
 
 func (r *AccountRepository) UpdateTokens(ctx context.Context, id uint64, accessToken, refreshToken string, expiresAt time.Time) (account.Credential, error) {
@@ -733,6 +883,14 @@ func (r *AccountRepository) UpsertModelQuotaBlock(ctx context.Context, value acc
 			"cooldown_until": gorm.Expr("CASE WHEN cooldown_until > ? THEN cooldown_until ELSE ? END", row.CooldownUntil, row.CooldownUntil), "updated_at": now,
 		}),
 	}).Create(&row).Error
+}
+
+func (r *AccountRepository) ClearModelQuotaBlock(ctx context.Context, accountID uint64, upstreamModel string) error {
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if accountID == 0 || upstreamModel == "" {
+		return repository.ErrConflict
+	}
+	return r.db.db.WithContext(ctx).Where("account_id = ? AND upstream_model = ?", accountID, upstreamModel).Delete(&accountModelQuotaBlockModel{}).Error
 }
 
 func (r *AccountRepository) PruneExpiredModelQuotaBlocks(ctx context.Context, now time.Time, limit int) (int64, error) {

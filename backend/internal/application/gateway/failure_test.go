@@ -16,6 +16,7 @@ func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 		quotaExhausted         bool
 		freeQuotaExhausted     bool
 		modelQuotaExhausted    bool
+		modelUnavailable       bool
 		code                   string
 		upstreamCode           string
 	}{
@@ -51,14 +52,30 @@ func TestHTTPUpstreamFailureClassifiesBuildForbiddenBodies(t *testing.T) {
 			name: "ambiguous numeric rate limit", status: http.StatusTooManyRequests, body: `{"error":{"code":8,"message":"rate limited"}}`,
 			code: "upstream_rate_limited",
 		},
+		{
+			name: "model unavailable", status: http.StatusNotFound, body: `{"error":{"code":"model_not_found","message":"model unavailable"}}`,
+			modelUnavailable: true, code: "upstream_model_unavailable", upstreamCode: "model_not_found",
+		},
+		{
+			name: "unrelated not found", status: http.StatusNotFound, body: `{"error":{"code":"route_not_found","message":"endpoint unavailable"}}`,
+			code: "upstream_server_error", upstreamCode: "route_not_found",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			failure := newHTTPUpstreamFailure(test.status, []byte(test.body), 42, "build")
-			if failure.HTTPStatus != test.status || failure.Code != test.code || failure.AccountScoped != test.accountScoped || failure.PermanentAccountDenial != test.permanentAccountDenial || failure.QuotaExhausted != test.quotaExhausted || failure.FreeQuotaExhausted != test.freeQuotaExhausted || failure.ModelQuotaExhausted != test.modelQuotaExhausted || failure.UpstreamCode != test.upstreamCode {
+			if failure.HTTPStatus != test.status || failure.Code != test.code || failure.AccountScoped != test.accountScoped || failure.PermanentAccountDenial != test.permanentAccountDenial || failure.QuotaExhausted != test.quotaExhausted || failure.FreeQuotaExhausted != test.freeQuotaExhausted || failure.ModelQuotaExhausted != test.modelQuotaExhausted || failure.ModelUnavailable != test.modelUnavailable || failure.UpstreamCode != test.upstreamCode {
 				t.Fatalf("failure = %#v", failure)
 			}
 		})
+	}
+}
+
+func TestModelUnavailableRotatesWithoutPenalizingAccount(t *testing.T) {
+	failure := ClassifyHTTPFailure(http.StatusNotFound, []byte(`{"error":{"code":"model_not_found","message":"model unavailable"}}`), 42, "account")
+	decision := DecideFailure(failure)
+	if failure.AccountScoped || failure.Scope != FailureScopeModel || !failure.ModelUnavailable || decision.Scope != FailureScopeModel || decision.Action != FailureActionRotateAccount || decision.PenalizeAccount {
+		t.Fatalf("failure=%#v decision=%#v", failure, decision)
 	}
 }
 

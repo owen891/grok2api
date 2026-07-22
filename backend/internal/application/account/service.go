@@ -132,8 +132,9 @@ type ImportedAccountObserver func(accountID uint64) error
 type BatchProgressObserver func(completed, total int) error
 
 type ExportResult struct {
-	Data  []byte
-	Count int
+	Data    []byte
+	Count   int
+	Skipped int
 }
 
 type BuildConversionResult struct {
@@ -210,6 +211,7 @@ type Service struct {
 	deviceSessions        repository.DeviceSessionRepository
 	sticky                repository.StickySessionRepository
 	refreshLock           repository.DistributedLock
+	concurrency           repository.ConcurrencyLimiter
 	quotaQueue            repository.QuotaRecoveryQueue
 	providers             *provider.Registry
 	cipher                *security.Cipher
@@ -225,6 +227,10 @@ type Service struct {
 	syncPool              *batch.Pool
 	refreshPool           *batch.Pool
 	credentialRefreshWake chan struct{}
+	autoCleanMu           sync.RWMutex
+	autoClean             AutoCleanConfig
+	autoCleanRevision     uint64
+	autoCleanWake         chan struct{}
 	logger                *slog.Logger
 	now                   func() time.Time
 }
@@ -240,10 +246,15 @@ func NewService(accounts repository.AccountRepository, audits repository.AuditRe
 		lastRefreshAt: make(map[uint64]time.Time), quotaRefreshes: make(map[string]*webQuotaRefreshState),
 		quotaRefreshQueue:     make(chan webQuotaRefreshRequest, webQuotaRefreshQueueSize),
 		credentialRefreshWake: make(chan struct{}, 1),
+		autoCleanWake:         make(chan struct{}, 1),
+		autoClean:             AutoCleanConfig{Interval: 10 * time.Minute, MinAge: time.Hour},
 		conversionPool:        batch.NewPool(25), syncPool: batch.NewPool(25), refreshPool: batch.NewPool(25), logger: slog.Default(),
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
+
+// SetConcurrency lets maintenance tasks observe the same account leases used by routing.
+func (s *Service) SetConcurrency(value repository.ConcurrencyLimiter) { s.concurrency = value }
 
 func (s *Service) SetBulkPool(pool *batch.Pool) {
 	if pool != nil {
@@ -280,7 +291,7 @@ func (s *Service) ProviderDefinition(value accountdomain.Provider) (provider.Def
 
 func (s *Service) List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]View, int64, error) {
 	page, pageSize = normalizePage(page, pageSize)
-	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) || !oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") || !oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing") || !oneOf(filter.Renewal, "", "refreshable", "unrefreshable") || !oneOf(filter.NSFW, "", "enabled", "disabled") || !repository.IsValidSort(filter.Sort, "name", "type", "status", "createdAt") {
+	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) || !oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") || !oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing", "modelDenied") || !oneOf(filter.Renewal, "", "refreshable", "unrefreshable") || !oneOf(filter.NSFW, "", "enabled", "disabled") || !repository.IsValidSort(filter.Sort, "name", "type", "status", "createdAt") {
 		return nil, 0, ErrInvalidFilter
 	}
 	var refreshable *bool

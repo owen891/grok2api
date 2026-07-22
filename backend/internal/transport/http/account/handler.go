@@ -12,12 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	accountapp "github.com/owen891/grok2api/backend/internal/application/account"
 	accountsyncapp "github.com/owen891/grok2api/backend/internal/application/accountsync"
 	accountdomain "github.com/owen891/grok2api/backend/internal/domain/account"
 	"github.com/owen891/grok2api/backend/internal/repository"
 	"github.com/owen891/grok2api/backend/internal/shared/response"
-	"github.com/gin-gonic/gin"
 )
 
 type accountSynchronizer interface {
@@ -129,6 +129,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/accounts", h.list)
 	router.GET("/accounts/summary", h.summary)
 	router.GET("/accounts/export", h.exportCredentials)
+	router.GET("/accounts/export/sub2api", h.exportSub2Credentials)
 	router.GET("/accounts/:id", h.get)
 	router.POST("/accounts/device/start", h.startDevice)
 	router.POST("/accounts/device/:sessionId/poll", h.pollDevice)
@@ -218,40 +219,50 @@ type accountImportResponse struct {
 }
 
 type accountResponse struct {
-	ID               uint64                `json:"id,string"`
-	Provider         string                `json:"provider"`
-	AuthType         string                `json:"authType"`
-	WebTier          string                `json:"webTier,omitempty"`
-	WebTierSyncedAt  *time.Time            `json:"webTierSyncedAt,omitempty"`
-	NSFWEnabled      bool                  `json:"nsfwEnabled"`
-	Name             string                `json:"name"`
-	Email            string                `json:"email,omitempty"`
-	UserID           string                `json:"userId,omitempty"`
-	TeamID           string                `json:"teamId,omitempty"`
-	Enabled          bool                  `json:"enabled"`
-	AuthStatus       string                `json:"authStatus"`
-	ExpiresAt        *time.Time            `json:"expiresAt,omitempty"`
-	Refreshable      bool                  `json:"refreshable"`
-	RefreshDueAt     *time.Time            `json:"refreshDueAt,omitempty"`
-	LastRefreshAt    *time.Time            `json:"lastRefreshAt,omitempty"`
-	RefreshFailures  int                   `json:"refreshFailureCount"`
-	LastRefreshError string                `json:"lastRefreshErrorCode,omitempty"`
-	Priority         int                   `json:"priority"`
-	MaxConcurrent    int                   `json:"maxConcurrent"`
-	MinimumRemaining float64               `json:"minimumRemaining"`
-	FailureCount     int                   `json:"failureCount"`
-	CooldownUntil    *time.Time            `json:"cooldownUntil,omitempty"`
-	LastError        string                `json:"lastError,omitempty"`
-	LastUsedAt       *time.Time            `json:"lastUsedAt,omitempty"`
-	LinkedAccountID  uint64                `json:"linkedAccountId,omitempty,string"`
-	LinkedName       string                `json:"linkedAccountName,omitempty"`
-	LinkedProvider   string                `json:"linkedProvider,omitempty"`
-	CreatedAt        time.Time             `json:"createdAt"`
-	ObservedModel    string                `json:"observedModel,omitempty"`
-	ObservedModelAt  *time.Time            `json:"observedModelAt,omitempty"`
-	Billing          *billingResponse      `json:"billing,omitempty"`
-	Quota            quotaResponse         `json:"quota"`
-	QuotaWindows     []quotaWindowResponse `json:"quotaWindows,omitempty"`
+	ID               uint64                   `json:"id,string"`
+	Provider         string                   `json:"provider"`
+	AuthType         string                   `json:"authType"`
+	WebTier          string                   `json:"webTier,omitempty"`
+	WebTierSyncedAt  *time.Time               `json:"webTierSyncedAt,omitempty"`
+	NSFWEnabled      bool                     `json:"nsfwEnabled"`
+	Name             string                   `json:"name"`
+	Email            string                   `json:"email,omitempty"`
+	UserID           string                   `json:"userId,omitempty"`
+	TeamID           string                   `json:"teamId,omitempty"`
+	Enabled          bool                     `json:"enabled"`
+	AuthStatus       string                   `json:"authStatus"`
+	ExpiresAt        *time.Time               `json:"expiresAt,omitempty"`
+	Refreshable      bool                     `json:"refreshable"`
+	RefreshDueAt     *time.Time               `json:"refreshDueAt,omitempty"`
+	LastRefreshAt    *time.Time               `json:"lastRefreshAt,omitempty"`
+	RefreshFailures  int                      `json:"refreshFailureCount"`
+	LastRefreshError string                   `json:"lastRefreshErrorCode,omitempty"`
+	Priority         int                      `json:"priority"`
+	MaxConcurrent    int                      `json:"maxConcurrent"`
+	MinimumRemaining float64                  `json:"minimumRemaining"`
+	FailureCount     int                      `json:"failureCount"`
+	CooldownUntil    *time.Time               `json:"cooldownUntil,omitempty"`
+	LastError        string                   `json:"lastError,omitempty"`
+	LastUsedAt       *time.Time               `json:"lastUsedAt,omitempty"`
+	LinkedAccountID  uint64                   `json:"linkedAccountId,omitempty,string"`
+	LinkedName       string                   `json:"linkedAccountName,omitempty"`
+	LinkedProvider   string                   `json:"linkedProvider,omitempty"`
+	CreatedAt        time.Time                `json:"createdAt"`
+	ObservedModel    string                   `json:"observedModel,omitempty"`
+	ObservedModelAt  *time.Time               `json:"observedModelAt,omitempty"`
+	InferenceModel   string                   `json:"inferenceModel,omitempty"`
+	InferenceHealth  *inferenceHealthResponse `json:"inferenceHealth,omitempty"`
+	Billing          *billingResponse         `json:"billing,omitempty"`
+	Quota            quotaResponse            `json:"quota"`
+	QuotaWindows     []quotaWindowResponse    `json:"quotaWindows,omitempty"`
+}
+
+type inferenceHealthResponse struct {
+	Status     string     `json:"status"`
+	VerifiedAt *time.Time `json:"verifiedAt,omitempty"`
+	HTTPStatus int        `json:"httpStatus,omitempty"`
+	ErrorCode  string     `json:"errorCode,omitempty"`
+	UpdatedAt  time.Time  `json:"updatedAt"`
 }
 
 type quotaWindowResponse struct {
@@ -872,6 +883,22 @@ func (h *Handler) exportCredentials(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json; charset=utf-8", result.Data)
 }
 
+func (h *Handler) exportSub2Credentials(c *gin.Context) {
+	result, err := h.service.ExportSub2Credentials(c.Request.Context())
+	if err != nil {
+		h.writeServiceError(c, "accountExportFailed", err, http.StatusInternalServerError, "导出 Sub2API 账号失败")
+		return
+	}
+	filename := "sub2api-grok-accounts-" + time.Now().UTC().Format("20060102T150405Z") + ".json"
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("X-Exported-Accounts", strconv.Itoa(result.Count))
+	c.Header("X-Skipped-Accounts", strconv.Itoa(result.Skipped))
+	c.Data(http.StatusOK, "application/json; charset=utf-8", result.Data)
+}
+
 func (h *Handler) syncInitial(ctx context.Context, accountIDs ...uint64) accountsyncapp.Result {
 	if h.sync == nil {
 		return accountsyncapp.Result{}
@@ -1011,7 +1038,15 @@ func newAccountResponse(value accountapp.View) accountResponse {
 		FailureCount: c.FailureCount, CooldownUntil: c.CooldownUntil, LastError: c.LastError,
 		LastUsedAt: c.LastUsedAt, LinkedAccountID: c.LinkedAccountID, LinkedName: c.LinkedAccountName, LinkedProvider: string(c.LinkedProvider),
 		CreatedAt: c.CreatedAt, ObservedModel: c.ObservedModel, ObservedModelAt: c.ObservedModelAt,
-		Quota: newQuotaResponse(value.Quota), QuotaWindows: make([]quotaWindowResponse, 0, len(value.QuotaWindows)),
+		InferenceModel: c.InferenceModel,
+		Quota:          newQuotaResponse(value.Quota), QuotaWindows: make([]quotaWindowResponse, 0, len(value.QuotaWindows)),
+	}
+	if c.InferenceHealth != nil {
+		result.InferenceHealth = &inferenceHealthResponse{
+			Status: c.InferenceHealth.Status, VerifiedAt: c.InferenceHealth.VerifiedAt,
+			HTTPStatus: c.InferenceHealth.HTTPStatus, ErrorCode: c.InferenceHealth.ErrorCode,
+			UpdatedAt: c.InferenceHealth.UpdatedAt,
+		}
 	}
 	for _, window := range value.QuotaWindows {
 		breakdown := make([]quotaBreakdownResponse, 0, len(window.Breakdown))

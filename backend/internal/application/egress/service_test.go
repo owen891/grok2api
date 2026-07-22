@@ -79,3 +79,23 @@ func TestConsoleNodeUsesConsoleDefaultUserAgent(t *testing.T) {
 		t.Fatalf("console node userAgent = %q", value.UserAgent)
 	}
 }
+
+func TestProxyPoolRequiresConfiguredProxyAndResetsHealth(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil, cipher, "web-agent", "console-agent")
+	proxyPool := true
+	if _, err := service.applyInput(domain.Node{}, Input{Name: "pool", Scope: domain.ScopeBuild, Enabled: true, ProxyPool: &proxyPool}, true); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("missing proxy error = %v", err)
+	}
+	proxy := "http://127.0.0.1:8080"
+	value, err := service.applyInput(domain.Node{Health: 0.2, FailureCount: 3, LastError: "transport error"}, Input{Name: "pool", Scope: domain.ScopeBuild, Enabled: true, ProxyPool: &proxyPool, ProxyURL: &proxy}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !value.ProxyPool || value.Health != 1 || value.FailureCount != 0 || value.LastError != "" {
+		t.Fatalf("proxy pool value = %#v", value)
+	}
+}

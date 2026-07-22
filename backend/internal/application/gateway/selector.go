@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ const quotaProbeLease = 5 * time.Minute
 const successPersistInterval = 30 * time.Second
 const candidateCacheTTL = time.Second
 const routePerformanceTTL = 30 * time.Minute
+const healthyInferenceGrace = 30 * time.Minute
 
 const (
 	routePerformanceAlpha   = 0.25
@@ -66,6 +68,8 @@ type SelectionUnavailableReason string
 const (
 	SelectionNoAccounts       SelectionUnavailableReason = "no_accounts"
 	SelectionUnsupportedModel SelectionUnavailableReason = "unsupported_model"
+	SelectionInferenceDenied  SelectionUnavailableReason = "inference_denied"
+	SelectionReauthRequired   SelectionUnavailableReason = "reauth_required"
 	SelectionCooling          SelectionUnavailableReason = "cooling"
 	SelectionModelCooling     SelectionUnavailableReason = "model_cooling"
 	SelectionQuotaExhausted   SelectionUnavailableReason = "quota_exhausted"
@@ -103,6 +107,7 @@ const (
 	candidateModelCooling
 	candidateCooling
 	candidateQuotaExhausted
+	candidateInferenceDenied
 )
 
 type candidateEvaluation struct {
@@ -127,7 +132,7 @@ func candidateRoutingBlock(candidate account.RoutingCandidate, value account.Cre
 		}
 		return routingBlock{kind: routingBlockQuotaRecovery, retryAt: retryAt}
 	}
-	if candidate.FreeQuota && candidate.ObservedTokens >= account.EstimatedFreeTokenLimit {
+	if candidate.FreeQuota && candidate.ObservedTokens >= account.EstimatedFreeTokenLimit && !hasRecentHealthyInference(candidate.InferenceHealth, now) {
 		return routingBlock{kind: routingBlockQuota}
 	}
 	if candidate.Billing != nil && candidate.Billing.IsExhausted(value.MinimumRemaining) {
@@ -143,6 +148,13 @@ func candidateRoutingBlock(candidate account.RoutingCandidate, value account.Cre
 	return routingBlock{}
 }
 
+func hasRecentHealthyInference(health *account.InferenceHealth, now time.Time) bool {
+	if health == nil || health.Status != account.InferenceHealthHealthy || health.VerifiedAt == nil {
+		return false
+	}
+	return !health.VerifiedAt.UTC().Before(now.Add(-healthyInferenceGrace))
+}
+
 // evaluateCandidate is the single account eligibility classifier used by both
 // request routing and the read-only operations snapshot.
 func evaluateCandidate(candidate account.RoutingCandidate, now time.Time) candidateEvaluation {
@@ -155,6 +167,12 @@ func evaluateCandidate(candidate account.RoutingCandidate, now time.Time) candid
 	}
 	if candidate.ModelCapabilityKnown && !candidate.SupportsModel {
 		return candidateEvaluation{state: candidateUnsupported}
+	}
+	if candidate.InferenceHealth != nil {
+		switch candidate.InferenceHealth.Status {
+		case account.InferenceHealthPermissionDenied, account.InferenceHealthReauth, account.InferenceHealthModelUnavailable:
+			return candidateEvaluation{state: candidateInferenceDenied}
+		}
 	}
 	block := candidateRoutingBlock(candidate, value, now)
 	switch block.kind {
@@ -176,6 +194,10 @@ func (e *SelectionUnavailableError) Error() string {
 	switch e.Reason {
 	case SelectionUnsupportedModel:
 		return "当前账号池不支持该模型"
+	case SelectionInferenceDenied:
+		return "当前模型的账号均被健康状态隔离"
+	case SelectionReauthRequired:
+		return "当前上游账号均需要重新授权"
 	case SelectionCooling:
 		return "可用上游账号正在冷却"
 	case SelectionModelCooling:
@@ -210,6 +232,7 @@ type Selector struct {
 	leaseWake         chan struct{}
 	lastSelectedAt    map[uint64]time.Time
 	lastSuccessAt     map[uint64]time.Time
+	lastVerifiedAt    map[routePerformanceKey]time.Time
 	candidates        map[candidateCacheKey]candidateSnapshot
 	roundRobinLast    map[candidateCacheKey]uint64
 	performance       map[routePerformanceKey]routePerformance
@@ -228,7 +251,7 @@ func NewSelector(accounts repository.AccountRepository, concurrency repository.C
 	if len(capacityWait) > 0 && capacityWait[0] > 0 {
 		wait = capacityWait[0]
 	}
-	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot), roundRobinLast: make(map[candidateCacheKey]uint64), performance: make(map[routePerformanceKey]routePerformance), logger: slog.Default()}
+	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), lastVerifiedAt: make(map[routePerformanceKey]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot), roundRobinLast: make(map[candidateCacheKey]uint64), performance: make(map[routePerformanceKey]routePerformance), logger: slog.Default()}
 }
 
 func (s *Selector) SetRoutePerformanceRepository(value repository.RoutePerformanceRepository) {
@@ -272,7 +295,10 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	}
 	normalCandidates := make([]account.RoutingCandidate, 0, len(values))
 	probeCandidates := make([]account.RoutingCandidate, 0, len(values))
+	disabledCandidates := 0
+	reauthCandidates := 0
 	supportedCandidates := 0
+	inferenceDeniedCandidates := 0
 	consideredCandidates := 0
 	coolingCandidates := 0
 	modelCoolingCandidates := 0
@@ -285,10 +311,20 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			continue
 		}
 		evaluation := evaluateCandidate(candidate, now)
-		if evaluation.state == candidateDisabled || evaluation.state == candidateReauthRequired {
+		if evaluation.state == candidateDisabled {
+			disabledCandidates++
+			continue
+		}
+		if evaluation.state == candidateReauthRequired {
+			reauthCandidates++
 			continue
 		}
 		consideredCandidates++
+		if evaluation.state == candidateInferenceDenied {
+			supportedCandidates++
+			inferenceDeniedCandidates++
+			continue
+		}
 		if evaluation.state == candidateUnsupported {
 			continue
 		}
@@ -320,12 +356,15 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	}
 	recordRoutingPool(ctx, RoutingTraceEvent{
 		Total: len(values), Excluded: len(excluded), Eligible: len(normalCandidates), Probe: len(probeCandidates),
+		Disabled: disabledCandidates, ReauthRequired: reauthCandidates, InferenceDenied: inferenceDeniedCandidates,
 		Cooling: coolingCandidates, ModelCooling: modelCoolingCandidates, QuotaExhausted: quotaCandidates,
 		Unsupported: max(0, consideredCandidates-supportedCandidates),
 	})
 	if len(normalCandidates) == 0 && len(probeCandidates) == 0 {
 		reason := SelectionNoAccounts
 		switch {
+		case inferenceDeniedCandidates > 0 && inferenceDeniedCandidates == supportedCandidates:
+			reason = SelectionInferenceDenied
 		case consideredCandidates > 0 && supportedCandidates == 0:
 			reason = SelectionUnsupportedModel
 		case modelCoolingCandidates > 0:
@@ -334,6 +373,8 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			reason = SelectionCooling
 		case quotaCandidates > 0:
 			reason = SelectionQuotaExhausted
+		case reauthCandidates > 0:
+			reason = SelectionReauthRequired
 		}
 		recordRoutingFailure(ctx, reason)
 		return nil, &SelectionUnavailableError{Reason: reason, RetryAfter: retryDelay(now, earliestRetry)}
@@ -464,6 +505,8 @@ func (s *Selector) CapacitySnapshot(ctx context.Context, provider account.Provid
 			result.ReauthRequired++
 		case candidateUnsupported:
 			result.Unsupported++
+		case candidateInferenceDenied:
+			result.Unsupported++
 		case candidateModelCooling:
 			result.ModelCooling++
 		case candidateCooling:
@@ -519,7 +562,7 @@ func (s *Selector) currentConcurrency(ctx context.Context, values []account.Rout
 	result := make(map[uint64]int, len(values))
 	keys := make([]string, 0, len(values))
 	for _, candidate := range values {
-		keys = append(keys, fmt.Sprintf("account:%d", candidate.Credential.ID))
+		keys = append(keys, repository.AccountConcurrencyKey(candidate.Credential.ID))
 	}
 	if batchReader, ok := s.concurrency.(repository.ConcurrencySnapshotReader); ok {
 		snapshot, err := batchReader.CurrentMany(ctx, keys)
@@ -527,12 +570,12 @@ func (s *Selector) currentConcurrency(ctx context.Context, values []account.Rout
 			return nil, fmt.Errorf("批量读取账号并发租约: %w", err)
 		}
 		for _, candidate := range values {
-			result[candidate.Credential.ID] = snapshot[fmt.Sprintf("account:%d", candidate.Credential.ID)]
+			result[candidate.Credential.ID] = snapshot[repository.AccountConcurrencyKey(candidate.Credential.ID)]
 		}
 		return result, nil
 	}
 	for _, candidate := range values {
-		current, err := s.concurrency.Current(ctx, fmt.Sprintf("account:%d", candidate.Credential.ID))
+		current, err := s.concurrency.Current(ctx, repository.AccountConcurrencyKey(candidate.Credential.ID))
 		if err != nil {
 			return nil, fmt.Errorf("读取账号并发租约: %w", err)
 		}
@@ -555,6 +598,9 @@ func (s *Selector) orderRoundRobinCandidates(values []account.RoutingCandidate, 
 		}
 		if left.ModelCapabilityKnown != right.ModelCapabilityKnown {
 			return left.ModelCapabilityKnown
+		}
+		if inferenceHealthRank(left) != inferenceHealthRank(right) {
+			return inferenceHealthRank(left) < inferenceHealthRank(right)
 		}
 		leftTier := tierOrderRank(tierOrder, left.Credential.WebTier)
 		rightTier := tierOrderRank(tierOrder, right.Credential.WebTier)
@@ -585,7 +631,18 @@ func (s *Selector) orderRoundRobinCandidates(values []account.RoutingCandidate, 
 func sameRoundRobinGroup(left, right account.RoutingCandidate, tierOrder []account.WebTier) bool {
 	return left.SupportsModel == right.SupportsModel &&
 		left.ModelCapabilityKnown == right.ModelCapabilityKnown &&
+		inferenceHealthRank(left) == inferenceHealthRank(right) &&
 		tierOrderRank(tierOrder, left.Credential.WebTier) == tierOrderRank(tierOrder, right.Credential.WebTier)
+}
+
+func inferenceHealthRank(candidate account.RoutingCandidate) int {
+	if candidate.InferenceHealth == nil {
+		return 1
+	}
+	if candidate.InferenceHealth.Status == account.InferenceHealthHealthy {
+		return 0
+	}
+	return 1
 }
 
 func rotateCandidateGroupAfter(values []account.RoutingCandidate, lastAccountID uint64) {
@@ -650,6 +707,9 @@ func (s *Selector) AcquirePinned(ctx context.Context, provider account.Provider,
 			if candidate.ModelCapabilityKnown && !candidate.SupportsModel {
 				return nil, &SelectionUnavailableError{Reason: SelectionUnsupportedModel}
 			}
+			if evaluation := evaluateCandidate(candidate, now); evaluation.state == candidateInferenceDenied {
+				return nil, &SelectionUnavailableError{Reason: SelectionInferenceDenied}
+			}
 			block := candidateRoutingBlock(candidate, value, now)
 			switch block.kind {
 			case routingBlockModelCooling:
@@ -687,15 +747,81 @@ func (s *Selector) MarkSuccess(ctx context.Context, credential account.Credentia
 // ApplyInspectionHealthy persists the health reset used by an automatic
 // inspection action. Unlike the routing fast path, persistence errors are
 // returned so the inspection result is not falsely marked as applied.
-func (s *Selector) ApplyInspectionHealthy(ctx context.Context, credential account.Credential) error {
+func (s *Selector) ApplyInspectionHealthy(ctx context.Context, credential account.Credential, upstreamModel string) error {
 	if err := s.accounts.UpdateHealth(ctx, credential.ID, 0, nil, "", true); err != nil {
 		return err
 	}
 	if err := s.accounts.ClearQuotaRecovery(ctx, credential.ID); err != nil {
 		return err
 	}
+	if err := s.accounts.ClearModelQuotaBlock(ctx, credential.ID, upstreamModel); err != nil {
+		return err
+	}
 	s.invalidateCandidates(credential.Provider)
 	return nil
+}
+
+type inferenceHealthWriter interface {
+	SetInferenceHealth(context.Context, uint64, string, string, *time.Time, int, string) error
+}
+
+func (s *Selector) setInferenceHealth(ctx context.Context, accountID uint64, upstreamModel, status string, httpStatus int, errorCode string) error {
+	writer, ok := s.accounts.(inferenceHealthWriter)
+	if !ok || accountID == 0 || strings.TrimSpace(upstreamModel) == "" {
+		return nil
+	}
+	key := routePerformanceKey{accountID: accountID, upstreamModel: strings.TrimSpace(upstreamModel)}
+	if status != account.InferenceHealthHealthy {
+		s.mu.Lock()
+		delete(s.lastVerifiedAt, key)
+		s.mu.Unlock()
+	}
+	var verifiedAt *time.Time
+	if status == account.InferenceHealthHealthy {
+		now := time.Now().UTC()
+		verifiedAt = &now
+	}
+	if err := writer.SetInferenceHealth(ctx, accountID, upstreamModel, status, verifiedAt, httpStatus, errorCode); err != nil {
+		return err
+	}
+	if credential, err := s.accounts.Get(ctx, accountID); err == nil {
+		s.invalidateCandidates(credential.Provider)
+	}
+	return nil
+}
+
+func (s *Selector) MarkInferenceHealthy(ctx context.Context, accountID uint64, upstreamModel string) {
+	key := routePerformanceKey{accountID: accountID, upstreamModel: strings.TrimSpace(upstreamModel)}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	if s.lastVerifiedAt == nil {
+		s.lastVerifiedAt = make(map[routePerformanceKey]time.Time)
+	}
+	if last := s.lastVerifiedAt[key]; !last.IsZero() && now.Sub(last) < successPersistInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastVerifiedAt[key] = now
+	s.mu.Unlock()
+	if err := s.setInferenceHealth(ctx, accountID, upstreamModel, account.InferenceHealthHealthy, http.StatusOK, ""); err != nil {
+		s.logger.Warn("inference_health_write_failed", "account_id", accountID, "model", upstreamModel, "status", account.InferenceHealthHealthy, "error", err)
+	}
+}
+
+func (s *Selector) MarkInferenceDenied(ctx context.Context, accountID uint64, upstreamModel string, status int, code string) {
+	if err := s.setInferenceHealth(ctx, accountID, upstreamModel, account.InferenceHealthPermissionDenied, status, code); err != nil {
+		s.logger.Warn("inference_health_write_failed", "account_id", accountID, "model", upstreamModel, "status", account.InferenceHealthPermissionDenied, "error", err)
+	}
+}
+
+func (s *Selector) MarkInferenceUnavailable(ctx context.Context, accountID uint64, upstreamModel string, status int, code string) {
+	if err := s.setInferenceHealth(ctx, accountID, upstreamModel, account.InferenceHealthModelUnavailable, status, code); err != nil {
+		s.logger.Warn("inference_health_write_failed", "account_id", accountID, "model", upstreamModel, "status", account.InferenceHealthModelUnavailable, "error", err)
+	}
+}
+
+func (s *Selector) ApplyInferenceHealth(ctx context.Context, accountID uint64, upstreamModel, status string, httpStatus int, code string) error {
+	return s.setInferenceHealth(ctx, accountID, upstreamModel, status, httpStatus, code)
 }
 
 func (s *Selector) markSuccess(ctx context.Context, credential account.Credential, quotaProbe bool) {
@@ -807,6 +933,11 @@ func (s *Selector) MarkQuotaStateChanged(provider account.Provider) { s.invalida
 // ObserveRouteResult keeps a short-lived per-account/model signal for adaptive selection.
 func (s *Selector) ObserveRouteResult(accountID uint64, upstreamModel string, latency time.Duration, success bool) {
 	s.observeRouteResult(accountID, upstreamModel, latency, success, false)
+	if success {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		s.MarkInferenceHealthy(ctx, accountID, upstreamModel)
+		cancel()
+	}
 }
 
 func (s *Selector) ObserveRouteFailure(accountID uint64, upstreamModel string, latency time.Duration, decision FailureDecision) {
@@ -1019,7 +1150,7 @@ func (s *Selector) claimAccountSlot(ctx context.Context, value account.Credentia
 	if limit <= 0 {
 		limit = account.DefaultMaxConcurrent
 	}
-	release, acquired, err := s.concurrency.Acquire(ctx, fmt.Sprintf("account:%d", value.ID), limit)
+	release, acquired, err := s.concurrency.Acquire(ctx, repository.AccountConcurrencyKey(value.ID), limit)
 	if err != nil {
 		return nil, fmt.Errorf("获取账号并发租约: %w", err)
 	}
@@ -1143,7 +1274,7 @@ func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingC
 	inFlight := make(map[uint64]int, len(values))
 	concurrencyKeys := make([]string, 0, len(values))
 	for _, candidate := range values {
-		concurrencyKeys = append(concurrencyKeys, fmt.Sprintf("account:%d", candidate.Credential.ID))
+		concurrencyKeys = append(concurrencyKeys, repository.AccountConcurrencyKey(candidate.Credential.ID))
 	}
 	concurrencySnapshot := make(map[string]int, len(values))
 	batchReader, batched := s.concurrency.(repository.ConcurrencySnapshotReader)
@@ -1156,7 +1287,7 @@ func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingC
 	}
 	for _, candidate := range values {
 		value := candidate.Credential
-		key := fmt.Sprintf("account:%d", value.ID)
+		key := repository.AccountConcurrencyKey(value.ID)
 		current, found := concurrencySnapshot[key]
 		if !batched {
 			var err error
@@ -1188,6 +1319,9 @@ func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingC
 		}
 		if leftCandidate.ModelCapabilityKnown != rightCandidate.ModelCapabilityKnown {
 			return leftCandidate.ModelCapabilityKnown
+		}
+		if inferenceHealthRank(leftCandidate) != inferenceHealthRank(rightCandidate) {
+			return inferenceHealthRank(leftCandidate) < inferenceHealthRank(rightCandidate)
 		}
 		leftTier, rightTier := tierOrderRank(tierOrder, left.WebTier), tierOrderRank(tierOrder, right.WebTier)
 		if leftTier != rightTier {

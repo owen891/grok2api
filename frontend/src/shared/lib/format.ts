@@ -17,10 +17,22 @@ export function formatNumber(value: number, locale: string, maximumFractionDigit
 }
 
 export function formatDuration(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+    return "-";
+  }
   if (milliseconds < 1000) {
     return `${milliseconds} ms`;
   }
-  return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 2 : 1)} s`;
+  const totalSeconds = milliseconds / 1000;
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(milliseconds < 10000 ? 2 : 1)} s`;
+  }
+  const totalMinutes = totalSeconds / 60;
+  if (totalMinutes < 60) {
+    return `${totalMinutes.toFixed(totalMinutes < 10 ? 1 : 0)} min`;
+  }
+  const totalHours = totalMinutes / 60;
+  return `${totalHours.toFixed(totalHours < 10 ? 1 : 0)} h`;
 }
 
 export function toDateTimeLocal(value: string | null | undefined): string {

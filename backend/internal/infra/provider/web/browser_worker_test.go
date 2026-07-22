@@ -61,6 +61,55 @@ func TestBrowserWorkerRequestMarshalsImageMode(t *testing.T) {
 	}
 }
 
+func TestLiteImageBrowserWorkerUsesShorterParentTimeout(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/grok/fast-image" {
+			t.Fatalf("worker path = %s", request.URL.Path)
+		}
+		var value browserWorkerRequest
+		if err := json.NewDecoder(request.Body).Decode(&value); err != nil {
+			t.Fatal(err)
+		}
+		if value.TimeoutSeconds < 5 || value.TimeoutSeconds > 8 {
+			t.Fatalf("worker timeout = %d, want the shortened parent budget", value.TimeoutSeconds)
+		}
+		_ = json.NewEncoder(writer).Encode(browserWorkerResponse{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			BodyBase64: base64.StdEncoding.EncodeToString([]byte("data: done\n\n")),
+		})
+	}))
+	defer worker.Close()
+
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("test-sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAdapter(
+		Config{BaseURL: "https://grok.com", BrowserWorkerURL: worker.URL, ImageTimeoutSeconds: 120},
+		infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	response, lease, _, err := adapter.openLiteImageWithBrowser(
+		ctx,
+		adapter.config(),
+		account.Credential{ID: 1, EncryptedAccessToken: encrypted},
+		ModelSpec{Mode: "fast"},
+		"test prompt",
+		"request-1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	lease.Release()
+}
+
 func TestCallBrowserWorkerPropagatesError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusBadGateway)
@@ -78,10 +127,30 @@ func TestCallBrowserWorkerPropagatesError(t *testing.T) {
 	}
 }
 
+func TestImageProtocolErrorFromBrowserWorker(t *testing.T) {
+	for _, code := range []string{"image_generation_incomplete", "image_subscription_required"} {
+		err := imageProtocolErrorFromBrowserWorker(&browserWorkerFailure{Code: code, Message: "no usable image"})
+		protocolFailure, ok := provider.AsMediaProtocolError(err)
+		if !ok || protocolFailure.Code != code || !protocolFailure.Retryable {
+			t.Fatalf("protocol failure = %#v, ok=%t", protocolFailure, ok)
+		}
+	}
+	if imageProtocolErrorFromBrowserWorker(&browserWorkerFailure{Code: "browser_unavailable"}) != nil {
+		t.Fatal("browser availability errors must not become image protocol errors")
+	}
+}
+
 func TestCallBrowserWorkerRetriesTransientFailure(t *testing.T) {
 	var calls atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	var workerTimeouts []int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var value browserWorkerRequest
+		if err := json.NewDecoder(request.Body).Decode(&value); err != nil {
+			t.Fatal(err)
+		}
+		workerTimeouts = append(workerTimeouts, value.TimeoutSeconds)
 		if calls.Add(1) == 1 {
+			time.Sleep(1100 * time.Millisecond)
 			writer.WriteHeader(http.StatusBadGateway)
 			_ = json.NewEncoder(writer).Encode(browserWorkerResponse{Error: "browser restarting", Code: "browser_unavailable"})
 			return
@@ -94,9 +163,14 @@ func TestCallBrowserWorkerRetriesTransientFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := callBrowserWorker(context.Background(), server.URL, browserWorkerRequest{})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := callBrowserWorker(ctx, server.URL, browserWorkerRequest{TimeoutSeconds: 120})
 	if err != nil || result.StatusCode != http.StatusOK || calls.Load() != 2 {
 		t.Fatalf("result=%#v err=%v calls=%d", result, err, calls.Load())
+	}
+	if len(workerTimeouts) != 2 || workerTimeouts[1] >= workerTimeouts[0] {
+		t.Fatalf("worker timeouts = %v, want retry to use the remaining context budget", workerTimeouts)
 	}
 }
 
@@ -159,12 +233,42 @@ func TestCallBrowserWorkerQuota(t *testing.T) {
 	}
 }
 
+func TestBrowserWorkerBusyFailureIsTransient(t *testing.T) {
+	err := &browserWorkerFailure{Code: "worker_busy", Message: "browser worker queue wait timed out"}
+	if !isTransientBrowserWorkerFailure(err) {
+		t.Fatal("worker_busy should be retried")
+	}
+}
+
+func TestBrowserWorkerChatMapsBusyToWorkerUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(writer).Encode(browserWorkerResponse{Error: "browser worker queue wait timed out", Code: "worker_busy"})
+	}))
+	defer server.Close()
+
+	adapter := &Adapter{}
+	_, err := adapter.openChatWithBrowser(context.Background(), Config{BaseURL: "https://grok.com", BrowserWorkerURL: server.URL}, &infraegress.Lease{NodeID: 7}, "token", "https://grok.com/rest/app-chat/conversations/new", map[string]any{"message": "hello"})
+	var unavailable *infraegress.UnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != infraegress.UnavailableWorker {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestBrowserWorkerTimeoutReservesClientResponseBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	timeout := browserWorkerTimeoutSeconds(ctx, 120)
 	if timeout < 7 || timeout > 8 {
 		t.Fatalf("timeout = %d, want close to 8 seconds", timeout)
+	}
+}
+
+func TestBrowserWorkerTimeoutDoesNotOutliveAnExpiringParentRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if timeout := browserWorkerTimeoutSeconds(ctx, 120); timeout != 5 {
+		t.Fatalf("timeout = %d, want the worker minimum of 5 seconds", timeout)
 	}
 }
 

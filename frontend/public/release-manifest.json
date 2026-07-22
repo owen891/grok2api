@@ -1,7 +1,53 @@
 {
-  "latest": "v3.1.0",
+  "latest": "v3.1.2",
   "repositoryURL": "https://github.com/owen891/grok2api",
   "releases": [
+    {
+      "version": "v3.1.2",
+      "date": "2026-07-22",
+      "entries": [
+        {
+          "type": "feature",
+          "zh": "新增账号模型健康证据：巡检会记录模型可用、模型不存在、权限拒绝和需要重新授权等状态，调度器会排除近期确认不可用的账号，并在账号页和仪表盘提供模型拒绝筛选与实时产能。",
+          "en": "Added per-account model health evidence: inspections record healthy, unavailable, permission-denied, and re-auth states; routing excludes recently confirmed failures, with model-denied filtering and live capacity in the account and dashboard views."
+        },
+        {
+          "type": "feature",
+          "zh": "新增失效账号自动清理和安全并发协调：仅清理满足年龄条件且没有活动租约的 reauthRequired 账号，并支持在线配置、分布式锁和运行状态清理。",
+          "en": "Added automatic cleanup for aged reauthRequired accounts with active-lease protection, hot configuration, distributed locking, and runtime-state cleanup."
+        },
+        {
+          "type": "feature",
+          "zh": "新增 Grok Build OAuth 账号 Sub2API 导出，可直接生成兼容的可刷新账号文件；同时完善图片任务重试/进度、Responses 加密 reasoning 恢复和媒体任务处理。",
+          "en": "Added Sub2API-compatible export for refreshable Grok Build OAuth accounts, plus resilient image-job retries and progress reporting, Responses encrypted-reasoning recovery, and media task handling."
+        },
+        {
+          "type": "feature",
+          "zh": "快速导入 Grok Web 账号支持“邮箱----密码----SSO Token”格式，密码只用于解析不会保存；CPA/XAI 探测会识别 chat 权限拒绝并避免把无权限凭据误报为可导入账号。",
+          "en": "Grok Web quick import now accepts email----password----SSO Token lines without storing passwords; CPA/XAI probing recognizes Chat permission denial and prevents non-importable credentials from being reported as successful imports."
+        },
+        {
+          "type": "improvement",
+          "zh": "扩展管理台的账号、聊天、注册、代理和设置工作流：补充批量操作、状态筛选、错误分类、导入/导出反馈、实时路由容量和中英文提示。",
+          "en": "Expanded account, chat, registration, egress, and settings workflows with bulk actions, state filters, classified errors, import/export feedback, live routing capacity, and bilingual messaging."
+        },
+        {
+          "type": "improvement",
+          "zh": "增强 Grok Web 浏览器 worker、Statsig/会话缓存、代理节点和注册运行时的稳定性，并补充后端、前端和注册模块回归测试。",
+          "en": "Improved Grok Web browser-worker stability, Statsig/session caching, egress-node handling, and registration runtime behavior, with broader backend, frontend, and registration regression coverage."
+        },
+        {
+          "type": "security",
+          "zh": "增加注册与协议调试日志的 URL 脱敏边界，并继续将敏感凭据、运行数据、本地构建物和调试抓取结果排除在版本库之外。",
+          "en": "Added URL redaction boundaries for registration and protocol diagnostics while keeping credentials, runtime data, local build output, and debug captures out of the repository."
+        },
+        {
+          "type": "fix",
+          "zh": "同步升级 Go 依赖并修复模型不可用、出口节点、媒体任务、账号巡检和前端版本提示中的边界问题。",
+          "en": "Updated Go dependencies and fixed edge cases across model-unavailable handling, egress nodes, media jobs, account inspection, and frontend version messaging."
+        }
+      ]
+    },
     {
       "version": "v3.1.0",
       "date": "2026-07-19",

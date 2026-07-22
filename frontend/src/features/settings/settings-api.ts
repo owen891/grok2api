@@ -19,16 +19,20 @@ export type SettingsConfigDTO = {
   routing: { stickyTTL: string; cooldownBase: string; cooldownMax: string; capacityWait: string; maxAttempts: number };
   audit: { bufferSize: number; batchSize: number; flushInterval: string };
   clientKeyDefaults: { rpmLimit: number; maxConcurrent: number };
+  accounts: {
+    autoCleanReauthEnabled: boolean; autoCleanReauthInterval: string;
+    autoCleanReauthMinAge: string; autoCleanDisabledEnabled: boolean;
+  };
 };
 
 export type EgressNodeDTO = {
   id: string; name: string; scope: EgressScope; enabled: boolean;
-  proxyConfigured: boolean; userAgent: string; cookieConfigured: boolean;
+  proxyConfigured: boolean; proxyPool: boolean; userAgent: string; cookieConfigured: boolean;
   health: number; failureCount: number; cooldownUntil?: string; lastError?: string;
 };
 
 export type EgressNodeInput = {
-  name: string; scope: EgressScope; enabled: boolean; proxyURL?: string;
+  name: string; scope: EgressScope; enabled: boolean; proxyPool?: boolean; proxyURL?: string;
   clearProxyURL?: boolean; userAgent: string; cloudflareCookies?: string; clearCookies?: boolean;
 };
 
@@ -59,6 +63,10 @@ const settingsConfigValidator = hasShape({
   routing: hasShape({ stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber }),
   audit: hasShape({ bufferSize: isNumber, batchSize: isNumber, flushInterval: isString }),
   clientKeyDefaults: hasShape({ rpmLimit: isNumber, maxConcurrent: isNumber }),
+  accounts: hasShape({
+    autoCleanReauthEnabled: isBoolean, autoCleanReauthInterval: isString,
+    autoCleanReauthMinAge: isString, autoCleanDisabledEnabled: isBoolean,
+  }),
 });
 const decodeSettingsSnapshot = createObjectDecoder<SettingsSnapshotDTO>("settings", {
   config: settingsConfigValidator,
@@ -69,12 +77,12 @@ const decodeSettingsSnapshot = createObjectDecoder<SettingsSnapshotDTO>("setting
 });
 const egressNodeValidator = hasShape({
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset"), enabled: isBoolean,
-  proxyConfigured: isBoolean, userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
+  proxyConfigured: isBoolean, proxyPool: isBoolean, userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
   cooldownUntil: isOptional(isString), lastError: isOptional(isString),
 });
 const decodeEgressNode = createObjectDecoder<EgressNodeDTO>("egress node", {
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset"), enabled: isBoolean,
-  proxyConfigured: isBoolean, userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
+  proxyConfigured: isBoolean, proxyPool: isBoolean, userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
   cooldownUntil: isOptional(isString), lastError: isOptional(isString),
 });
 const decodeEgressNodeList = createObjectDecoder<EgressNodeListDTO>("egress node list", {

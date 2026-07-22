@@ -94,6 +94,19 @@ func TestImageClaimsUseImageTimeoutLease(t *testing.T) {
 	}
 }
 
+func TestDeferredImageJobUsesImageRecoveryLease(t *testing.T) {
+	repository := &videoUsageRepository{}
+	service := &Service{mediaJobs: repository}
+	service.deferVideoJob(context.Background(), media.Job{ID: "image_deferred", Kind: media.JobKindImage, ClaimToken: "claim"})
+	if repository.updated.LeaseUntil == nil {
+		t.Fatal("deferred image job has no lease")
+	}
+	lease := repository.updated.LeaseUntil.Sub(repository.updated.UpdatedAt)
+	if lease != imageJobLease {
+		t.Fatalf("deferred image lease = %v, want %v", lease, imageJobLease)
+	}
+}
+
 type durableVideoAuditRecorder struct {
 	failures int
 	calls    int
@@ -114,6 +127,7 @@ func (r *durableVideoAuditRecorder) CreateDurable(_ context.Context, value audit
 type videoUsageRepository struct {
 	job        media.Job
 	claimLease time.Duration
+	updated    media.Job
 }
 
 func (r *videoUsageRepository) CreateMediaJob(context.Context, media.Job) error { return nil }
@@ -122,7 +136,10 @@ func (r *videoUsageRepository) GetMediaJob(context.Context, string, uint64) (med
 	return r.job, nil
 }
 
-func (r *videoUsageRepository) UpdateMediaJob(context.Context, media.Job) error { return nil }
+func (r *videoUsageRepository) UpdateMediaJob(_ context.Context, job media.Job) error {
+	r.updated = job
+	return nil
+}
 
 func (r *videoUsageRepository) ListMediaJobs(context.Context, repository.MediaJobListQuery) ([]media.Job, int64, error) {
 	return nil, 0, nil
@@ -146,6 +163,10 @@ func (r *videoUsageRepository) ListUnrecordedTerminalMediaJobs(context.Context, 
 func (r *videoUsageRepository) TryClaimMediaJob(_ context.Context, _ string, now, leaseUntil time.Time, _ string) (media.Job, bool, error) {
 	r.claimLease = leaseUntil.Sub(now)
 	return r.job, true, nil
+}
+
+func (r *videoUsageRepository) RenewMediaJobLease(context.Context, string, string, time.Time, time.Time) (bool, error) {
+	return true, nil
 }
 
 func (r *videoUsageRepository) MarkMediaJobUsageRecorded(_ context.Context, _ string, recordedAt time.Time) error {

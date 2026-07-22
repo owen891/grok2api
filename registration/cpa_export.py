@@ -22,6 +22,22 @@ _DEFAULT_OUT = _REG_DIR / "cpa_auths"
 _DEFAULT_CPA = Path("")  # empty = do not assume a machine-local CPA path
 
 
+def _append_private_text(path: Path, value: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.chmod(path, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _cpa_import_url(config: dict) -> str:
     """Resolve the Admin CPA import URL without logging credentials."""
     base = str(config.get("cpa_remote_base") or config.get("grok2api_remote_base") or "").strip().rstrip("/")
@@ -209,6 +225,7 @@ def _await_hotload_result(
                 "updated": int(payload.get("updated") or 0),
                 "synced": int(payload.get("synced") or 0),
                 "syncFailed": sync_failed,
+                "syncErrors": payload.get("syncErrors") if isinstance(payload.get("syncErrors"), list) else [],
                 "processedAt": str(payload.get("processedAt") or ""),
             }
         time.sleep(max(0.05, poll_interval))
@@ -332,7 +349,7 @@ def export_cpa_xai_for_account(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     log(
-        f"[cpa] mint OIDC for {email} -> {out_dir} proxy={proxy or '(none)'} "
+        f"[cpa] mint OIDC for {email} -> {out_dir} proxy={'configured' if proxy else '(none)'} "
         f"cookies={len(use_cookies) if isinstance(use_cookies, list) else (1 if use_cookies else 0)} "
         f"reuse={reuse_browser}"
     )
@@ -361,15 +378,18 @@ def export_cpa_xai_for_account(
     result["oauth_seconds"] = round(time.monotonic() - mint_started, 3)
     result["oauth_ok"] = bool(result.get("ok"))
 
-    if result.get("ok") and result.get("path"):
+    if result.get("ok") and result.get("importable", True) and result.get("path"):
         remote = upload_cpa_auth_file(result["path"], config=cfg, log_callback=_log)
         result["remote_upload"] = remote
         if not remote.get("ok") and not remote.get("skipped"):
             # Registration remains successful; the local file is retained for retry.
             result["remote_upload_error"] = remote.get("error") or "remote_upload_failed"
+    elif result.get("ok") and result.get("path"):
+        result["import_skipped"] = result.get("import_block_reason") or "credential_not_importable"
+        log(f"[cpa] automatic import skipped: {result['import_skipped']}")
 
     copy_to_hotload = bool(environment_hotload) or bool(cfg.get("cpa_copy_to_hotload", False))
-    if result.get("ok") and result.get("path") and copy_to_hotload and cpa_dir:
+    if result.get("ok") and result.get("importable", True) and result.get("path") and copy_to_hotload and cpa_dir:
         try:
             src = Path(result["path"])
             submitted_at = time.time()
@@ -407,8 +427,10 @@ def export_cpa_xai_for_account(
     # failure log under register dir
     if not result.get("ok"):
         fail_path = out_dir / "cpa_auth_failed.txt"
-        with open(fail_path, "a", encoding="utf-8") as f:
-            f.write(f"{email}----{result.get('error') or 'unknown'}----{int(time.time())}\n")
+        _append_private_text(
+            fail_path,
+            f"{email}----{result.get('error') or 'unknown'}----{int(time.time())}\n",
+        )
         if cfg.get("cpa_mint_required", False):
             raise RuntimeError(f"CPA mint required but failed: {result.get('error')}")
 

@@ -44,6 +44,31 @@ class ProtocolSpoolTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(1, result["created"])
 
+    def test_await_hotload_result_preserves_sync_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "spool"
+            incoming = root / "incoming"
+            failed = root / "failed"
+            incoming.mkdir(parents=True)
+            failed.mkdir(parents=True)
+            submitted_at = time.time()
+            errors = [{"accountId": 42, "error": "browser worker queue wait timed out"}]
+            (failed / "credential.result.json").write_text(
+                json.dumps({"status": "sync_failed", "syncFailed": 1, "syncErrors": errors}),
+                encoding="utf-8",
+            )
+
+            result = await_hotload_result(
+                incoming,
+                "credential",
+                submitted_at=submitted_at,
+                timeout=0.2,
+                poll_interval=0.05,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(errors, result["syncErrors"])
+
 
 if __name__ == "__main__":
     unittest.main()

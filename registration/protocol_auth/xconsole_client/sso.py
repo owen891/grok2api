@@ -315,7 +315,7 @@ class SSOExtractor:
         if self.debug:
             print(f"  [sso] candidate hop URLs: {len(hop_urls)}")
             for u in hop_urls[:5]:
-                print(f"  [sso]  - {u[:100]}")
+                print(f"  [sso]  - {u.split('?', 1)[0][:100]}")
 
         # 2. expand each hop with JWT success_url if present
         expanded: List[str] = []
@@ -358,7 +358,7 @@ class SSOExtractor:
                     last_exc = None
                     if self.debug:
                         print(
-                            f"  [sso] hop HTTP {_status} {hop[:64]}..., "
+                            f"  [sso] hop HTTP {_status} {hop.split('?', 1)[0][:64]}..., "
                             f"set-cookies={len(set_cookies or [])}"
                         )
                     # Follow redirects if present (303/302 often carries SSO)
@@ -383,14 +383,14 @@ class SSOExtractor:
                 except Exception as exc:
                     last_exc = exc
                     if self.debug:
-                        print(f"  [sso] request failed (attempt {attempt + 1}): {exc}")
+                        print(f"  [sso] request failed (attempt {attempt + 1}): {exc.__class__.__name__}")
                     if attempt == 0:
                         import time as _time
                         _time.sleep(0.4)
             if token:
                 break
         if not token and last_exc is not None and self.debug:
-            print(f"  [sso] request failed: {last_exc}")
+            print(f"  [sso] request failed: {last_exc.__class__.__name__}")
 
         # 4. prefer Set-Cookie header, then cookie jar
         if not token:
@@ -427,7 +427,7 @@ class SSOExtractor:
                 if name == "sso":
                     val = str(getattr(cookie, "value", ""))
                     if self.debug:
-                        print(f"  [sso] extracted: {val[:60]}...")
+                        print("  [sso] extracted token from cookie jar")
                     return val
         return None
 

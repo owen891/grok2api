@@ -500,6 +500,8 @@ func TestSelectionErrorResponseDistinguishesCoolingAndSaturation(t *testing.T) {
 		{name: "cooling", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionCooling, RetryAfter: 1500 * time.Millisecond}, status: http.StatusTooManyRequests, code: "upstream_cooling", retryAfter: "2"},
 		{name: "model cooling", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionModelCooling, RetryAfter: time.Second}, status: http.StatusTooManyRequests, code: "upstream_model_cooling", retryAfter: "1"},
 		{name: "saturated", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionSaturated, RetryAfter: time.Second}, status: http.StatusServiceUnavailable, code: "upstream_saturated", retryAfter: "1"},
+		{name: "inference denied", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionInferenceDenied}, status: http.StatusServiceUnavailable, code: "upstream_model_unhealthy"},
+		{name: "reauth required", failure: &gateway.SelectionUnavailableError{Reason: gateway.SelectionReauthRequired}, status: http.StatusServiceUnavailable, code: "upstream_reauth_required"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
@@ -509,5 +511,18 @@ func TestSelectionErrorResponseDistinguishesCoolingAndSaturation(t *testing.T) {
 				t.Fatalf("status=%d code=%q retry-after=%q", status, code, recorder.Header().Get("Retry-After"))
 			}
 		})
+	}
+}
+
+func TestAnthropicSelectionErrorPreservesInferenceHealthReason(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/", func(c *gin.Context) {
+		writeGatewayAnthropicError(c, &gateway.SelectionUnavailableError{Reason: gateway.SelectionInferenceDenied})
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"type":"overloaded_error"`) || !strings.Contains(recorder.Body.String(), "健康状态隔离") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }

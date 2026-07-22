@@ -18,7 +18,7 @@ import { SortableTableHead } from "@/shared/components/sortable-table-head";
 import { ErrorState } from "@/shared/components/data-state";
 import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/table-sort";
 
-const emptyInput: EgressNodeInput = { name: "", scope: "grok_build", enabled: true, proxyURL: "", userAgent: "", cloudflareCookies: "" };
+const emptyInput: EgressNodeInput = { name: "", scope: "grok_build", enabled: true, proxyPool: false, proxyURL: "", userAgent: "", cloudflareCookies: "" };
 
 export function EgressNodes() {
   const { t } = useTranslation();
@@ -49,7 +49,7 @@ export function EgressNodes() {
     mutationFn: ({ node, enabled }: { node: EgressNodeDTO; enabled: boolean }) => updateEgressNode(node.id, {
       name: node.name,
       scope: node.scope,
-      enabled,
+      enabled, proxyPool: node.proxyPool,
       userAgent: node.scope === "grok_build" ? "" : node.userAgent,
     }),
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["egress-nodes"] }); toast.success(t("settings.egress.saved")); },
@@ -62,7 +62,7 @@ export function EgressNodes() {
   }
 
   function openEdit(node: EgressNodeDTO) {
-    setForm({ name: node.name, scope: node.scope, enabled: node.enabled, userAgent: node.scope === "grok_build" ? "" : node.userAgent, proxyURL: "", cloudflareCookies: "" });
+    setForm({ name: node.name, scope: node.scope, enabled: node.enabled, proxyPool: node.proxyPool, userAgent: node.scope === "grok_build" ? "" : node.userAgent, proxyURL: "", cloudflareCookies: "" });
     setEditing(node);
   }
 
@@ -97,14 +97,15 @@ export function EgressNodes() {
       </div>
       {query.isError ? <ErrorState message={query.error.message} onRetry={() => void query.refetch()} /> : <div className="overflow-hidden rounded-md border">
         <Table>
-          <TableHeader><TableRow><SortableTableHead field="name" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("settings.egress.name")}</SortableTableHead><SortableTableHead field="scope" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.scope")}</SortableTableHead><SortableTableHead field="proxy" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.proxy")}</SortableTableHead><SortableTableHead field="clearance" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.clearance")}</SortableTableHead><TableHead className="text-center">{t("settings.egress.enabled")}</TableHead><SortableTableHead field="health" sortBy={sort.field} sortOrder={sort.order} initialOrder="desc" align="center" onSort={changeSort}>{t("settings.egress.health")}</SortableTableHead><TableActionHead /></TableRow></TableHeader>
+          <TableHeader><TableRow><SortableTableHead field="name" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("settings.egress.name")}</SortableTableHead><SortableTableHead field="scope" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.scope")}</SortableTableHead><SortableTableHead field="proxy" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.proxy")}</SortableTableHead><SortableTableHead field="clearance" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.clearance")}</SortableTableHead><TableHead className="text-center">{t("settings.egress.proxyPool", { defaultValue: "Proxy pool mode" })}</TableHead><TableHead className="text-center">{t("settings.egress.enabled")}</TableHead><SortableTableHead field="health" sortBy={sort.field} sortOrder={sort.order} initialOrder="desc" align="center" onSort={changeSort}>{t("settings.egress.health")}</SortableTableHead><TableActionHead /></TableRow></TableHeader>
           <TableBody>
-            {nodes.length === 0 ? <TableRow><TableCell colSpan={7} className="h-20 text-center text-xs text-muted-foreground">{t("settings.egress.directFallback")}</TableCell></TableRow> : nodes.map((node) => (
+            {nodes.length === 0 ? <TableRow><TableCell colSpan={8} className="h-20 text-center text-xs text-muted-foreground">{t("settings.egress.directFallback")}</TableCell></TableRow> : nodes.map((node) => (
               <TableRow className="group" key={node.id}>
                 <TableCell><div className="text-xs font-medium">{node.name}</div>{node.lastError ? <div className="mt-0.5 max-w-72 truncate text-[11px] text-destructive">{node.lastError}</div> : null}</TableCell>
                 <TableCell className="text-center"><Badge variant="outline">{scopeLabel(node.scope)}</Badge></TableCell>
                 <TableCell className="text-center text-xs text-muted-foreground">{node.proxyConfigured ? t("settings.egress.configured") : t("settings.egress.direct")}</TableCell>
                 <TableCell className="text-center text-xs text-muted-foreground">{node.cookieConfigured ? t("settings.egress.configured") : t("settings.egress.none")}</TableCell>
+                <TableCell className="text-center text-xs text-muted-foreground">{node.proxyPool ? t("settings.egress.proxyPool", { defaultValue: "Proxy pool mode" }) : t("settings.egress.none")}</TableCell>
                 <TableCell className="text-center"><div className="inline-flex items-center gap-2"><Switch checked={node.enabled} disabled={toggleEnabled.isPending} onCheckedChange={(enabled) => toggleEnabled.mutate({ node, enabled })} aria-label={`${node.name} ${t("settings.egress.enabled")}`} /><span className="text-xs text-muted-foreground">{node.enabled ? t("common.enabled") : t("common.disabled")}</span></div></TableCell>
                 <TableCell className="text-center text-xs tabular-nums">{Math.round(node.health * 100)}%</TableCell>
                 <TableActionCell>
@@ -126,6 +127,7 @@ export function EgressNodes() {
             <Field label={t("settings.egress.scope")}><Select value={form.scope} onValueChange={(value) => changeScope(value as EgressScope)}><SelectTrigger className="border-transparent"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="grok_build">{t("settings.egress.scopeBuild")}</SelectItem><SelectItem value="grok_web">{t("settings.egress.scopeWeb")}</SelectItem><SelectItem value="grok_console">{t("console.name")}</SelectItem><SelectItem value="grok_web_asset">{t("settings.egress.scopeWebAsset")}</SelectItem></SelectContent></Select></Field>
             <Field label={t("settings.egress.enabled")}><div className="flex h-9 items-center"><Switch checked={form.enabled} onCheckedChange={(enabled) => setForm({ ...form, enabled })} /></div></Field>
             <Field label={t("settings.egress.proxyURL")} className="sm:col-span-2"><Input className="border-transparent" type="password" autoComplete="new-password" placeholder={editing?.proxyConfigured ? t("settings.egress.keepConfigured") : "socks5h://user:pass@host:port"} value={form.proxyURL} onChange={(event) => setForm({ ...form, proxyURL: event.target.value })} /><p className="text-[11px] text-muted-foreground">{t("settings.egress.proxyProtocols")}</p></Field>
+            <Field label={t("settings.egress.proxyPool", { defaultValue: "Proxy pool mode" })} className="sm:col-span-2"><div className="flex items-center justify-between rounded-md bg-muted/40 px-3 py-2"><span className="text-xs text-muted-foreground">{t("settings.egress.proxyPoolHelp", { defaultValue: "A single connection failure in a shared proxy pool does not cool the entire node." })}</span><Switch checked={form.proxyPool ?? false} onCheckedChange={(proxyPool) => setForm({ ...form, proxyPool })} /></div></Field>
             {form.scope !== "grok_build" ? <Field label={t("settings.egress.userAgent")} className="sm:col-span-2"><Input className="border-transparent" value={form.userAgent} onChange={(event) => setForm({ ...form, userAgent: event.target.value })} /></Field> : null}
             {form.scope !== "grok_build" ? <Field label={t("settings.egress.cloudflareCookie")} className="sm:col-span-2"><Input className="border-transparent" type="password" autoComplete="new-password" placeholder={editing?.cookieConfigured ? t("settings.egress.keepConfigured") : "cf_clearance=...; __cf_bm=..."} value={form.cloudflareCookies} onChange={(event) => setForm({ ...form, cloudflareCookies: event.target.value })} /></Field> : null}
           </div>

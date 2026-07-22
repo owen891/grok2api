@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import os
@@ -24,7 +23,7 @@ import traceback
 import uuid
 from concurrent.futures import FIRST_COMPLETED, Executor, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Backward-compatible dispatcher for older Go workers that still point at this
 # script while selecting the browser engine.
@@ -44,6 +43,7 @@ if str(ROOT) not in sys.path:
 import yyds_mail as reg  # noqa: E402
 from clearance_provider import create_clearance_provider, local_captcha_endpoints  # noqa: E402
 from local_turnstile import check_turnstile_endpoint  # noqa: E402
+from cpa_xai.proxyutil import proxy_log_label  # noqa: E402
 from cpa_xai.schema import build_cpa_xai_auth, credential_file_name  # noqa: E402
 from cpa_xai.writer import write_cpa_xai_auth  # noqa: E402
 
@@ -468,6 +468,7 @@ def preflight(cfg: dict[str, Any]) -> list[str]:
     proxies = proxy_pool(cfg)
     for proxy in proxies:
         if "://" not in proxy:
+            proxy = proxy_log_label(proxy)
             errors.append(f"代理地址缺少协议前缀: {proxy}")
     for key in ("cpa_base_url",):
         value = str(cfg.get(key) or "").strip()
@@ -784,7 +785,6 @@ def register_one(
             "password": password,
             "spool": str(import_result.get("path") or local_path),
             "engine": "protocol",
-            "refresh_token_prefix": str(oauth.get("refresh_token") or "")[:12],
         }
     except Exception as exc:
         if clearance_future is not None:

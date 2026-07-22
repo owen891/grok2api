@@ -181,7 +181,7 @@ func (a *Adapter) syncQuotaModeWithBrowser(ctx context.Context, cfg Config, cred
 	value := browserWorkerRequest{
 		BaseURL: cfg.BaseURL, Endpoint: endpoint, ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent,
 		CloudflareCookie: lease.CFCookies, SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL,
-		RequestID: newRequestUUID(), TimeoutSeconds: cfg.QuotaTimeoutSeconds,
+		RequestID: newRequestUUID(), TimeoutSeconds: browserWorkerTimeoutSeconds(ctx, cfg.QuotaTimeoutSeconds),
 		Payload: map[string]any{"modelName": mode},
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.QuotaTimeoutSeconds+60)*time.Second)
@@ -441,8 +441,14 @@ func parseProtoTimestamp(message []byte) (time.Time, error) {
 				return time.Time{}, fmt.Errorf("protobuf timestamp 值无效")
 			}
 			if number == 1 {
+				if value > math.MaxInt64 {
+					return time.Time{}, fmt.Errorf("protobuf timestamp 秒数溢出")
+				}
 				seconds = int64(value)
 			} else {
+				if value >= uint64(time.Second) {
+					return time.Time{}, fmt.Errorf("protobuf timestamp 纳秒范围无效")
+				}
 				nanos = int32(value)
 			}
 			message = message[consumed:]
@@ -473,6 +479,9 @@ func parseQuotaBreakdown(message []byte) (account.QuotaBreakdown, bool) {
 		case number == 1 && fieldType == protowire.VarintType:
 			value, consumed := protowire.ConsumeVarint(message)
 			if consumed < 0 {
+				return account.QuotaBreakdown{}, false
+			}
+			if value > uint64(account.QuotaProductVoice) {
 				return account.QuotaBreakdown{}, false
 			}
 			result.ProductCode = int(value)

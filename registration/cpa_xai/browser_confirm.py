@@ -26,10 +26,13 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+from log_safety import redact_url
 
 LogFn = Callable[[str], None]
 
@@ -53,7 +56,8 @@ def _project_root() -> Path:
 
 def _debug_shot_dir() -> Path:
     d = _project_root() / "screenshots"
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
     return d
 
 
@@ -66,6 +70,24 @@ def _safe_tag(s: str) -> str:
         else:
             out.append("_")
     return "".join(out)[:80] or "na"
+
+
+def _write_private_text(path: Path, value: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}-", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.chmod(temporary, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def _save_debug_shot(
@@ -114,12 +136,13 @@ def _save_debug_shot(
                 pass
             log(f"截图失败，阶段={tag}")
             return None
+        os.chmod(saved, 0o600)
         # also dump short text/url alongside
         try:
             meta = path.with_suffix(".txt")
-            url = _page_url(page)
+            url = redact_url(_page_url(page))
             vis = _norm(_visible_text(page))[:800]
-            meta.write_text(f"url={url}\nemail={email}\ntag={tag}\nvisible={vis}\n", encoding="utf-8")
+            _write_private_text(meta, f"url={url}\nemail={email}\ntag={tag}\nvisible={vis}\n")
         except Exception:
             pass
         log(f"调试截图已保存：{saved}")
@@ -222,6 +245,12 @@ def create_standalone_page(
         log("浏览器代理：直连")
 
     browser = Chromium(opts)
+    try:
+        from browser_runtime import hide_browser_windows
+
+        hide_browser_windows(getattr(browser, "process_id", None))
+    except Exception:
+        pass
     page = browser.latest_tab
     log("独立 Chromium 已启动")
     return browser, page
@@ -900,7 +929,7 @@ def approve_device_code(
         except Exception:
             user_code = ""
 
-    log(f"正在打开设备授权页：{verification_uri_complete}")
+    log(f"正在打开设备授权页：{redact_url(verification_uri_complete)}")
     try:
         page.get(verification_uri_complete, timeout=60)
     except TypeError:
@@ -920,7 +949,7 @@ def approve_device_code(
         url = _page_url(page)
         text = _visible_text(page)
         if url != last_url:
-            log(f"页面已切换：{url[:180]}")
+            log(f"页面已切换：{redact_url(url)[:180]}")
             last_url = url
 
         # Non-retryable auth / CF block — skip account immediately (no timeout wait)
@@ -1216,7 +1245,7 @@ def mint_with_browser(
                 work_page.get("https://accounts.x.ai/")
                 _sleep(1.0)
                 url = _page_url(work_page)
-                log(f"注入登录状态后的页面：{url[:120]}")
+                log(f"注入登录状态后的页面：{redact_url(url)[:120]}")
             except Exception as e:
                 log(f"检查注入后的登录状态失败：{e}")
 

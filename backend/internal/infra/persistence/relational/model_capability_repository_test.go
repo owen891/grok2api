@@ -122,17 +122,65 @@ func TestPublicModelNameResolvesAcrossAvailableProviders(t *testing.T) {
 	if err != nil || len(routes) != 2 || routes[0].Provider != account.ProviderBuild || routes[1].Provider != account.ProviderConsole {
 		t.Fatalf("shared routes = %#v, err = %v", routes, err)
 	}
+	if err := accounts.SetInferenceHealth(ctx, build.ID, "grok-shared", account.InferenceHealthPermissionDenied, nil, 403, "permission_denied"); err != nil {
+		t.Fatal(err)
+	}
+	route, err := models.GetByPublicID(ctx, "grok-shared")
+	if err != nil || route.Provider != account.ProviderConsole {
+		t.Fatalf("healthy provider should win over model-isolated route = %#v, err = %v", route, err)
+	}
 	explicit, err := models.GetByPublicIDCandidates(ctx, "Console/grok-shared")
 	if err != nil || len(explicit) != 1 || explicit[0].Provider != account.ProviderConsole {
 		t.Fatalf("explicit Console route = %#v, err = %v", explicit, err)
+	}
+	build.AuthStatus = account.AuthStatusReauthRequired
+	if _, err := accounts.Update(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+	route, err = models.GetByPublicID(ctx, "grok-shared")
+	if err != nil || route.Provider != account.ProviderConsole {
+		t.Fatalf("healthy provider should win over reauth route = %#v, err = %v", route, err)
+	}
+	build.AuthStatus = account.AuthStatusActive
+	if _, err := accounts.Update(ctx, build); err != nil {
+		t.Fatal(err)
 	}
 	build.Enabled = false
 	if _, err := accounts.Update(ctx, build); err != nil {
 		t.Fatal(err)
 	}
-	route, err := models.GetByPublicID(ctx, "grok-shared")
+	route, err = models.GetByPublicID(ctx, "grok-shared")
 	if err != nil || route.Provider != account.ProviderConsole {
 		t.Fatalf("fallback route = %#v, err = %v", route, err)
+	}
+}
+
+func TestPublicModelNameResolvesWhenAllMatchingAccountsRequireReauth(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDatabase(t)
+	models := NewModelRepository(database)
+	accounts := NewAccountRepository(database)
+
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "reauth", SourceKey: "reauth-route",
+		EncryptedAccessToken: testEncryptedToken, Enabled: true, AuthStatus: account.AuthStatusReauthRequired,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := models.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-reauth-only"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := models.ReplaceAccountCapabilities(ctx, value.ID, []string{"grok-reauth-only"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	routes, err := models.GetByPublicIDCandidates(ctx, "grok-reauth-only")
+	if err != nil || len(routes) != 1 || routes[0].Provider != account.ProviderBuild {
+		t.Fatalf("reauth-only routes = %#v, err = %v", routes, err)
+	}
+	if route, err := models.GetByProviderUpstream(ctx, account.ProviderBuild, "grok-reauth-only"); err != nil || route.ID != routes[0].ID {
+		t.Fatalf("explicit reauth-only route = %#v, err = %v", route, err)
 	}
 }
 

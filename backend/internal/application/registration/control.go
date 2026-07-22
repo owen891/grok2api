@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,14 +79,16 @@ type Progress struct {
 }
 
 type Status struct {
-	Configured bool       `json:"configured"`
-	Running    bool       `json:"running"`
-	PID        int        `json:"pid,omitempty"`
-	StartedAt  *time.Time `json:"startedAt,omitempty"`
-	FinishedAt *time.Time `json:"finishedAt,omitempty"`
-	ExitCode   *int       `json:"exitCode,omitempty"`
-	LastError  *Failure   `json:"lastError,omitempty"`
-	Progress   Progress   `json:"progress"`
+	Configured          bool       `json:"configured"`
+	Running             bool       `json:"running"`
+	PID                 int        `json:"pid,omitempty"`
+	StartedAt           *time.Time `json:"startedAt,omitempty"`
+	FinishedAt          *time.Time `json:"finishedAt,omitempty"`
+	ExitCode            *int       `json:"exitCode,omitempty"`
+	LastError           *Failure   `json:"lastError,omitempty"`
+	DurationMs          *int64     `json:"durationMs,omitempty"`
+	AveragePerAccountMs *int64     `json:"averagePerAccountMs,omitempty"`
+	Progress            Progress   `json:"progress"`
 }
 
 type LogEntry struct {
@@ -755,9 +758,11 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 	if engine == registrationEngineBrowser {
 		workerDetail := dependencyDetail
 		if len(workerChecks) > 0 {
-			workerDetail = "browser worker preflight failed"
-			if dependencyOK {
+			workerDetail = workerPreflightFailureDetail(workerChecks)
+			if dependencyOK && workerDetail == "" {
 				workerDetail = "ready"
+			} else if workerDetail == "" {
+				workerDetail = "browser worker preflight failed"
 			}
 		}
 		add("dependencies", dependencyOK, truncateText(workerDetail, 500))
@@ -771,6 +776,9 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		}
 		addWorkerPreflightCheck("grokRegisterImport", "grok_register_ttk")
 		addWorkerPreflightCheck("drissionPage", "DrissionPage")
+		addWorkerPreflightCheck("browserChromium", "chromium")
+		addWorkerPreflightCheck("browserDisplay", "display")
+		addWorkerPreflightCheck("browserRegistrationPage", "registrationPage")
 	} else {
 		add("dependencies", dependencyOK, truncateText(dependencyDetail, 500))
 	}
@@ -779,6 +787,25 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		result.OK = result.OK && check.OK
 	}
 	return result
+}
+
+func workerPreflightFailureDetail(checks map[string]workerPreflightCheck) string {
+	failures := make([]string, 0)
+	for name, check := range checks {
+		if check.OK {
+			continue
+		}
+		detail := strings.TrimSpace(check.Detail)
+		if detail == "" {
+			detail = "failed"
+		}
+		failures = append(failures, name+": "+detail)
+	}
+	if len(failures) == 0 {
+		return ""
+	}
+	sort.Strings(failures)
+	return "browser worker preflight failed: " + strings.Join(failures, "; ")
 }
 
 func parseWorkerPreflightChecks(output []byte) map[string]workerPreflightCheck {
@@ -854,7 +881,7 @@ func resolveBrowserExecutable(configured string) (string, error) {
 		}
 		return "", fmt.Errorf("configured browser executable is unavailable: %s", candidate)
 	}
-	for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "msedge"} {
+	for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome"} {
 		if path, err := exec.LookPath(name); err == nil {
 			return path, nil
 		}
@@ -866,7 +893,6 @@ func resolveBrowserExecutable(configured string) (string, error) {
 			}
 			for _, relative := range []string{
 				filepath.Join("Google", "Chrome", "Application", "chrome.exe"),
-				filepath.Join("Microsoft", "Edge", "Application", "msedge.exe"),
 			} {
 				candidate := filepath.Join(base, relative)
 				if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
@@ -875,7 +901,7 @@ func resolveBrowserExecutable(configured string) (string, error) {
 			}
 		}
 	}
-	return "", errors.New("Chromium or a compatible Chrome/Edge executable was not found")
+	return "", errors.New("Chromium or Chrome executable was not found")
 }
 
 func browserDisplayReady(environment []string) (bool, string) {
@@ -1104,11 +1130,38 @@ func (c *Controller) monitor(command *exec.Cmd, reader *os.File, done chan struc
 }
 
 func (c *Controller) statusLocked(state persistedState) Status {
-	return Status{
+	progress := c.progressLocked(state)
+	status := Status{
 		Configured: c.configuredLocked(), Running: state.Running, PID: state.PID,
 		StartedAt: state.StartedAt, FinishedAt: state.FinishedAt, ExitCode: state.ExitCode,
-		LastError: state.LastError, Progress: c.progressLocked(state),
+		LastError: state.LastError, Progress: progress,
 	}
+	status.DurationMs, status.AveragePerAccountMs = registrationTimingMetrics(state, progress)
+	return status
+}
+
+func registrationTimingMetrics(state persistedState, progress Progress) (*int64, *int64) {
+	if state.StartedAt == nil {
+		return nil, nil
+	}
+	end := time.Now().UTC()
+	if state.FinishedAt != nil {
+		end = *state.FinishedAt
+	}
+	duration := end.Sub(*state.StartedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	durationMs := duration.Milliseconds()
+	completedAccounts := progress.Succeeded
+	if completedAccounts <= 0 {
+		completedAccounts = progress.Done
+	}
+	if completedAccounts <= 0 {
+		return &durationMs, nil
+	}
+	averagePerAccountMs := durationMs / int64(completedAccounts)
+	return &durationMs, &averagePerAccountMs
 }
 
 func (c *Controller) progressLocked(state persistedState) Progress {
@@ -1219,8 +1272,10 @@ func (c *Controller) classifyFailureLocked(exitCode int, stopped bool) *Failure 
 	switch {
 	case strings.Contains(text, "TempMail.lol did not receive a verification email"):
 		return &Failure{Code: "tempmailDeliveryTimeout", Message: "TempMail.lol 未收到 xAI 验证邮件"}
-	case strings.Contains(text, "chat probe failed:") || exitCode == 2:
+	case strings.Contains(text, "chat probe failed:"):
 		return &Failure{Code: "cpaChatProbeFailed", Message: "账号注册完成，但 CPA 聊天能力探测未通过"}
+	case exitCode == 2:
+		return &Failure{Code: "cpaMintIncomplete", Message: "账号注册完成，但 CPA 凭据生成或导入未完成"}
 	default:
 		return &Failure{Code: "registrationFailed", Message: "注册任务执行失败，请查看运行日志"}
 	}
@@ -1335,7 +1390,7 @@ func (c *Controller) workerEnvironment() []string {
 func (c *Controller) workerEnvironmentForEngine(engine string) []string {
 	environment := c.workerEnvironment()
 	if engine == registrationEngineBrowser && workerEnvironmentValue(environment, "REGISTRATION_BROWSER_MODE") == "" {
-		environment = setEnvironment(environment, "REGISTRATION_BROWSER_MODE", "background")
+		environment = setEnvironment(environment, "REGISTRATION_BROWSER_MODE", "headless")
 	}
 	return environment
 }

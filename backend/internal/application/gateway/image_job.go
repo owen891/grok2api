@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/owen891/grok2api/backend/internal/domain/account"
@@ -21,8 +22,24 @@ import (
 const (
 	imageJobTimeout        = 30 * time.Minute
 	imageJobLease          = media.ImageJobRecoveryTimeout
+	imageJobLeaseRenewal   = imageJobLease / 3
 	maxImageJobOutputBytes = int64(128 << 20)
 )
+
+func (s *Service) imageAttempts() int {
+	attempts := int(s.maxAttempts.Load())
+	if attempts <= 0 {
+		return 3
+	}
+	return attempts
+}
+
+func imageJobAttemptProgress(attempt, attempts int) int {
+	if attempts <= 1 {
+		return 50
+	}
+	return min(90, max(10, 10+(attempt-1)*80/(attempts-1)))
+}
 
 type AsyncImageInput struct {
 	RequestID      string
@@ -157,6 +174,8 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 	}
 	workCtx, cancel := context.WithTimeout(ctx, imageJobTimeout)
 	defer cancel()
+	stopLeaseHeartbeat, leaseLost := s.maintainImageJobLease(workCtx, job.ID, job.ClaimToken, cancel)
+	defer stopLeaseHeartbeat()
 	routingTrace := routingTraceFromJSON(job.RoutingTraceJSON)
 	if routingTrace != nil {
 		workCtx = withRoutingTrace(workCtx, routingTrace)
@@ -170,7 +189,10 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 			RouteID: route.ID, PreferredAccountID: job.AccountID,
 			OnAttempt: func(credential account.Credential, attempt int) {
 				job.AccountID, job.AccountName = credential.ID, credential.Name
+				job.Progress = max(job.Progress, imageJobAttemptProgress(attempt, s.imageAttempts()))
 				job.UpdatedAt = time.Now().UTC()
+				leaseUntil := job.UpdatedAt.Add(imageJobLease)
+				job.LeaseUntil = &leaseUntil
 				if updateErr := s.mediaJobs.UpdateMediaJob(workCtx, job); updateErr != nil {
 					s.logger.Warn("image_job_attempt_write_failed", "job_id", job.ID, "attempt", attempt, "account_id", credential.ID, "error", updateErr)
 				}
@@ -178,6 +200,9 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 		},
 	})
 	if err != nil {
+		if imageJobLeaseWasLost(leaseLost) {
+			return
+		}
 		if routingTrace != nil {
 			job.RoutingTraceJSON = routingTrace.JSON()
 		}
@@ -228,6 +253,58 @@ func (s *Service) processImageJob(ctx context.Context, id string) {
 	job.LeaseUntil, job.UpdatedAt, job.CompletedAt, job.UsageRecordedAt = nil, now, &now, &now
 	if err := s.persistVideoJobWithRetry(ctx, job); err != nil {
 		s.logger.Error("image_job_terminal_write_failed", "job_id", job.ID, "error", err)
+	}
+}
+
+func (s *Service) maintainImageJobLease(ctx context.Context, id, claimToken string, cancel context.CancelFunc) (func(), <-chan struct{}) {
+	done := make(chan struct{})
+	leaseLost := make(chan struct{})
+	if s.mediaJobs == nil || strings.TrimSpace(id) == "" || strings.TrimSpace(claimToken) == "" {
+		close(leaseLost)
+		return func() {}, leaseLost
+	}
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		ticker := time.NewTicker(imageJobLeaseRenewal)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				now := time.Now().UTC()
+				updateCtx, updateCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				renewed, err := s.mediaJobs.RenewMediaJobLease(updateCtx, id, claimToken, now, now.Add(imageJobLease))
+				updateCancel()
+				if err != nil {
+					s.logger.Warn("image_job_lease_renewal_failed", "job_id", id, "error", err)
+					continue
+				}
+				if !renewed {
+					s.logger.Warn("image_job_lease_lost", "job_id", id)
+					close(leaseLost)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		workers.Wait()
+	}, leaseLost
+}
+
+func imageJobLeaseWasLost(leaseLost <-chan struct{}) bool {
+	select {
+	case <-leaseLost:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -8,6 +8,7 @@ export type ChatErrorClass =
   | "model"
   | "quota"
   | "moderation"
+  | "imagePermission"
   | "egress"
   | "upstream"
   | "timeout"

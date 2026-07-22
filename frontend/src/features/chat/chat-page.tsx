@@ -414,7 +414,7 @@ export function ChatPage() {
         toast.error(classified.message || t("chat.error.unknown"));
         patchMessage(sessionId, messageId, {
           streaming: false,
-          content: classified.message || t("chat.error.unknown"),
+          content: "",
           task: { kind: "image", status: "failed", requestId },
           error: {
             class: classified.class,
@@ -616,7 +616,7 @@ export function ChatPage() {
         toast.error(classified.message || t("chat.error.unknown"));
         patchMessage(sessionId, assistantId, {
           streaming: false,
-          content: classified.message || t("chat.error.unknown"),
+          content: "",
           task: { kind: mode, status: "failed" },
           error: {
             class: classified.class,

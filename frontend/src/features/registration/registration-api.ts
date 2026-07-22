@@ -27,6 +27,8 @@ export type RegistrationStatusDTO = {
   finishedAt?: string;
   exitCode?: number;
   lastError?: RegistrationFailureDTO;
+  durationMs?: number;
+  averagePerAccountMs?: number;
   progress: RegistrationProgressDTO;
 };
 
@@ -121,6 +123,8 @@ const statusDecoder = createObjectDecoder<RegistrationStatusDTO>("registration s
   finishedAt: isOptional(isString),
   exitCode: isOptional(isNumber),
   lastError: isOptional(failureValidator),
+  durationMs: isOptional(isNumber),
+  averagePerAccountMs: isOptional(isNumber),
   progress: progressValidator,
 });
 const logEntryValidator = hasShape({ id: isNumber, text: isString });

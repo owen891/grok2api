@@ -14,8 +14,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { getOperations, triggerReplenishment, type OperationsDTO } from "@/features/dashboard/operations-api";
 import { ErrorState } from "@/shared/components/data-state";
-import { formatDateTime, formatNumber } from "@/shared/lib/format";
+import { formatDateTime, formatDuration, formatNumber } from "@/shared/lib/format";
 import {
   getRegistrationLogs,
   getRegistrationPreflight,
@@ -62,7 +63,13 @@ export function RegistrationPage() {
     enabled: Boolean(statusQuery.data?.configured),
   });
   const proxyGroupsQuery = useQuery({ queryKey: ["egress-groups", "registration"], queryFn: () => listEgressGroups() });
-  const preflightMutation = useMutation({ mutationFn: getRegistrationPreflight });
+  const replenishmentQuery = useQuery({
+    queryKey: ["operations"],
+    queryFn: getOperations,
+    enabled: Boolean(statusQuery.data?.configured),
+    refetchInterval: 15_000,
+  });
+  const preflightMutation = useMutation({ mutationFn: getRegistrationPreflight, onError: showError });
   useEffect(() => {
     if (preflightMutation.data) {
       void queryClient.invalidateQueries({ queryKey: ["registration", "logs"] });
@@ -92,6 +99,15 @@ export function RegistrationPage() {
       setStopOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["registration"] });
       toast.success(t("registration.stopped"));
+    },
+    onError: showError,
+  });
+  const replenishmentTrigger = useMutation({
+    mutationFn: triggerReplenishment,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["operations"] });
+      void queryClient.invalidateQueries({ queryKey: ["registration"] });
+      toast.success(t("dashboardOperations.replenishmentRequested"));
     },
     onError: showError,
   });
@@ -157,6 +173,14 @@ export function RegistrationPage() {
   const busy = running || startMutation.isPending || stopMutation.isPending;
   const displayError = status?.lastError;
   const logItems = logsQuery.data?.items ?? [];
+  const taskDurationLabelText = locale === "zh-CN" ? "任务耗时" : "Task duration";
+  const taskDurationDetailText = locale === "zh-CN"
+    ? (running ? "运行中实时更新" : "本次任务总耗时")
+    : (running ? "Live elapsed time" : "Total duration for this run");
+  const averagePerAccountLabelText = locale === "zh-CN" ? "平均每号耗时" : "Avg per account";
+  const averagePerAccountDetailText = locale === "zh-CN" ? "按已完成账号计算" : "Calculated from completed accounts";
+  const durationLabel = status?.durationMs != null ? formatDuration(status.durationMs) : "-";
+  const averagePerAccountLabel = status?.averagePerAccountMs != null ? formatDuration(status.averagePerAccountMs) : "-";
   const formattedProgress = useMemo(() => {
     if (!progress) return t("registration.noProgress");
     if (progress.indeterminate) return t("registration.progressUnlimited", { done: formatNumber(progress.done, locale) });
@@ -201,7 +225,14 @@ export function RegistrationPage() {
             {status?.finishedAt ? <span className="text-muted-foreground">{t("registration.finishedAt")}: <span className="text-foreground">{formatDateTime(status.finishedAt, locale)}</span></span> : null}
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
-            <Button variant="secondary" size="sm" disabled={preflightMutation.isPending || busy || settingsDirty || !status?.configured} onClick={() => preflightMutation.mutate()}>
+            <ReplenishmentControl
+              value={replenishmentQuery.data?.replenishment}
+              locale={locale}
+              triggering={replenishmentTrigger.isPending}
+              registrationRunning={running}
+              onTrigger={() => replenishmentTrigger.mutate()}
+            />
+            <Button variant="secondary" size="sm" disabled={preflightMutation.isPending || busy || settingsDirty || !status?.configured} onClick={() => { preflightMutation.reset(); preflightMutation.mutate(); }}>
               {preflightMutation.isPending ? <Spinner /> : <RefreshCw />}{t("registration.preflight")}
             </Button>
             {running ? (
@@ -215,7 +246,7 @@ export function RegistrationPage() {
             )}
           </div>
         </div>
-        <div className="mt-5 grid border-y sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-5 grid border-y sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
           <TaskMetric
             label={t("registration.taskCompletion")}
             value={progress?.indeterminate
@@ -223,6 +254,8 @@ export function RegistrationPage() {
               : `${formatNumber(progress?.done ?? 0, locale)} / ${formatNumber(progress?.total ?? 0, locale)}`}
             detail={progress?.percent == null ? t("registration.inProgressUnknown") : `${progress.percent.toFixed(1)}%`}
           />
+          <TaskMetric label={taskDurationLabelText} value={durationLabel} detail={taskDurationDetailText} />
+          <TaskMetric label={averagePerAccountLabelText} value={averagePerAccountLabel} detail={averagePerAccountDetailText} />
           <TaskMetric label={t("registration.succeeded")} value={formatNumber(succeeded, locale)} detail={t("registration.usableCredentials")} tone="success" />
           <TaskMetric label={t("registration.failedAttempts")} value={formatNumber(failed, locale)} detail={t("registration.attemptedDetail", { count: formatNumber(attempted, locale) })} tone={failed > 0 ? "danger" : "default"} />
           <TaskMetric label={t("registration.successRate")} value={successRate == null ? "-" : `${successRate.toFixed(1)}%`} detail={t("registration.successRateDetail")} />
@@ -247,6 +280,30 @@ export function RegistrationPage() {
             <CircleAlert className="mt-0.5 size-4 shrink-0" />
             <span>{displayError.message}</span>
           </div>
+        ) : null}
+        {preflightMutation.data ? (
+          <section className="mt-5 border-t pt-4">
+            <div className="flex items-center gap-2">
+              {preflightMutation.data.ok ? <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" /> : <CircleAlert className="size-4 text-destructive" />}
+              <h2 className="text-sm font-medium">{t("registration.preflightResult")}</h2>
+              <Badge variant={preflightMutation.data.ok ? "secondary" : "destructive"}>
+                {preflightMutation.data.ok ? t("registration.succeeded") : t("registration.failed")}
+              </Badge>
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {preflightMutation.data.checks.map((check) => (
+                <div key={check.name} className={`min-w-0 border p-2 ${check.ok ? "border-emerald-200/70 dark:border-emerald-900/70" : "border-destructive/40 bg-destructive/5"}`}>
+                  <div className="flex min-w-0 items-start gap-2">
+                    {check.ok ? <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" /> : <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" />}
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-medium">{preflightCheckLabel(check.name, locale, t)}</div>
+                      <div className="mt-1 break-words text-[11px] leading-4 text-muted-foreground">{check.detail || "-"}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         ) : null}
       </section>
 
@@ -398,6 +455,79 @@ export function RegistrationPage() {
       </AlertDialog>
     </div>
   );
+}
+
+function ReplenishmentControl({ value, locale, triggering, registrationRunning, onTrigger }: {
+  value?: OperationsDTO["replenishment"];
+  locale: string;
+  triggering: boolean;
+  registrationRunning: boolean;
+  onTrigger: () => void;
+}) {
+  const { t } = useTranslation();
+  if (!value) return <Spinner className="mx-2 size-4" />;
+  if (!value.enabled) return <Badge variant="outline" className="text-muted-foreground">{t("dashboardOperations.replenishmentDisabled")}</Badge>;
+
+  const active = value.state === "starting" || value.state === "running" || value.state === "verifying";
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+      <Badge variant={value.state === "failed" ? "destructive" : "outline"} className="gap-1">
+        <RefreshCw className={`size-3 ${active ? "animate-spin" : ""}`} />
+        {t(`dashboardOperations.replenishment_${value.state}`)}
+      </Badge>
+      <span>{t("dashboardOperations.dailyStarts", { used: value.dailyStarts, limit: value.maxDailyRegistrations })}</span>
+      {value.predictive ? <span>{t("dashboardOperations.predictiveThreshold", { eligible: value.targetEligible, rpm: formatNumber(value.minDemandRPM, locale, 1), minutes: formatNumber(value.demandWindowSeconds / 60, locale, 0) })}</span> : null}
+      {value.nextAttemptAt ? <span>{formatDateTime(value.nextAttemptAt, locale)}</span> : null}
+      <Button type="button" variant="secondary" size="sm" disabled={triggering || registrationRunning || active} onClick={onTrigger}>
+        {triggering ? <Spinner /> : <RefreshCw />}{t("dashboardOperations.triggerReplenishment")}
+      </Button>
+    </div>
+  );
+}
+
+function preflightCheckLabel(name: string, locale: string, t: (key: string) => string): string {
+  const localLabels: Record<string, string> = locale === "zh-CN" ? {
+    browserRuntime: "浏览器运行环境",
+    browserWorker: "浏览器 Worker",
+    browserModule: "浏览器注册模块",
+    turnstileManifest: "Turnstile 清单",
+    turnstileContent: "Turnstile 脚本",
+    chromium: "Chrome/Chromium",
+    display: "显示环境",
+    browserProxyAuth: "浏览器代理认证",
+    cpaBrowserProxyAuth: "CPA 浏览器代理认证",
+    egressIP: "出口 IP",
+    registrationPage: "注册页面",
+    browserChromium: "Worker Chrome/Chromium",
+    browserDisplay: "Worker 显示环境",
+    browserRegistrationPage: "Worker 注册页面",
+    grokRegisterImport: "注册模块导入",
+    drissionPage: "DrissionPage",
+    dependencies: "Worker 依赖",
+  } : {
+    browserRuntime: "Browser runtime",
+    browserWorker: "Browser worker",
+    browserModule: "Browser registration module",
+    turnstileManifest: "Turnstile manifest",
+    turnstileContent: "Turnstile script",
+    chromium: "Chrome/Chromium",
+    display: "Display environment",
+    browserProxyAuth: "Browser proxy auth",
+    cpaBrowserProxyAuth: "CPA browser proxy auth",
+    egressIP: "Egress IP",
+    registrationPage: "Registration page",
+    browserChromium: "Worker Chrome/Chromium",
+    browserDisplay: "Worker display",
+    browserRegistrationPage: "Worker registration page",
+    grokRegisterImport: "Registration module import",
+    drissionPage: "DrissionPage",
+    dependencies: "Worker dependencies",
+  };
+  if (localLabels[name]) return localLabels[name];
+  if (name.startsWith("emailAPI:")) return `${t("registration.preflightChecks.emailAPI")} ${name.slice("emailAPI:".length)}`;
+  if (name.startsWith("emailReachability:")) return `${locale === "zh-CN" ? "邮箱可达性" : "Email reachability"} ${name.slice("emailReachability:".length)}`;
+  const translated = t(`registration.preflightChecks.${name}`);
+  return translated === `registration.preflightChecks.${name}` ? name : translated;
 }
 
 function renderRegistrationLog(text: string, locale: string) {

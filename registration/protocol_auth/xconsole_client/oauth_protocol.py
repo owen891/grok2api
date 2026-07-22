@@ -32,12 +32,10 @@ from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
 from . import grpcweb
 from .solver import YesCaptchaSolver
 from .xai_oauth import (
-    AUTHORIZATION_ENDPOINT,
     CLIPROXYAPI_GROK_BASE_URL,
     DEFAULT_CLIENT_ID,
     DEFAULT_SCOPES,
     OAuthLoginResult,
-    TOKEN_ENDPOINT,
     _finalize_oauth_code,
     build_authorization_url,
     code_challenge_s256,
@@ -50,6 +48,17 @@ CREATE_COOKIE_SETTER_RPC = "https://accounts.x.ai/auth_mgmt.AuthManagement/Creat
 ACCOUNTS_ORIGIN = "https://accounts.x.ai"
 # Observed Next.js server action for the consent Allow button (may change on deploy).
 SUBMIT_OAUTH2_CONSENT_ACTION = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
+
+
+def _redact_url(value: str) -> str:
+    """Keep URL routing context without logging query credentials or codes."""
+    try:
+        parsed = urlparse(str(value or ""))
+        if parsed.scheme and parsed.netloc:
+            return parsed._replace(query="", fragment="").geturl()
+    except ValueError:
+        pass
+    return str(value or "").split("?", 1)[0].split("#", 1)[0]
 
 
 class _ScriptSourceParser(HTMLParser):
@@ -452,7 +461,7 @@ class ProtocolOAuthClient:
 
                 if grpc_status in (None, 0) and session_jwt:
                     self._set_sso_cookie(session_jwt)
-                    self._log(f"CreateSession OK session_jwt={session_jwt[:24]}...")
+                    self._log("CreateSession OK session_jwt=present")
                     return {
                         "ok": True,
                         "error": None,
@@ -506,7 +515,7 @@ class ProtocolOAuthClient:
         visited: set[str] = set()
 
         for hop in range(max_hops):
-            self._log(f"hop {hop}: {current[:160]}")
+            self._log(f"hop {hop}: {_redact_url(current)[:160]}")
             # Never let the HTTP client connect to localhost callback.
             if current.startswith(redirect_uri) or (
                 "code=" in current and "state=" in current and "127.0.0.1" in current
@@ -525,12 +534,12 @@ class ProtocolOAuthClient:
                 key = "rt:" + pending_return_to
                 if key not in visited:
                     visited.add(key)
-                    self._log(f"account page → return_to {pending_return_to[:140]}")
+                    self._log(f"account page → return_to {_redact_url(pending_return_to)[:140]}")
                     current = pending_return_to
                     continue
 
             if current in visited and hop > 2:
-                raise RuntimeError(f"OAuth redirect loop at {current[:180]}")
+                raise RuntimeError(f"OAuth redirect loop at {_redact_url(current)[:180]}")
             visited.add(current)
 
             resp = self._get(current, allow_redirects=False)
@@ -589,7 +598,7 @@ class ProtocolOAuthClient:
                     current = pending_return_to
                     continue
                 raise RuntimeError(
-                    f"OAuth redirect chain stalled at HTTP {status} {current[:180]} "
+                    f"OAuth redirect chain stalled at HTTP {status} {_redact_url(current)[:180]} "
                     f"(no authorization code)."
                 )
             continue
@@ -608,7 +617,7 @@ class ProtocolOAuthClient:
             raise RuntimeError("authorization failed: state mismatch")
         code = (qs.get("code") or [""])[0]
         if not code:
-            raise RuntimeError(f"authorization failed: missing code in {url[:200]}")
+            raise RuntimeError(f"authorization failed: missing code in {_redact_url(url)[:200]}")
         return code
 
     def login(
@@ -676,13 +685,13 @@ class ProtocolOAuthClient:
                 success = str(cfg.get("success_url") or "")
             if token:
                 self._set_sso_cookie(token)
-                self._log(f"applied set-cookie token as sso ({token[:16]}...)")
+                self._log("applied set-cookie token as sso")
             # Hit the set-cookie endpoint so domain cookies are written.
             resp = self._get(setter_url, allow_redirects=False)
             loc = resp.headers.get("location") or resp.headers.get("Location") or ""
             if loc:
                 nxt = urljoin(setter_url, loc)
-                self._log(f"set-cookie Location → {nxt[:160]}")
+                self._log(f"set-cookie Location → {_redact_url(nxt)[:160]}")
                 return nxt
             if success:
                 return success
@@ -698,11 +707,11 @@ class ProtocolOAuthClient:
                     try:
                         script = self._get(source_url, allow_redirects=True)
                     except Exception as exc:
-                        self._log(f"consent action chunk fetch failed url={source_url[:120]} error={exc}")
+                        self._log(f"consent action chunk fetch failed url={_redact_url(source_url)[:120]} error={exc}")
                         continue
                     action_id = extract_submit_oauth_action(script.text or "")
                     if action_id:
-                        self._log(f"discovered live submitOAuth2Consent action from {source_url[:120]}")
+                        self._log(f"discovered live submitOAuth2Consent action from {_redact_url(source_url)[:120]}")
                         break
             if not action_id:
                 action_id = SUBMIT_OAUTH2_CONSENT_ACTION
@@ -748,7 +757,7 @@ class ProtocolOAuthClient:
                 if clean_url != page_url:
                     resp = self._s.post(clean_url, headers=headers, data=body, timeout=45)
             text = resp.text or ""
-            self._log(f"consent action HTTP {resp.status_code} body={text[:180]!r}")
+            self._log(f"consent action HTTP {resp.status_code} body_len={len(text)}")
             # Response may be RSC flight text containing JSON with code.
             m = re.search(r'"code"\s*:\s*"([^"]+)"', text)
             if m:
@@ -760,7 +769,7 @@ class ProtocolOAuthClient:
             loc = resp.headers.get("location") or resp.headers.get("Location") or ""
             if "code=" in loc:
                 return self._code_from_url(urljoin(page_url, loc), state)
-            raise RuntimeError(f"submitOAuth2Consent failed HTTP {resp.status_code}: {text[:300]}")
+            raise RuntimeError(f"submitOAuth2Consent failed HTTP {resp.status_code} (body_len={len(text)})")
 
         def _complete_via_cookie_setter(label: str) -> str:
             """Mint set-cookie chain with consent as success_url, then Allow consent."""
@@ -774,7 +783,7 @@ class ProtocolOAuthClient:
             if not csl.get("ok"):
                 raise RuntimeError(f"{label}: CreateCookieSetterLink failed: {csl.get('error')}")
             setter = str(csl.get("cookie_setter_url") or "")
-            self._log(f"{label}: cookie_setter={setter[:100]}...")
+            self._log(f"{label}: cookie_setter={_redact_url(setter)[:100]}")
 
             # Apply set-cookie hop without overwriting sso incorrectly.
             current = setter
@@ -787,7 +796,7 @@ class ProtocolOAuthClient:
                     # Only GET set-cookie; use response Set-Cookie (do not clobber sso with config.token).
                     resp = self._get(current, allow_redirects=False)
                     loc = resp.headers.get("location") or resp.headers.get("Location") or ""
-                    self._log(f"set-cookie HTTP {resp.status_code} loc={(loc or '')[:120]}")
+                    self._log(f"set-cookie HTTP {resp.status_code} loc={_redact_url(loc)[:120]}")
                     if loc:
                         current = urljoin(current, loc)
                         continue

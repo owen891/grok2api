@@ -435,7 +435,11 @@ func (s *Service) failVideoJob(ctx context.Context, job media.Job, code string, 
 
 func (s *Service) deferVideoJob(ctx context.Context, job media.Job) {
 	now := time.Now().UTC()
-	leaseUntil := now.Add(5 * time.Minute)
+	deferLease := 5 * time.Minute
+	if job.Kind == media.JobKindImage {
+		deferLease = imageJobLease
+	}
+	leaseUntil := now.Add(deferLease)
 	job.Status = media.StatusInProgress
 	job.LeaseUntil = &leaseUntil
 	job.UpdatedAt = now

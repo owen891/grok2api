@@ -48,6 +48,9 @@ type RoutingTraceEvent struct {
 	Excluded          int    `json:"excluded,omitempty"`
 	Eligible          int    `json:"eligible,omitempty"`
 	Probe             int    `json:"probe,omitempty"`
+	Disabled          int    `json:"disabled,omitempty"`
+	ReauthRequired    int    `json:"reauthRequired,omitempty"`
+	InferenceDenied   int    `json:"inferenceDenied,omitempty"`
 	Cooling           int    `json:"cooling,omitempty"`
 	ModelCooling      int    `json:"modelCooling,omitempty"`
 	QuotaExhausted    int    `json:"quotaExhausted,omitempty"`
@@ -141,7 +144,8 @@ func recordRoutingPool(ctx context.Context, value RoutingTraceEvent) {
 		value.Type = "candidate_pool"
 		trace.record(value)
 		observability.ObserveRoutingPool(string(trace.Provider), trace.Model, map[string]int{
-			"total": value.Total, "eligible": value.Eligible, "probe": value.Probe, "cooling": value.Cooling,
+			"total": value.Total, "eligible": value.Eligible, "probe": value.Probe, "disabled": value.Disabled,
+			"reauth_required": value.ReauthRequired, "inference_denied": value.InferenceDenied, "cooling": value.Cooling,
 			"model_cooling": value.ModelCooling, "quota_exhausted": value.QuotaExhausted, "unsupported": value.Unsupported,
 		})
 	}

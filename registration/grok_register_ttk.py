@@ -29,10 +29,13 @@ import random
 import re
 import string
 import json
+import tempfile
 
 from DrissionPage import ChromiumOptions
 from DrissionPage.errors import PageDisconnectedError
 from curl_cffi import requests
+
+from log_safety import redact_url
 
 
 _REG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -81,18 +84,56 @@ _EMAILS_ERROR_FILE = os.path.join(_DATA_DIR, "emails_error.txt")
 _email_track_lock = threading.Lock()
 
 
+def _ensure_private_parent(path):
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    if parent != _REG_DIR:
+        os.chmod(parent, 0o700)
+
+
+def _append_private_text(path, value):
+    _ensure_private_parent(path)
+    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.chmod(path, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _write_private_json(path, value):
+    _ensure_private_parent(path)
+    parent = os.path.dirname(os.path.abspath(path))
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".registration-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=4, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, path)
+        os.chmod(path, 0o600)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
 def mark_used(email: str, password: str = ""):
     """记录成功注册的邮箱，防止重复使用。"""
     with _email_track_lock:
-        with open(_EMAILS_USED_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{email}----{password}----ok\n")
+        _append_private_text(_EMAILS_USED_FILE, f"{email}----{password}----ok\n")
 
 
 def mark_error(email: str, password: str = "", reason: str = ""):
     """记录失败邮箱及原因，避免重试烂邮箱。"""
     with _email_track_lock:
-        with open(_EMAILS_ERROR_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{email}----{password}----{reason}\n")
+        _append_private_text(_EMAILS_ERROR_FILE, f"{email}----{password}----{reason}\n")
 
 
 def is_email_used(email: str) -> bool:
@@ -162,7 +203,7 @@ def dump_state(page, tag: str = ""):
         if not info:
             print(f"  [state:{tag}] page context not ready (None)")
             return
-        print(f"  [state:{tag}] url: {info.get('url', '?')}")
+        print(f"  [state:{tag}] url: {redact_url(info.get('url', '?'))}")
         print(f"  [state:{tag}] btns: {info.get('btns', [])}")
         print(f"  [state:{tag}] inputs: {info.get('inputs', [])}")
     except Exception as e:
@@ -212,7 +253,6 @@ def save_cookies_snapshot(page, tag: str = "", email: str = ""):
         browser = _get_browser()
         if not browser:
             return
-        os.makedirs(_COOKIE_DIR, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         cookies = browser.cookies()
         data = {
@@ -223,8 +263,7 @@ def save_cookies_snapshot(page, tag: str = "", email: str = ""):
             "cookies": cookies,
         }
         path = os.path.join(_COOKIE_DIR, f"full_{ts}_{tag}.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        _write_private_json(path, data)
         print(f"  [cookies] saved: {path} ({len(cookies)} cookies)")
     except Exception as e:
         print(f"  [cookies] save err: {e}")
@@ -281,8 +320,7 @@ def load_config():
 
 def save_config():
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4, ensure_ascii=False)
+        _write_private_json(CONFIG_FILE, config)
     except Exception as e:
         print(f"保存配置失败: {e}")
 
@@ -457,7 +495,6 @@ def add_token_to_grok2api_local_pool(raw_token, email="", log_callback=None):
     pool_name = str(config.get("grok2api_pool_name", "ssoBasic") or "ssoBasic").strip()
     if not pool_name:
         pool_name = "ssoBasic"
-    os.makedirs(os.path.dirname(token_file), exist_ok=True)
     data = {}
     if os.path.exists(token_file):
         try:
@@ -483,8 +520,7 @@ def add_token_to_grok2api_local_pool(raw_token, email="", log_callback=None):
     entry = {"token": token, "tags": ["auto-register"], "note": email}
     pool.append(entry)
     data[pool_name] = pool
-    with open(token_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _write_private_json(token_file, data)
     if log_callback:
         log_callback(f"[+] 已写入 grok2api 本地池: {pool_name} ({token_file})")
     return True
@@ -1239,7 +1275,7 @@ def cloudmail_gen_public_token(url, admin_email, admin_password):
         token_data = data.get("data", {})
         if isinstance(token_data, dict):
             return token_data.get("token")
-    raise Exception(f"CloudMail 获取公开 token 失败: {str(data)[:200]}")
+    raise Exception("CloudMail 获取公开 token 失败")
 
 
 def cloudmail_public_email_list(url, public_token, to_email="", size=20):
@@ -3419,7 +3455,7 @@ class GrokRegisterGUI:
         self.results = []
         now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.accounts_output_file = os.path.join(
-            os.path.dirname(__file__), f"accounts_{now}.txt"
+            _DATA_DIR, f"accounts_{now}.txt"
         )
         self.update_stats()
         self._set_running_ui(True)
@@ -3537,8 +3573,7 @@ class GrokRegisterGUI:
             self.success_count += 1
             line = f"{email}----{profile.get('password','')}----{sso}\n"
             try:
-                with open(self.accounts_output_file, "a", encoding="utf-8") as f:
-                    f.write(line)
+                _append_private_text(self.accounts_output_file, line)
             except Exception as file_exc:
                 logf(f"[Debug] 保存账号文件失败: {file_exc}")
         add_token_to_grok2api_pools(sso, email=email, log_callback=logf)

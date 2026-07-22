@@ -268,6 +268,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	}
 	accountService := accountapp.NewService(accountRepo, auditRepo, deviceSessions, sticky, providers, cipher, refreshLock)
 	accountService.SetLogger(logger)
+	accountService.SetConcurrency(concurrency)
+	accountService.UpdateAutoCleanConfig(accountapp.AutoCleanConfig{
+		Enabled: cfg.Accounts.AutoCleanReauthEnabled, Interval: cfg.Accounts.AutoCleanReauthInterval.Value(),
+		MinAge: cfg.Accounts.AutoCleanReauthMinAge.Value(), IncludeDisabled: cfg.Accounts.AutoCleanDisabledEnabled,
+	})
 	accountService.SetQuotaRecoveryQueue(quotaQueue)
 	accountService.SetTaskPools(conversionPool, syncPool, refreshPool)
 	windows, err := accountRepo.ListQuotaRecoveryWindows(ctx, 100000)
@@ -390,6 +395,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
 		auditService.UpdateConfig(next.Audit.BatchSize, next.Audit.FlushInterval.Value())
 		clientKeyService.UpdateDefaults(next.ClientKeyDefaults.RPMLimit, next.ClientKeyDefaults.MaxConcurrent)
+		accountService.UpdateAutoCleanConfig(accountapp.AutoCleanConfig{
+			Enabled: next.Accounts.AutoCleanReauthEnabled, Interval: next.Accounts.AutoCleanReauthInterval.Value(),
+			MinAge: next.Accounts.AutoCleanReauthMinAge.Value(), IncludeDisabled: next.Accounts.AutoCleanDisabledEnabled,
+		})
 	})
 	versionCheckService := updatecheckapp.NewService(buildinfo.CurrentVersion(), nil)
 
@@ -529,6 +538,10 @@ func (a *Application) Run(ctx context.Context) error {
 	})
 	startBackground("credential_refresh", func(taskCtx context.Context) error {
 		a.accounts.RunCredentialRefresh(taskCtx)
+		return nil
+	})
+	startBackground("account_auto_clean", func(taskCtx context.Context) error {
+		a.accounts.RunAccountAutoClean(taskCtx)
 		return nil
 	})
 	startBackground("statsig_warmup", func(taskCtx context.Context) error {

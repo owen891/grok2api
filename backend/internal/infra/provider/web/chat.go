@@ -365,9 +365,13 @@ func (a *Adapter) openChat(ctx context.Context, credential account.Credential, p
 	if useBrowser && cfg.BrowserWorkerURL != "" {
 		response, browserErr := a.openChatWithBrowser(ctx, cfg, lease, token, endpoint, payload)
 		if browserErr != nil {
-			if errors.Is(browserErr, errWebAntiBot) {
+			var unavailable *infraegress.UnavailableError
+			switch {
+			case errors.As(browserErr, &unavailable) && unavailable.Reason == infraegress.UnavailableWorker:
+				// A shared browser worker is independent from this proxy node.
+			case errors.Is(browserErr, errWebAntiBot):
 				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusForbidden, browserErr)
-			} else {
+			default:
 				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, browserErr)
 			}
 			lease.Release()

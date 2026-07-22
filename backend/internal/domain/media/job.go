@@ -2,7 +2,9 @@ package media
 
 import "time"
 
-const ImageJobRecoveryTimeout = 35 * time.Minute
+// ImageJobRecoveryTimeout bounds how long a stopped image worker can hold a job.
+// Active workers renew their lease before this interval elapses.
+const ImageJobRecoveryTimeout = 2 * time.Minute
 
 type Status string
 

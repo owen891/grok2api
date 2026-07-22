@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	egressapp "github.com/owen891/grok2api/backend/internal/application/egress"
 	egressdomain "github.com/owen891/grok2api/backend/internal/domain/egress"
 	"github.com/owen891/grok2api/backend/internal/repository"
 	"github.com/owen891/grok2api/backend/internal/shared/response"
-	"github.com/gin-gonic/gin"
 )
 
 type Handler struct{ service *egressapp.Service }
@@ -28,6 +28,7 @@ type nodeRequest struct {
 	Name              string  `json:"name"`
 	Scope             string  `json:"scope"`
 	Enabled           bool    `json:"enabled"`
+	ProxyPool         *bool   `json:"proxyPool"`
 	ProxyURL          *string `json:"proxyURL"`
 	ClearProxyURL     bool    `json:"clearProxyURL"`
 	UserAgent         string  `json:"userAgent"`
@@ -41,6 +42,7 @@ type nodeResponse struct {
 	Scope            string     `json:"scope"`
 	Enabled          bool       `json:"enabled"`
 	ProxyConfigured  bool       `json:"proxyConfigured"`
+	ProxyPool        bool       `json:"proxyPool"`
 	UserAgent        string     `json:"userAgent"`
 	CookieConfigured bool       `json:"cookieConfigured"`
 	Health           float64    `json:"health"`
@@ -52,7 +54,8 @@ type nodeResponse struct {
 func (value nodeRequest) input() egressapp.Input {
 	return egressapp.Input{
 		Name: value.Name, Scope: egressdomain.Scope(value.Scope), Enabled: value.Enabled,
-		ProxyURL: value.ProxyURL, ClearProxyURL: value.ClearProxyURL, UserAgent: value.UserAgent,
+		ProxyPool: value.ProxyPool,
+		ProxyURL:  value.ProxyURL, ClearProxyURL: value.ClearProxyURL, UserAgent: value.UserAgent,
 		CloudflareCookies: value.CloudflareCookies, ClearCookies: value.ClearCookies,
 	}
 }
@@ -115,7 +118,8 @@ func newNodeResponse(value egressdomain.PublicNode) nodeResponse {
 	return nodeResponse{
 		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled,
 		ProxyConfigured: value.ProxyConfigured, UserAgent: value.UserAgent, CookieConfigured: value.CookieConfigured,
-		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
+		ProxyPool: value.ProxyPool,
+		Health:    value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 	}
 }
 

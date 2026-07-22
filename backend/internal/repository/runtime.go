@@ -2,10 +2,15 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/owen891/grok2api/backend/internal/domain/account"
 )
+
+// AccountConcurrencyKey is shared by routing and maintenance tasks when
+// checking whether an account currently has an in-flight request.
+func AccountConcurrencyKey(id uint64) string { return fmt.Sprintf("account:%d", id) }
 
 // RateLimiter 定义客户端 RPM 限制边界。
 type RateLimiter interface {

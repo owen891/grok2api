@@ -43,8 +43,9 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []t
 			Total   int64
 			Enabled int64
 		}
+		availableModelArgs := append([]any{true}, availableRoutePredicateArgs(snapshotAt)...)
 		if err := tx.Model(&modelRouteModel{}).
-			Select("COUNT(*) AS total, COALESCE(SUM(CASE WHEN enabled = ? AND "+availableRoutePredicate+" THEN 1 ELSE 0 END), 0) AS enabled", true, true, "active").
+			Select("COUNT(*) AS total, COALESCE(SUM(CASE WHEN enabled = ? AND "+availableRoutePredicate+" THEN 1 ELSE 0 END), 0) AS enabled", availableModelArgs...).
 			Scan(&models).Error; err != nil {
 			return err
 		}

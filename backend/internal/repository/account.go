@@ -39,6 +39,8 @@ type AccountRepository interface {
 	UpdateMany(ctx context.Context, ids []uint64, updates AccountUpdates) (int64, error)
 	Delete(ctx context.Context, id uint64) error
 	DeleteMany(ctx context.Context, ids []uint64) (int64, error)
+	ListAutoCleanReauthIDs(ctx context.Context, updatedBefore time.Time, includeDisabled bool, afterID uint64, limit int) ([]uint64, error)
+	DeleteAutoCleanReauthIDs(ctx context.Context, updatedBefore time.Time, includeDisabled bool, ids []uint64) ([]uint64, error)
 	UpdateTokens(ctx context.Context, id uint64, accessToken, refreshToken string, expiresAt time.Time) (account.Credential, error)
 	BackfillCredentialRefreshSchedules(ctx context.Context, now time.Time, limit int) (int, error)
 	ListCriticalCredentialRefreshIDs(ctx context.Context, now, expiresBefore time.Time, limit int) ([]uint64, error)
@@ -48,6 +50,7 @@ type AccountRepository interface {
 	UpdateObservedModel(ctx context.Context, id uint64, model string, observedAt time.Time) error
 	UpdateHealth(ctx context.Context, id uint64, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error
 	UpsertModelQuotaBlock(ctx context.Context, value account.ModelQuotaBlock) error
+	ClearModelQuotaBlock(ctx context.Context, accountID uint64, upstreamModel string) error
 	PruneExpiredModelQuotaBlocks(ctx context.Context, now time.Time, limit int) (int64, error)
 	SaveBilling(ctx context.Context, value account.Billing) error
 	GetBilling(ctx context.Context, accountID uint64) (account.Billing, error)

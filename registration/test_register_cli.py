@@ -348,6 +348,40 @@ class ResolveMintWorkersTests(unittest.TestCase):
             finally:
                 self._restore_pending_fixture(original)
 
+    def test_permission_denied_mint_is_terminal_and_not_counted_as_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = self._pending_fixture(directory)
+            try:
+                job = {"email": "denied@example.invalid", "password": "pw-secret", "idx": 35}
+                with (
+                    patch.object(
+                        worker,
+                        "_run_mint_job",
+                        return_value={
+                            "ok": True,
+                            "importable": False,
+                            "import_block_reason": "cpa_chat_permission_denied",
+                            "path": "auth.json",
+                        },
+                    ) as mint,
+                    patch.object(worker, "log"),
+                ):
+                    result = worker._run_mint_with_retry(
+                        "R1",
+                        job,
+                        {"cpa_mint_retry_attempts": 3, "cpa_mint_retry_delay_sec": 0},
+                    )
+
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["credential_ok"])
+                self.assertEqual("cpa_chat_permission_denied", result["error"])
+                self.assertEqual(1, mint.call_count)
+                self.assertEqual(0, worker._stats["mint_success"])
+                self.assertEqual(1, worker._stats["mint_fail"])
+                self.assertEqual(0, worker._pending_count())
+            finally:
+                self._restore_pending_fixture(original)
+
     def test_next_run_resumes_pending_job_without_inflating_batch_mint_success(self):
         with tempfile.TemporaryDirectory() as directory:
             original = self._pending_fixture(directory)

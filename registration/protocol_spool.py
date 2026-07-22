@@ -67,6 +67,7 @@ def await_hotload_result(
                 "updated": int(payload.get("updated") or 0),
                 "synced": int(payload.get("synced") or 0),
                 "syncFailed": sync_failed,
+                "syncErrors": payload.get("syncErrors") if isinstance(payload.get("syncErrors"), list) else [],
                 "processedAt": str(payload.get("processedAt") or ""),
             }
         time.sleep(max(0.05, poll_interval))

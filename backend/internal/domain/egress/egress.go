@@ -24,6 +24,7 @@ type Node struct {
 	Name                      string
 	Scope                     Scope
 	Enabled                   bool
+	ProxyPool                 bool
 	EncryptedProxyURL         string
 	UserAgent                 string
 	EncryptedCloudflareCookie string
@@ -41,6 +42,7 @@ type PublicNode struct {
 	Scope            Scope
 	Enabled          bool
 	ProxyConfigured  bool
+	ProxyPool        bool
 	UserAgent        string
 	CookieConfigured bool
 	Health           float64

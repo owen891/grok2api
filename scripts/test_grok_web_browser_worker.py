@@ -1,16 +1,25 @@
 import base64
 import json
 import sys
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from scripts.grok_web_browser_worker import (
     BrowserSession,
+    ImageGenerationIncompleteError,
+    QUOTA_SESSION,
+    SESSION,
+    WorkerBusyError,
     classify_worker_error,
+    is_generated_image_source,
     is_antibot_result,
+    is_worker_ready,
     parse_cookie_header,
     session_fingerprint,
+    session_for_path,
     translated_proxy_url,
     validate_request,
 )
@@ -23,13 +32,155 @@ class BrowserWorkerValidationTests(unittest.TestCase):
             "proxy_unavailable",
         )
         self.assertEqual(
+            classify_worker_error(RuntimeError("unknown error: net::ERR_CONNECTION_CLOSED")),
+            "proxy_unavailable",
+        )
+        self.assertEqual(
             classify_worker_error(RuntimeError("Cloudflare challenge did not clear in Chromium")),
             "anti_bot",
         )
+        self.assertEqual(classify_worker_error(WorkerBusyError("busy")), "worker_busy")
+        self.assertEqual(
+            classify_worker_error(ImageGenerationIncompleteError("missing final image")),
+            "image_generation_incomplete",
+        )
         self.assertEqual(classify_worker_error(RuntimeError("Chrome crashed")), "browser_unavailable")
 
+    def test_invalid_worker_input_is_rejected_as_value_error(self):
+        common = {
+            "baseURL": "https://grok.com",
+            "endpoint": "https://grok.com/rest/app-chat/conversations/new",
+            "ssoToken": "token",
+            "payload": {},
+        }
+        for field, value in (
+            ("timeoutSeconds", float("inf")),
+            ("proxyURL", "http://proxy.example:99999"),
+            ("proxyURL", "http://[invalid"),
+        ):
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                validate_request({**common, field: value})
+
+    def test_generated_image_accepts_new_loaded_low_resolution_image(self):
+        source, final_resolution = BrowserSession._new_generated_image(
+            [
+                {"src": "https://assets.grok.com/old.jpg", "complete": True, "width": 1024, "height": 1024},
+                {"src": "https://assets.grok.com/new.jpg", "complete": True, "width": 512, "height": 512},
+            ],
+            {"https://assets.grok.com/old.jpg"},
+            1,
+        )
+        self.assertEqual(source, "https://assets.grok.com/new.jpg")
+        self.assertFalse(final_resolution)
+
+    def test_generated_image_rejects_unloaded_and_tiny_candidates(self):
+        source, final_resolution = BrowserSession._new_generated_image(
+            [
+                {"src": "https://assets.grok.com/loading.jpg", "complete": False, "width": 1024, "height": 1024},
+                {"src": "https://assets.grok.com/tiny.jpg", "complete": True, "width": 128, "height": 128},
+            ],
+            set(),
+            0,
+        )
+        self.assertEqual(source, "")
+        self.assertFalse(final_resolution)
+
+    def test_generated_image_sources_are_restricted_to_grok_assets(self):
+        for source in (
+            "https://assets.grok.com/generated/image.jpg",
+            "https://imagine-public.x.ai/imagine-public/images/image.jpg",
+            "https://imgen.x.ai/image.jpg",
+            "blob:https://grok.com/id",
+            "data:image/png;base64,AA==",
+        ):
+            self.assertTrue(is_generated_image_source(source), source)
+        for source in (
+            "https://grok.com/imagine/post/id",
+            "https://example.com/image.jpg",
+            "data:text/html;base64,AA==",
+        ):
+            self.assertFalse(is_generated_image_source(source), source)
+
+    def test_generated_image_rejects_resource_entry_without_dom_dimensions(self):
+        source, final_resolution = BrowserSession._new_generated_image(
+            [{
+                "src": "https://assets.grok.com/users/test/generated/image.jpg",
+                "complete": True,
+                "width": 0,
+                "height": 0,
+                "resource": True,
+            }],
+            set(),
+            0,
+        )
+        self.assertEqual(source, "")
+        self.assertFalse(final_resolution)
+
+    def test_generated_image_rejects_untrusted_candidate(self):
+        source, final_resolution = BrowserSession._new_generated_image(
+            [{"src": "https://grok.com/imagine/post/id", "complete": True, "width": 1024, "height": 1024}],
+            set(),
+            0,
+        )
+        self.assertEqual(source, "")
+        self.assertFalse(final_resolution)
+
+    def test_quota_uses_a_dedicated_browser_session(self):
+        self.assertIs(session_for_path("/v1/grok/quota"), QUOTA_SESSION)
+        self.assertIs(session_for_path("/v1/grok/fast-image"), SESSION)
+
+    def test_readyz_requires_the_primary_browser_session(self):
+        with patch.object(SESSION, "driver", None), patch.object(QUOTA_SESSION, "driver", Mock()):
+            self.assertFalse(is_worker_ready())
+        with patch.object(SESSION, "driver", Mock()), patch.object(QUOTA_SESSION, "driver", None):
+            self.assertTrue(is_worker_ready())
+
+    def test_busy_session_drops_request_after_queue_budget(self):
+        session = BrowserSession()
+        session.lock.acquire()
+        try:
+            started = time.monotonic()
+            with patch.object(session, "_ensure_driver") as ensure_driver, self.assertRaises(WorkerBusyError):
+                session.request({"timeoutSeconds": 0.01})
+            ensure_driver.assert_not_called()
+            self.assertLess(time.monotonic() - started, 0.5)
+        finally:
+            session.lock.release()
+
+    def test_queue_wait_consumes_the_request_budget(self):
+        session = BrowserSession()
+        session.lock.acquire()
+        release_thread = threading.Thread(target=lambda: (time.sleep(0.08), session.lock.release()))
+        release_thread.start()
+        driver = Mock()
+        seen = []
+
+        def fetch(_driver, value):
+            seen.append(value)
+            return {"statusCode": 200}
+
+        try:
+            with (
+                patch.object(session, "_ensure_driver", return_value=driver),
+                patch.object(session, "_prepare_page"),
+                patch.object(session, "_fetch", side_effect=fetch),
+                patch.object(session, "_cloudflare_state", return_value={"cloudflareCookies": "", "userAgent": ""}),
+            ):
+                result = session.request({"timeoutSeconds": 0.3})
+        finally:
+            release_thread.join(timeout=1)
+            if session.lock.locked():
+                session.lock.release()
+
+        self.assertEqual(result["statusCode"], 200)
+        self.assertEqual(len(seen), 1)
+        remaining_at_start = seen[0]["_deadline"] - time.monotonic()
+        self.assertLess(remaining_at_start, 0.24)
+        self.assertGreater(remaining_at_start, 0)
+
     def test_only_antibot_forbidden_response_is_retried(self):
-        encoded = lambda value: base64.b64encode(value.encode()).decode()
+        def encoded(value):
+            return base64.b64encode(value.encode()).decode()
         self.assertTrue(is_antibot_result({"statusCode": 403, "bodyBase64": encoded('{"error":{"message":"Request rejected by anti-bot rules."}}')}))
         self.assertFalse(is_antibot_result({"statusCode": 403, "bodyBase64": encoded('{"error":{"message":"Model is not found"}}')}))
 
@@ -134,9 +285,12 @@ class BrowserWorkerValidationTests(unittest.TestCase):
             patch.object(session, "_probe_signed_fetch") as probe_signed_fetch,
         ):
             session.warm(value)
-        ensure_driver.assert_called_once_with(value)
-        prepare_page.assert_called_once_with(driver, value)
-        probe_signed_fetch.assert_called_once_with(driver)
+        ensure_driver.assert_called_once()
+        work_value = ensure_driver.call_args.args[0]
+        self.assertEqual(work_value["baseURL"], value["baseURL"])
+        self.assertIs(prepare_page.call_args.args[0], driver)
+        self.assertIs(prepare_page.call_args.args[1], work_value)
+        probe_signed_fetch.assert_called_once_with(driver, work_value["_deadline"])
 
     def test_antibot_request_reloads_page_before_retry(self):
         session = BrowserSession()
@@ -190,7 +344,58 @@ class BrowserWorkerValidationTests(unittest.TestCase):
         utils.get_webdriver.assert_called_once_with(
             {"url": "http://proxy.example:8080", "username": "user", "password": "pass"}
         )
-        self.assertEqual(utils.USER_AGENT, "Chrome/Test")
+        self.assertIsNone(utils.USER_AGENT)
+
+    def test_driver_initialization_serializes_process_global_user_agent(self):
+        active = 0
+        peak = 0
+        seen = {}
+        state_lock = threading.Lock()
+
+        utils = SimpleNamespace(USER_AGENT="original")
+
+        def get_webdriver(_proxy):
+            nonlocal active, peak
+            with state_lock:
+                active += 1
+                peak = max(peak, active)
+                seen[threading.get_ident()] = utils.USER_AGENT
+            try:
+                time.sleep(0.03)
+                return Mock()
+            finally:
+                with state_lock:
+                    active -= 1
+
+        utils.get_webdriver = get_webdriver
+        sessions = [BrowserSession(), BrowserSession()]
+        values = [
+            {"userAgent": "Chrome/A", "cloudflareCookies": ""},
+            {"userAgent": "Chrome/B", "cloudflareCookies": ""},
+        ]
+        barrier = threading.Barrier(3)
+        errors = []
+
+        def initialize(session, value):
+            try:
+                barrier.wait()
+                session._ensure_driver(value)
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=initialize, args=item) for item in zip(sessions, values)]
+        with patch.dict(sys.modules, {"utils": utils}):
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(timeout=1)
+
+        self.assertEqual(errors, [])
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(peak, 1)
+        self.assertEqual(set(seen.values()), {"Chrome/A", "Chrome/B"})
+        self.assertEqual(utils.USER_AGENT, "original")
 
     def test_signed_fetch_probe_rejects_unauthorized_session(self):
         driver = Mock()
@@ -208,7 +413,8 @@ class BrowserWorkerValidationTests(unittest.TestCase):
             patch.object(session, "_dismiss_tos_gate") as dismiss,
         ):
             session._prepare_page(driver, value)
-        dismiss.assert_called_once_with(driver)
+        dismiss.assert_called_once()
+        self.assertIs(dismiss.call_args.args[0], driver)
 
     def test_composer_response_preserves_conversation_contract(self):
         raw = BrowserSession._synthetic_composer_response("conversation-1", "response-1", "hello")

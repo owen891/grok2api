@@ -221,6 +221,13 @@ func TestWarmStatsigAllowsDirectLeaseWithoutPersistingSession(t *testing.T) {
 		if request.URL.Path != "/v1/grok/warm" || request.Method != http.MethodPost {
 			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
 		}
+		var value browserWorkerRequest
+		if err := json.NewDecoder(request.Body).Decode(&value); err != nil {
+			t.Fatal(err)
+		}
+		if value.TimeoutSeconds < 5 || value.TimeoutSeconds > 8 {
+			t.Fatalf("worker timeout = %d, want the shortened parent budget", value.TimeoutSeconds)
+		}
 		_ = json.NewEncoder(writer).Encode(browserWorkerWarmResponse{
 			OK: true, CloudflareCookie: "cf_clearance=direct-session", UserAgent: "Chrome/Direct",
 		})
@@ -240,7 +247,9 @@ func TestWarmStatsigAllowsDirectLeaseWithoutPersistingSession(t *testing.T) {
 		infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil,
 	)
 
-	warmed, err := adapter.WarmStatsig(context.Background(), account.Credential{ID: 1, EncryptedAccessToken: encryptedToken})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	warmed, err := adapter.WarmStatsig(ctx, account.Credential{ID: 1, EncryptedAccessToken: encryptedToken})
 	if err != nil || warmed != 1 {
 		t.Fatalf("warmed=%d err=%v", warmed, err)
 	}

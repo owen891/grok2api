@@ -61,6 +61,7 @@ type Config struct {
 	Routing           RoutingConfig           `yaml:"routing"`
 	Audit             AuditConfig             `yaml:"audit"`
 	ClientKeyDefaults ClientKeyDefaultsConfig `yaml:"clientKeyDefaults"`
+	Accounts          AccountsConfig          `yaml:"-"`
 }
 
 type ServerConfig struct {
@@ -218,6 +219,14 @@ type AuditConfig struct {
 type ClientKeyDefaultsConfig struct {
 	RPMLimit      int `yaml:"rpmLimit"`
 	MaxConcurrent int `yaml:"maxConcurrent"`
+}
+
+// AccountsConfig defines opt-in account-pool maintenance policies.
+type AccountsConfig struct {
+	AutoCleanReauthEnabled   bool
+	AutoCleanReauthInterval  Duration
+	AutoCleanReauthMinAge    Duration
+	AutoCleanDisabledEnabled bool
 }
 
 type Secrets struct {
@@ -522,6 +531,12 @@ func (c Config) Validate() error {
 	if c.ClientKeyDefaults.RPMLimit < 1 || c.ClientKeyDefaults.RPMLimit > clientkeydomain.MaxRPMLimit || c.ClientKeyDefaults.MaxConcurrent < 1 || c.ClientKeyDefaults.MaxConcurrent > clientkeydomain.MaxConcurrent {
 		return errors.New("clientKeyDefaults 超出允许范围")
 	}
+	if c.Accounts.AutoCleanReauthInterval.Value() < time.Minute || c.Accounts.AutoCleanReauthInterval.Value() > time.Hour {
+		return errors.New("accounts.autoCleanReauthInterval must be between 1 minute and 1 hour")
+	}
+	if c.Accounts.AutoCleanReauthMinAge.Value() < time.Minute || c.Accounts.AutoCleanReauthMinAge.Value() > 30*24*time.Hour {
+		return errors.New("accounts.autoCleanReauthMinAge must be between 1 minute and 30 days")
+	}
 	return nil
 }
 
@@ -590,6 +605,10 @@ func defaultConfig() Config {
 		},
 		Audit:             AuditConfig{BufferSize: 16384, BatchSize: 256, FlushInterval: Duration(250 * time.Millisecond)},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
+		Accounts: AccountsConfig{
+			AutoCleanReauthEnabled: false, AutoCleanReauthInterval: Duration(10 * time.Minute),
+			AutoCleanReauthMinAge: Duration(time.Hour), AutoCleanDisabledEnabled: false,
+		},
 	}
 }
 

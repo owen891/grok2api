@@ -1229,6 +1229,10 @@ func selectionErrorResponse(c *gin.Context, failure *gateway.SelectionUnavailabl
 		code, message = "upstream_saturated", "上游账号当前均达到并发上限"
 	case gateway.SelectionUnsupportedModel:
 		code, message = "upstream_model_unavailable", "当前账号池不支持该模型"
+	case gateway.SelectionInferenceDenied:
+		code, message = "upstream_model_unhealthy", "当前模型的账号均被健康状态隔离，请等待恢复或重新检查账号"
+	case gateway.SelectionReauthRequired:
+		code, message = "upstream_reauth_required", "当前上游账号均需要重新授权"
 	}
 	if failure.RetryAfter > 0 {
 		seconds := max(int64(1), int64((failure.RetryAfter+time.Second-1)/time.Second))

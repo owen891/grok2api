@@ -208,6 +208,19 @@ type accountModelQuotaBlockModel struct {
 
 func (accountModelQuotaBlockModel) TableName() string { return "account_model_quota_blocks" }
 
+type accountModelInferenceHealthModel struct {
+	AccountID     uint64 `gorm:"primaryKey"`
+	UpstreamModel string `gorm:"size:255;primaryKey;not null"`
+	Status        string `gorm:"size:32;not null"`
+	VerifiedAt    *time.Time
+	HTTPStatus    int           `gorm:"not null;default:0"`
+	ErrorCode     string        `gorm:"size:100;not null;default:''"`
+	UpdatedAt     time.Time     `gorm:"not null"`
+	Account       *accountModel `gorm:"foreignKey:AccountID;references:ID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
+}
+
+func (accountModelInferenceHealthModel) TableName() string { return "account_model_inference_health" }
+
 type clientKeyModel struct {
 	ID                    uint64 `gorm:"primaryKey;autoIncrement"`
 	Name                  string `gorm:"size:160;not null;check:chk_client_keys_name,length(trim(name)) BETWEEN 1 AND 160"`
@@ -467,6 +480,7 @@ type egressNodeModel struct {
 	Name                      string  `gorm:"size:160;not null;check:chk_egress_nodes_name,length(trim(name)) BETWEEN 1 AND 160"`
 	Scope                     string  `gorm:"size:32;not null;check:chk_egress_nodes_specific_scope,scope IN ('grok_build','grok_web','grok_console','grok_web_asset')"`
 	Enabled                   bool    `gorm:"not null;default:true"`
+	ProxyPool                 bool    `gorm:"not null;default:false"`
 	EncryptedProxyURL         string  `gorm:"type:text;not null;default:'';check:chk_egress_nodes_proxy_url,length(encrypted_proxy_url) <= 65536"`
 	UserAgent                 string  `gorm:"size:512;not null;default:'';check:chk_egress_nodes_user_agent,length(user_agent) <= 512"`
 	EncryptedCloudflareCookie string  `gorm:"type:text;not null;default:'';check:chk_egress_nodes_cf_cookie,length(encrypted_cloudflare_cookie) <= 65536"`

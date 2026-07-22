@@ -42,10 +42,14 @@ backend/**/*_test.go
 !registration/**
 registration/config.json
 registration/accounts_cli.txt
+registration/accounts_*.txt
 registration/cpa_auths/
 registration/cookies/
+registration/emails_error.txt
+registration/emails_used.txt
 registration/screenshots/
 registration/**/*report*.json
+registration/**/accounts_output/
 registration/**/oauth_output/
 registration/**/sso_output/
 registration/*failed*.txt

@@ -246,7 +246,7 @@ func newReadinessStartupReport(report startupReport) *httpserver.ReadinessStartu
 
 func startupCandidateUsable(candidate accountdomain.RoutingCandidate, now time.Time, providers *provider.Registry) bool {
 	credential := candidate.Credential
-	if credential.EncryptedAccessToken == "" || credential.AuthStatus != accountdomain.AuthStatusActive {
+	if !credential.Enabled || credential.EncryptedAccessToken == "" || credential.AuthStatus != accountdomain.AuthStatusActive {
 		return false
 	}
 	refreshable := credential.AuthType == accountdomain.AuthTypeOAuth
@@ -261,6 +261,12 @@ func startupCandidateUsable(candidate accountdomain.RoutingCandidate, now time.T
 	}
 	if candidate.ModelCapabilityKnown && !candidate.SupportsModel {
 		return false
+	}
+	if candidate.InferenceHealth != nil {
+		switch candidate.InferenceHealth.Status {
+		case accountdomain.InferenceHealthPermissionDenied, accountdomain.InferenceHealthReauth, accountdomain.InferenceHealthModelUnavailable:
+			return false
+		}
 	}
 	if candidate.ModelQuotaBlock != nil && now.Before(candidate.ModelQuotaBlock.CooldownUntil) {
 		return false

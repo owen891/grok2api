@@ -65,6 +65,8 @@ function sanitizeSession(raw: unknown): ChatSession | null {
               message.error.class === "account" ||
               message.error.class === "model" ||
               message.error.class === "quota" ||
+              message.error.class === "moderation" ||
+              message.error.class === "imagePermission" ||
               message.error.class === "egress" ||
               message.error.class === "upstream" ||
               message.error.class === "timeout" ||
@@ -78,17 +80,21 @@ function sanitizeSession(raw: unknown): ChatSession | null {
             ? message.error.message
             : "Unknown error";
           const usageLimitReached = isUsageLimitError(errorCode, errorMessage);
+          const imagePermissionError =
+            errorCode === "image_subscription_required" ||
+            /(?:订阅.*模糊|Imagine.*(?:生图|高清).*权限)/i.test(errorMessage);
+          const content = typeof message.content === "string" ? message.content : "";
           const result: ChatMessage = {
             id: typeof message.id === "string" ? message.id : `msg_${Date.now()}`,
             role,
-            content: typeof message.content === "string" ? message.content : "",
+            content: isRecord(message.error) && content.trim() === errorMessage.trim() ? "" : content,
             images,
             createdAt: typeof message.createdAt === "number" ? message.createdAt : Date.now(),
             task: sanitizePersistedMessageTask(message.task),
             generation: sanitizeGenerationMeta(message.generation),
             error: isRecord(message.error)
               ? {
-                  class: usageLimitReached ? "quota" : errorClass,
+                  class: usageLimitReached ? "quota" : imagePermissionError ? "imagePermission" : errorClass,
                   message: usageLimitReached ? "上游账号额度不足或正在等待恢复，请稍后重试。" : errorMessage,
                   code: errorCode,
                   requestId: typeof message.error.requestId === "string" ? message.error.requestId : undefined,

@@ -39,7 +39,7 @@ def mint_and_export(
 ) -> dict[str, Any]:
     """Full pipeline: device-auth → write CPA file → optional probe.
 
-    Returns dict with keys: ok, path, email, probe, error?
+    Returns dict with keys: ok, path, email, probe results, warnings?, error?
     """
     log = log or _noop
     email = (email or "").strip()
@@ -83,6 +83,7 @@ def mint_and_export(
 
     result: dict[str, Any] = {
         "ok": True,
+        "importable": True,
         "email": email,
         "path": str(path),
         "user_code": tokens.get("user_code"),
@@ -104,7 +105,23 @@ def mint_and_export(
             result["probe_chat"] = ch
             log(f"对话探测：成功={ch.get('ok')}，模型={ch.get('model')}，结果={ch.get('text')!r}")
             if not ch.get("ok"):
-                result["ok"] = False
-                result["error"] = f"chat probe failed: {ch.get('error') or ch.get('status')}"
+                detail = ch.get("error") or ch.get("status")
+                message = f"CPA chat probe unavailable: {detail}"
+                result.setdefault("warnings", []).append(
+                    {"code": "cpa_chat_probe_failed", "message": message}
+                )
+                log(f"chat probe warning: {detail}")
+                detail_text = str(detail).lower()
+                denied = ch.get("code") == "permission_denied" or (
+                    ch.get("status") == 403
+                    and (
+                        "permission-denied" in detail_text
+                        or "permission_denied" in detail_text
+                        or "chat endpoint is denied" in detail_text
+                    )
+                )
+                if denied:
+                    result["importable"] = False
+                    result["import_block_reason"] = "cpa_chat_permission_denied"
+                    log("chat probe denied access; credential retained but automatic import is blocked")
     return result
-

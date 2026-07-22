@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -679,6 +680,17 @@ func TestParseWorkerPreflightChecksUsesStructuredBrowserOutput(t *testing.T) {
 	}
 }
 
+func TestWorkerPreflightFailureDetailIncludesConcreteFailures(t *testing.T) {
+	detail := workerPreflightFailureDetail(map[string]workerPreflightCheck{
+		"DrissionPage":     {OK: true, Detail: "importable"},
+		"registrationPage": {OK: false, Detail: "Cloudflare challenge"},
+		"chromium":         {OK: false, Detail: "not found"},
+	})
+	if !strings.Contains(detail, "chromium: not found") || !strings.Contains(detail, "registrationPage: Cloudflare challenge") {
+		t.Fatalf("worker preflight detail = %q", detail)
+	}
+}
+
 func TestWorkerEnvironmentInheritsAndOverridesBrowserConfig(t *testing.T) {
 	t.Setenv("REGISTRATION_BROWSER_MODE", "xvfb")
 	t.Setenv("REGISTRATION_BROWSER_PATH", "/usr/bin/chromium")
@@ -697,6 +709,34 @@ func TestWorkerEnvironmentInheritsAndOverridesBrowserConfig(t *testing.T) {
 	}
 	if value := environmentValue(controller.workerEnvironment(), "REGISTRATION_BROWSER_PATH"); value != "/opt/chromium" {
 		t.Fatalf("overridden browser path = %q", value)
+	}
+}
+
+func TestWorkerEnvironmentForBrowserEngineDefaultsToHeadless(t *testing.T) {
+	controller := &Controller{config: Config{SpoolPath: t.TempDir()}}
+	if value := environmentValue(controller.workerEnvironmentForEngine(registrationEngineBrowser), "REGISTRATION_BROWSER_MODE"); value != "headless" {
+		t.Fatalf("default browser mode = %q", value)
+	}
+}
+
+func TestResolveBrowserExecutableDoesNotFallbackToEdge(t *testing.T) {
+	t.Setenv("REGISTRATION_BROWSER_PATH", "")
+	t.Setenv("PATH", t.TempDir())
+	if runtime.GOOS == "windows" {
+		root := t.TempDir()
+		edge := filepath.Join(root, "Microsoft", "Edge", "Application", "msedge.exe")
+		if err := os.MkdirAll(filepath.Dir(edge), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(edge, []byte{}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PROGRAMFILES", root)
+		t.Setenv("PROGRAMFILES(X86)", "")
+		t.Setenv("LOCALAPPDATA", "")
+	}
+	if path, err := resolveBrowserExecutable(""); err == nil || path != "" {
+		t.Fatalf("resolveBrowserExecutable unexpectedly selected %q, err=%v", path, err)
 	}
 }
 
@@ -827,6 +867,33 @@ func TestBrowserProgressReadsBrowserState(t *testing.T) {
 	}
 }
 
+func TestRegistrationTimingMetrics(t *testing.T) {
+	startedAt := time.Date(2026, time.July, 21, 10, 0, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(2 * time.Minute)
+
+	durationMs, averagePerAccountMs := registrationTimingMetrics(
+		persistedState{StartedAt: &startedAt, FinishedAt: &finishedAt},
+		Progress{Succeeded: 2},
+	)
+	if durationMs == nil || *durationMs != int64((2*time.Minute)/time.Millisecond) {
+		t.Fatalf("durationMs = %+v", durationMs)
+	}
+	if averagePerAccountMs == nil || *averagePerAccountMs != int64(time.Minute/time.Millisecond) {
+		t.Fatalf("averagePerAccountMs = %+v", averagePerAccountMs)
+	}
+
+	durationMs, averagePerAccountMs = registrationTimingMetrics(
+		persistedState{StartedAt: &startedAt, FinishedAt: &finishedAt},
+		Progress{},
+	)
+	if durationMs == nil || *durationMs != int64((2*time.Minute)/time.Millisecond) {
+		t.Fatalf("duration without completions = %+v", durationMs)
+	}
+	if averagePerAccountMs != nil {
+		t.Fatalf("average without completions = %+v", averagePerAccountMs)
+	}
+}
+
 func TestCountProtocolAccountsSupportsJSONLAndLegacyArray(t *testing.T) {
 	root := t.TempDir()
 	jsonl := filepath.Join(root, "protocol_accounts.jsonl")
@@ -853,6 +920,34 @@ func TestClassifyFailureReportsPartialProtocolCompletion(t *testing.T) {
 	failure := controller.classifyFailureLocked(3, false)
 	if failure == nil || failure.Code != "registrationPartial" {
 		t.Fatalf("partial failure = %+v", failure)
+	}
+}
+
+func TestClassifyFailureDoesNotTreatEveryCPAExitAsChatProbeFailure(t *testing.T) {
+	controller := newControllerTest(t, 0)
+	if err := os.MkdirAll(filepath.Dir(controller.logPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controller.logPath(), []byte("[cpa] spool import failed: status=sync_failed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failure := controller.classifyFailureLocked(2, false)
+	if failure == nil || failure.Code != "cpaMintIncomplete" {
+		t.Fatalf("CPA failure = %+v", failure)
+	}
+}
+
+func TestClassifyFailureReportsExplicitCPAChatProbeFailure(t *testing.T) {
+	controller := newControllerTest(t, 0)
+	if err := os.MkdirAll(filepath.Dir(controller.logPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controller.logPath(), []byte("chat probe failed: permission-denied\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failure := controller.classifyFailureLocked(2, false)
+	if failure == nil || failure.Code != "cpaChatProbeFailed" {
+		t.Fatalf("chat probe failure = %+v", failure)
 	}
 }
 

@@ -19,6 +19,24 @@ _extension_lock = threading.Lock()
 _extension_directories: dict[str, Path] = {}
 
 
+def _write_private_text(path: Path, value: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}-", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.chmod(temporary, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
 def _parsed_proxy(raw_proxy: str):
     value = (raw_proxy or "").strip()
     if not value:
@@ -89,10 +107,8 @@ def _proxy_auth_extension(raw_proxy: str) -> Path | None:
         )
         manifest_path = directory / "manifest.json"
         worker_path = directory / "service_worker.js"
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-        worker_path.write_text(worker, encoding="utf-8")
-        os.chmod(manifest_path, 0o600)
-        os.chmod(worker_path, 0o600)
+        _write_private_text(manifest_path, json.dumps(manifest, indent=2) + "\n")
+        _write_private_text(worker_path, worker)
         _extension_directories[cache_key] = directory
         return directory
 

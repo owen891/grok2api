@@ -50,6 +50,7 @@ from urllib.parse import quote, unquote
 
 from . import config as C
 from . import grpcweb
+from .logging_utils import redact_url
 from .models import GrpcResult, PasswordStrength, SignupResult
 from .sso import SSOExtractor
 
@@ -90,7 +91,10 @@ class _UrllibTransport:
         set_cookies = resp.headers.get_all("set-cookie") or []
         hdrs = {k.lower(): v for k, v in resp.headers.items()}
         if self._debug:
-            print(f"  <- {status} {method} {url}  ({len(raw)} bytes, {len(set_cookies)} set-cookie, transport=urllib)")
+            print(
+                f"  <- {status} {method} {redact_url(url)}  "
+                f"({len(raw)} bytes, {len(set_cookies)} set-cookie, transport=urllib)"
+            )
         return status, hdrs, set_cookies, raw
 
     def close(self): pass
@@ -554,7 +558,7 @@ class XConsoleAuthClient:
             if status == 200 and not ok:
                 print(
                     "  [create_account] HTTP 200 classified as failure; "
-                    f"preview={rsc_body[:240]!r}"
+                    f"body_len={len(rsc_body)}"
                 )
         return SignupResult(
             ok=ok, http_status=status,
@@ -740,12 +744,10 @@ class XConsoleAuthClient:
             if stripped != "":
                 return True
 
-        # Unknown non-error HTTP 200 body: continue pipeline, let SSO extraction decide.
-        # This avoids false negatives on new RSC shapes.
-        if not any(x in text_l for x in hard_fail):
-            return True
-
-        return False
+        # Unknown non-error HTTP 200 body: continue pipeline, let SSO extraction
+        # decide. This avoids false negatives on new RSC shapes. The explicit
+        # hard-error checks above are the only reliable failure signal here.
+        return True
 
     # ----------------------------------------------------------------- SSO extraction
     def _read_sso_from_jar(self) -> Optional[str]:
@@ -784,7 +786,7 @@ class XConsoleAuthClient:
             )
             if self.debug:
                 print(
-                    f"  [sso] {label} HTTP {status} {url[:64]}, "
+                    f"  [sso] {label} HTTP {status} {url.split('?', 1)[0][:64]}, "
                     f"set-cookies={len(set_cookies or [])}"
                 )
             from .sso import parse_sso_from_set_cookies, parse_sso_token_from_text
@@ -813,7 +815,7 @@ class XConsoleAuthClient:
                     return token
         except Exception as exc:
             if self.debug:
-                print(f"  [sso] {label} failed: {exc}")
+                print(f"  [sso] {label} failed: {exc.__class__.__name__}")
         return self._read_sso_from_jar()
 
     def _fetch_sso_via_grok_home(self) -> Optional[str]:

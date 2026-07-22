@@ -646,7 +646,8 @@ def register_one(
     dev_token = ""
     job: dict[str, Any] | None = None
     metric = _start_account_metric(worker_id, idx, attempt)
-    metric_log = lambda message: _metric_log(metric, worker_id, message)
+    def metric_log(message: str) -> None:
+        _metric_log(metric, worker_id, message)
     current_config = getattr(reg, "config", {}) or {}
     max_mail_retry = max(1, min(int(current_config.get("mail_retry_count", 3) or 3), 5))
     primary_provider = reg.get_email_provider()
@@ -679,7 +680,7 @@ def register_one(
             )
             log(worker_id, f"邮箱: {email}")
             log(worker_id, "3. 拉取验证码")
-            code = reg.fill_code_and_submit(
+            reg.fill_code_and_submit(
                 email,
                 dev_token,
                 log_callback=lambda m: log(worker_id, m),
@@ -931,10 +932,14 @@ def _run_mint_job(
             config=config,
             log_callback=lambda m: log(worker_id, m),
         )
-        if result.get("ok"):
+        if result.get("ok") and result.get("importable", True):
             log(worker_id, f"+ CPA auth: {result.get('path')}")
             if count_stats:
                 _inc("mint_success")
+        elif result.get("ok"):
+            if count_stats:
+                _inc("mint_fail")
+            log(worker_id, f"! CPA auth blocked from import: {result.get('import_block_reason') or 'credential_not_importable'}")
         elif result.get("skipped"):
             if count_stats:
                 _inc("mint_skip")
@@ -946,7 +951,7 @@ def _run_mint_job(
         if metric is not None:
             import_result = result.get("hotload_import") if isinstance(result.get("hotload_import"), dict) else {}
             oauth_ok = bool(result.get("oauth_ok", result.get("ok")))
-            import_ok = bool(import_result.get("ok")) if import_result else oauth_ok
+            import_ok = bool(import_result.get("ok")) if import_result else oauth_ok and bool(result.get("importable", True))
             _update_account_metric(
                 metric,
                 oauthSeconds=float(result.get("oauth_seconds") or round(time.monotonic() - mint_started, 3)),
@@ -999,6 +1004,17 @@ def _run_mint_with_retry(
         if attempt > 1:
             log(worker_id, f"[cpa] retrying same registered account ({attempt}/{attempts})")
         result = _run_mint_job(worker_id, job, config, count_stats=False)
+        if result.get("ok") and not result.get("importable", True):
+            _remove_pending_job(email)
+            if count_batch_stats:
+                _inc("mint_fail")
+            return {
+                **result,
+                "ok": False,
+                "credential_ok": True,
+                "error": result.get("import_block_reason") or "credential_not_importable",
+                "mint_attempts": attempt,
+            }
         if result.get("ok"):
             _remove_pending_job(email)
             if count_batch_stats:

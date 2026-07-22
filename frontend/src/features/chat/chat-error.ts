@@ -25,6 +25,7 @@ function classifyErrorClass(status: number, code: string, message: string): Chat
   const signal = `${code} ${message}`.toLowerCase();
   if (/invalid_api_key|client[_ -]?key|authentication_error/.test(signal)) return "auth";
   if (/account_permission|permission[_ -]denied|credential_rejected|upstream_unauthorized/.test(signal)) return "account";
+  if (/image[_ -]?subscription[_ -]?required|imagine.*subscription|订阅.*(?:生图|模糊)/i.test(signal)) return "imagePermission";
   if (/image[_ -]?moderated|content[_ -]?policy|safety[_ -]?policy/.test(signal)) return "moderation";
   if (/quota|usage[_ -]?limit|额度.*(?:不足|用完)|billing_limit|spending.limit|payment_required|insufficient.*balance/.test(signal)) return "quota";
   if (/model[_ -]not[_ -]found|model_not_allowed|model_unavailable|model_cooling|unsupported[_ -]model/.test(signal)) return "model";

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -43,6 +44,53 @@ func TestSelectorBlocksObservedFreeRollingUsageWithoutRecoveryRow(t *testing.T) 
 	var unavailable *SelectionUnavailableError
 	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionQuotaExhausted {
 		t.Fatalf("error = %v, want quota exhausted", err)
+	}
+}
+
+func TestInspectionHealthyRestoresOnlyTheVerifiedModel(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "selector-inspection-healthy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	audits := relational.NewAuditRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "verified", SourceKey: "verified", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1, ObservedModel: "grok-test-build-free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID := credential.ID
+	if err := audits.Create(ctx, audit.Record{RequestID: "verified-over-limit", ClientKeyID: 1, ModelRouteID: 1, AccountID: &accountID, StatusCode: 200, TotalTokens: account.EstimatedFreeTokenLimit + 17, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().UTC().Add(time.Hour)
+	if err := accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{AccountID: credential.ID, UpstreamModel: "verified-model", Reason: "quota", CooldownUntil: until}); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{AccountID: credential.ID, UpstreamModel: "other-model", Reason: "quota", CooldownUntil: until}); err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	if err := selector.ApplyInferenceHealth(ctx, credential.ID, "verified-model", account.InferenceHealthHealthy, 200, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := selector.ApplyInspectionHealthy(ctx, credential, "verified-model"); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := selector.Acquire(ctx, account.ProviderBuild, "verified-model", "", "", nil, false)
+	if err != nil {
+		t.Fatalf("verified model was not restored: %v", err)
+	}
+	lease.Release()
+	if _, err := selector.Acquire(ctx, account.ProviderBuild, "other-model", "", "", nil, false); err == nil {
+		t.Fatal("inspection cleared another model's cooldown")
 	}
 }
 
@@ -646,6 +694,162 @@ func TestSelectorFailsOpenWhenSharedPerformanceStoreIsUnavailable(t *testing.T) 
 	lease.Release()
 }
 
+func TestSelectorRoutesToVerifiedHealthyPoolBeforeDeniedAndPendingAccounts(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "verified-pool.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	const upstreamModel = "grok-4.5"
+	create := func(index int, status string) account.Credential {
+		t.Helper()
+		name := fmt.Sprintf("account-%03d", index)
+		value, _, createErr := accounts.UpsertByIdentity(ctx, account.Credential{
+			Provider: account.ProviderBuild, Name: name, SourceKey: name, EncryptedAccessToken: "encrypted",
+			Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 2,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		now := time.Now().UTC()
+		if writeErr := accounts.SetInferenceHealth(ctx, value.ID, upstreamModel, status, &now, 200, ""); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		return value
+	}
+	for index := range 100 {
+		value := create(index, account.InferenceHealthPermissionDenied)
+		if err := accounts.SetInferenceHealth(ctx, value.ID, upstreamModel, account.InferenceHealthPermissionDenied, nil, 403, "upstream_account_permission_denied"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 100; index < 120; index++ {
+		create(index, account.InferenceHealthPending)
+	}
+	healthy := make(map[uint64]bool)
+	for index := 120; index < 125; index++ {
+		healthy[create(index, account.InferenceHealthHealthy).ID] = true
+	}
+
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	for attempt := range 10 {
+		lease, acquireErr := selector.Acquire(ctx, account.ProviderBuild, upstreamModel, "", "", nil, false)
+		if acquireErr != nil {
+			t.Fatalf("acquire %d: %v", attempt, acquireErr)
+		}
+		if !healthy[lease.Credential.ID] {
+			t.Fatalf("acquire %d selected unverified account %d", attempt, lease.Credential.ID)
+		}
+		lease.Release()
+	}
+}
+
+func TestSelectorReportsInferenceDeniedWhenAllAccountsAreIsolated(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "inference-denied.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "denied", SourceKey: "denied", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.SetInferenceHealth(ctx, credential.ID, "grok-denied", account.InferenceHealthPermissionDenied, nil, 403, "upstream_account_permission_denied"); err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	_, err = selector.Acquire(ctx, account.ProviderBuild, "grok-denied", "", "", nil, false)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionInferenceDenied {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestInferenceSuccessImmediatelyClearsARecentDenial(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "inference-recovery.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "recovered", SourceKey: "recovered", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const upstreamModel = "grok-recovered"
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	selector.MarkInferenceHealthy(ctx, credential.ID, upstreamModel)
+	selector.MarkInferenceDenied(ctx, credential.ID, upstreamModel, http.StatusForbidden, "permission_denied")
+	selector.MarkInferenceHealthy(ctx, credential.ID, upstreamModel)
+	candidates, err := accounts.ListRoutingCandidates(ctx, account.ProviderBuild, upstreamModel, "")
+	if err != nil || len(candidates) != 1 || candidates[0].InferenceHealth == nil || candidates[0].InferenceHealth.Status != account.InferenceHealthHealthy {
+		t.Fatalf("candidates=%#v err=%v", candidates, err)
+	}
+}
+
+func TestSelectorDoesNotReportAllAccountsIsolatedForMixedQuotaAndHealthBlocks(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "mixed-inference-blocks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	create := func(name string) account.Credential {
+		value, _, createErr := accounts.UpsertByIdentity(ctx, account.Credential{
+			Provider: account.ProviderBuild, Name: name, SourceKey: name, EncryptedAccessToken: "encrypted",
+			Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		return value
+	}
+	const upstreamModel = "grok-mixed-blocks"
+	denied := create("denied")
+	quota := create("quota")
+	if err := accounts.SetInferenceHealth(ctx, denied.ID, upstreamModel, account.InferenceHealthPermissionDenied, nil, http.StatusForbidden, "permission_denied"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	next := now.Add(time.Hour)
+	if err := accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{
+		AccountID: quota.ID, Kind: account.QuotaRecoveryKindPaid, Status: account.QuotaRecoveryStatusExhausted,
+		ExhaustedAt: &now, NextProbeAt: &next, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	_, err = selector.Acquire(ctx, account.ProviderBuild, upstreamModel, "", "", nil, false)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionQuotaExhausted {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 type failingRoutePerformanceStore struct{}
 
 func (failingRoutePerformanceStore) ObserveRoutePerformance(context.Context, repository.RoutePerformanceObservation, repository.RoutePerformancePolicy) error {
@@ -704,6 +908,33 @@ func TestSelectorRoundRobinsOnlyHealthyAccountsInIDOrder(t *testing.T) {
 			t.Fatalf("acquire %d selected account %d, want %d", index, lease.Credential.ID, expected)
 		}
 		lease.Release()
+	}
+}
+
+func TestSelectorReportsReauthWhenNoActiveAccountRemains(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "selector-reauth.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	accounts := relational.NewAccountRepository(database)
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "reauth-only", SourceKey: "reauth-only",
+		EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: account.AuthStatusReauthRequired,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, time.Second, time.Minute)
+	_, err = selector.Acquire(ctx, account.ProviderBuild, "grok-reauth-only", "", "", nil, false)
+	var unavailable *SelectionUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != SelectionReauthRequired {
+		t.Fatalf("account %d selection error = %v", value.ID, err)
 	}
 }
 

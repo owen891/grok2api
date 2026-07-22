@@ -16,6 +16,7 @@ import (
 	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
 	"github.com/owen891/grok2api/backend/internal/infra/security"
 	"github.com/owen891/grok2api/backend/internal/repository"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestParseCapturedWeeklyCreditsResponse(t *testing.T) {
@@ -36,6 +37,42 @@ func TestParseCapturedWeeklyCreditsResponse(t *testing.T) {
 	}
 	if len(window.Breakdown) != 3 || window.Breakdown[0].ProductCode != account.QuotaProductImagine || window.Breakdown[0].UsagePercent != 10 || window.Breakdown[1].ProductCode != account.QuotaProductChat || window.Breakdown[1].UsagePercent != 1 || window.Breakdown[2].ProductCode != account.QuotaProductBuild || window.Breakdown[2].UsagePercent != 0 {
 		t.Fatalf("breakdown = %#v", window.Breakdown)
+	}
+}
+
+func TestParseProtoTimestampRejectsOverflowingVarints(t *testing.T) {
+	tests := []struct {
+		name   string
+		field  protowire.Number
+		value  uint64
+		prefix bool
+	}{
+		{name: "seconds", field: 1, value: math.MaxUint64},
+		{name: "nanos", field: 2, value: 1 << 32, prefix: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := []byte{}
+			if test.prefix {
+				message = protowire.AppendTag(message, 1, protowire.VarintType)
+				message = protowire.AppendVarint(message, 1)
+			}
+			message = protowire.AppendTag(message, test.field, protowire.VarintType)
+			message = protowire.AppendVarint(message, test.value)
+			if value, err := parseProtoTimestamp(message); err == nil {
+				t.Fatalf("overflowing timestamp was accepted: %v", value)
+			}
+		})
+	}
+}
+
+func TestParseQuotaBreakdownRejectsUnknownProductCode(t *testing.T) {
+	message := protowire.AppendTag(nil, 1, protowire.VarintType)
+	message = protowire.AppendVarint(message, uint64(account.QuotaProductVoice+1))
+	message = protowire.AppendTag(message, 2, protowire.Fixed32Type)
+	message = protowire.AppendFixed32(message, math.Float32bits(1))
+	if value, ok := parseQuotaBreakdown(message); ok {
+		t.Fatalf("unknown product code was accepted: %#v", value)
 	}
 }
 
@@ -198,6 +235,9 @@ func TestSyncQuotaModeUsesBrowserWorkerWhenConfigured(t *testing.T) {
 		if value.Endpoint != "https://grok.com/rest/rate-limits" || value.Payload["modelName"] != "fast" || value.SSOToken != "test-sso" {
 			t.Fatalf("worker request = %#v", value)
 		}
+		if value.TimeoutSeconds < 5 || value.TimeoutSeconds > 8 {
+			t.Fatalf("worker timeout = %d, want the shortened parent budget", value.TimeoutSeconds)
+		}
 		body := []byte(`{"windowSizeSeconds":7200,"remainingQueries":29,"totalQueries":30}`)
 		_ = json.NewEncoder(writer).Encode(browserWorkerResponse{
 			StatusCode: http.StatusOK, Status: "200 OK",
@@ -215,7 +255,9 @@ func TestSyncQuotaModeUsesBrowserWorkerWhenConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := NewAdapter(Config{BaseURL: "https://grok.com", BrowserWorkerURL: worker.URL}, infraegress.NewManager(egressRepositoryStub{}, cipher), cipher, nil, nil)
-	window, err := adapter.SyncQuotaMode(context.Background(), account.Credential{ID: 42, EncryptedAccessToken: encrypted}, "fast")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	window, err := adapter.SyncQuotaMode(ctx, account.Credential{ID: 42, EncryptedAccessToken: encrypted}, "fast")
 	if err != nil {
 		t.Fatal(err)
 	}

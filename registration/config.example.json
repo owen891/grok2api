@@ -128,7 +128,7 @@
   "cpa_mint_required": false,
   "// cpa_probe_after_write": "写出后探测 /v1/models 是否含 grok-4.5",
   "cpa_probe_after_write": true,
-  "// cpa_probe_chat": "写出后打一发最小 /v1/responses；仅通过后才允许自动导入",
+  "// cpa_probe_chat": "写出后探测最小 /v1/responses；明确 403 permission-denied 时保留凭据但阻止自动导入，其他失败记录 warning 并允许后续重试",
   "cpa_probe_chat": true,
   "// ===== 并发 / mint 流水线（register_cli） =====": "",
   "// cpa_mint_workers": "CPA OIDC mint 并发数。-1=自动；0=注册线程内联 mint；1-10=固定并发。CLI --mint-workers 可覆盖。",

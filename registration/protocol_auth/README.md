@@ -167,7 +167,7 @@ python xai_build_quota_probe.py --auth-dir ./cliproxyapi_auth
   "base_url": "https://cli-chat-proxy.grok.com/v1",
   "headers": {
     "X-XAI-Token-Auth": "xai-grok-cli",
-    "x-grok-client-version": "0.2.93",
+    "x-grok-client-version": "0.2.106",
     "x-grok-client-identifier": "grok-shell"
   }
 }

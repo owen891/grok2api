@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,7 +47,7 @@ def browser_path() -> str | None:
     executable = next(
         (
             value
-            for name in ("chromium", "chromium-browser", "google-chrome", "chrome", "msedge")
+            for name in ("chromium", "chromium-browser", "google-chrome", "chrome")
             if (value := shutil.which(name))
         ),
         None,
@@ -58,7 +60,6 @@ def browser_path() -> str | None:
             candidates.extend(
                 (
                     str(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"),
-                    str(Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
                 )
             )
     return next((candidate for candidate in candidates if Path(candidate).is_file()), None)
@@ -73,6 +74,37 @@ def browser_headless(default: bool = False) -> bool:
     if mode == "background":
         return False
     return default
+
+
+def hide_browser_windows(process_id: int | None) -> int:
+    """Hide top-level Chromium windows while retaining a headed fingerprint."""
+    if sys.platform != "win32" or configured_browser_mode() != "background" or not process_id:
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        hidden: list[int] = []
+
+        @callback_type
+        def callback(hwnd: int, _lparam: int) -> bool:
+            owner_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+            if owner_pid.value == process_id and user32.IsWindowVisible(hwnd):
+                user32.ShowWindow(hwnd, 0)
+                hidden.append(hwnd)
+            return True
+
+        for _ in range(5):
+            user32.EnumWindows(callback, 0)
+            if hidden:
+                break
+            time.sleep(0.05)
+        return len(hidden)
+    except Exception:
+        return 0
 
 
 def apply_browser_runtime(
@@ -124,4 +156,5 @@ __all__ = [
     "browser_path",
     "browser_window_size",
     "configured_browser_mode",
+    "hide_browser_windows",
 ]

@@ -48,6 +48,7 @@ type MediaJobRepository interface {
 	ListRecoverableMediaJobs(ctx context.Context, limit int) ([]media.Job, error)
 	ListUnrecordedTerminalMediaJobs(ctx context.Context, limit int) ([]media.Job, error)
 	TryClaimMediaJob(ctx context.Context, id string, now, leaseUntil time.Time, claimToken string) (media.Job, bool, error)
+	RenewMediaJobLease(ctx context.Context, id, claimToken string, now, leaseUntil time.Time) (bool, error)
 	MarkMediaJobUsageRecorded(ctx context.Context, id string, recordedAt time.Time) error
 }
 

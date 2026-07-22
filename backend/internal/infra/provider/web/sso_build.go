@@ -114,7 +114,7 @@ func (f *ssoBuildFlow) convert(ctx context.Context, credential accountdomain.Cre
 		device.ExpiresIn = 1800
 	}
 
-	status, finalURL, _, err = f.do(ctx, http.MethodGet, device.VerificationURIComplete, nil)
+	status, _, _, err = f.do(ctx, http.MethodGet, device.VerificationURIComplete, nil)
 	if err != nil {
 		return provider.CredentialSeed{}, err
 	}

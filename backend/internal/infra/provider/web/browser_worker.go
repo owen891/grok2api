@@ -16,6 +16,7 @@ import (
 	"github.com/owen891/grok2api/backend/internal/domain/account"
 	domainegress "github.com/owen891/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/owen891/grok2api/backend/internal/infra/egress"
+	"github.com/owen891/grok2api/backend/internal/infra/provider"
 )
 
 const browserWorkerResponseLimit = 24 << 20
@@ -75,19 +76,38 @@ type browserWorkerFailure struct {
 
 func (e *browserWorkerFailure) Error() string { return e.Message }
 
+func imageProtocolErrorFromBrowserWorker(err error) error {
+	var failure *browserWorkerFailure
+	if !errors.As(err, &failure) {
+		return nil
+	}
+	switch failure.Code {
+	case "image_generation_incomplete", "image_subscription_required":
+	default:
+		return nil
+	}
+	return provider.NewMediaProtocolError(failure.Code, err)
+}
+
 func browserWorkerTimeoutSeconds(ctx context.Context, maximum int) int {
 	budget := maximum
+	if budget < 5 {
+		budget = 5
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		// Leave enough time for the HTTP client to receive and decode the
 		// worker's final response instead of cancelling a browser action mid-DOM
 		// transition. This matters for short-lived account inspection probes.
 		remaining := int((time.Until(deadline) - 2*time.Second).Seconds())
-		if remaining > 0 && remaining < budget {
+		if remaining <= 0 {
+			// The Python worker deliberately rejects budgets below five seconds.
+			// Keep the payload valid and let the parent context cancel the HTTP
+			// call when its remaining budget is exhausted.
+			return 5
+		}
+		if remaining < budget {
 			budget = remaining
 		}
-	}
-	if budget < 5 {
-		budget = 5
 	}
 	return budget
 }
@@ -117,7 +137,7 @@ func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, cred
 		value := browserWorkerRequest{
 			BaseURL: cfg.BaseURL, Endpoint: endpoint, ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent,
 			CloudflareCookie: lease.CFCookies, SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL,
-			RequestID: newRequestUUID(), TraceID: requestID, ImageMode: true, TimeoutSeconds: cfg.ImageTimeoutSeconds,
+			RequestID: newRequestUUID(), TraceID: requestID, TimeoutSeconds: browserWorkerTimeoutSeconds(ctx, cfg.ImageTimeoutSeconds),
 			Payload: buildWebChatPayload(prompt, spec.Mode, nil),
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.ImageTimeoutSeconds+30)*time.Second)
@@ -136,10 +156,17 @@ func (a *Adapter) openLiteImageWithBrowser(ctx context.Context, cfg Config, cred
 			}
 			return nil, nil, endpoint, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb, Reason: infraegress.UnavailableProxy, NodeID: nodeID}
 		}
-		if errors.As(err, &workerFailure) && (workerFailure.Code == "browser_unavailable" || workerFailure.Code == "worker_unavailable") {
+		if errors.As(err, &workerFailure) && (workerFailure.Code == "browser_unavailable" || workerFailure.Code == "worker_unavailable" || workerFailure.Code == "worker_busy") {
 			nodeID := lease.NodeID
 			lease.Release()
+			if egressAttempt == 0 {
+				continue
+			}
 			return nil, nil, endpoint, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb, Reason: infraegress.UnavailableWorker, NodeID: nodeID}
+		}
+		if protocolErr := imageProtocolErrorFromBrowserWorker(err); protocolErr != nil {
+			lease.Release()
+			return nil, nil, endpoint, protocolErr
 		}
 		lease.Release()
 		if looksLikeAntiBot([]byte(err.Error())) {
@@ -196,7 +223,7 @@ func (a *Adapter) openChatWithBrowser(ctx context.Context, cfg Config, lease *in
 		if errors.As(err, &workerFailure) && workerFailure.Code == "proxy_unavailable" {
 			return nil, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb, Reason: infraegress.UnavailableProxy, NodeID: lease.NodeID}
 		}
-		if errors.As(err, &workerFailure) && (workerFailure.Code == "browser_unavailable" || workerFailure.Code == "worker_unavailable") {
+		if errors.As(err, &workerFailure) && (workerFailure.Code == "browser_unavailable" || workerFailure.Code == "worker_unavailable" || workerFailure.Code == "worker_busy") {
 			return nil, &infraegress.UnavailableError{Scope: domainegress.ScopeWeb, Reason: infraegress.UnavailableWorker, NodeID: lease.NodeID}
 		}
 		if looksLikeAntiBot([]byte(err.Error())) {
@@ -252,6 +279,8 @@ func callBrowserWorkerQuota(ctx context.Context, workerURL string, value browser
 
 func callBrowserWorkerAt(ctx context.Context, workerURL, path string, value browserWorkerRequest) (browserWorkerResponse, error) {
 	var result browserWorkerResponse
+	maximumTimeout := value.TimeoutSeconds
+	value.TimeoutSeconds = browserWorkerTimeoutSeconds(ctx, maximumTimeout)
 	err := callBrowserWorkerJSON(ctx, workerURL, path, value, &result)
 	if isTransientBrowserWorkerFailure(err) {
 		timer := time.NewTimer(browserWorkerRetryDelay)
@@ -262,6 +291,7 @@ func callBrowserWorkerAt(ctx context.Context, workerURL, path string, value brow
 		case <-timer.C:
 		}
 		result = browserWorkerResponse{}
+		value.TimeoutSeconds = browserWorkerTimeoutSeconds(ctx, maximumTimeout)
 		err = callBrowserWorkerJSON(ctx, workerURL, path, value, &result)
 	}
 	return result, err
@@ -273,7 +303,7 @@ func isTransientBrowserWorkerFailure(err error) bool {
 		return false
 	}
 	switch failure.Code {
-	case "proxy_unavailable", "browser_unavailable", "worker_unavailable":
+	case "proxy_unavailable", "browser_unavailable", "worker_unavailable", "worker_busy":
 		return true
 	default:
 		return false

@@ -234,6 +234,34 @@ func TestBuildForbiddenDoesNotPoisonEgressNode(t *testing.T) {
 	}
 }
 
+func TestProxyPoolTransportFailureDoesNotEnterCooldown(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "pool", Scope: domain.ScopeBuild, Enabled: true, Health: 1, ProxyPool: true}}
+	manager := NewManager(repository, cipher)
+	manager.FeedbackForScope(context.Background(), domain.ScopeBuild, 1, 0, errors.New("proxy connection reset"))
+	if repository.updates != 0 || repository.node.CooldownUntil != nil || repository.node.LastError != "" {
+		t.Fatalf("proxy pool was cooled: updates=%d node=%#v", repository.updates, repository.node)
+	}
+}
+
+func TestProxyPoolCanBeSelectedWhileStaleCooldownExists(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Minute)
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "pool", Scope: domain.ScopeBuild, Enabled: true, Health: 1, ProxyPool: true, CooldownUntil: &until}}
+	manager := NewManager(repository, cipher)
+	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
+	if err != nil || !configured || lease == nil || lease.NodeID != 1 {
+		t.Fatalf("lease=%#v configured=%v err=%v", lease, configured, err)
+	}
+	lease.Release()
+}
+
 func TestWebForbiddenStillRebuildsBrowserSession(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {

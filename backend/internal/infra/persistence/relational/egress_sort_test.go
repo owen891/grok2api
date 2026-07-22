@@ -28,7 +28,7 @@ func TestEgressRepositorySortsInDatabase(t *testing.T) {
 	}
 	repo := NewEgressRepository(database)
 	for _, value := range []egress.Node{
-		{Name: "slow", Scope: egress.ScopeBuild, Enabled: true, Health: 0.2},
+		{Name: "slow", Scope: egress.ScopeBuild, Enabled: true, ProxyPool: true, Health: 0.2},
 		{Name: "healthy", Scope: egress.ScopeWeb, Enabled: true, Health: 0.9},
 		{Name: "middle", Scope: egress.ScopeWebAsset, Enabled: true, Health: 0.5},
 	} {
@@ -39,6 +39,15 @@ func TestEgressRepositorySortsInDatabase(t *testing.T) {
 	values, err := repo.ListEgressNodes(ctx, "", repository.SortQuery{Field: "health", Direction: repository.SortDescending})
 	if err != nil || len(values) != 3 || values[0].Name != "healthy" || values[2].Name != "slow" {
 		t.Fatalf("health sort = %#v, err = %v", values, err)
+	}
+	var slow egress.Node
+	for _, value := range values {
+		if value.Name == "slow" {
+			slow = value
+		}
+	}
+	if !slow.ProxyPool {
+		t.Fatal("proxy pool flag was not persisted")
 	}
 }
 

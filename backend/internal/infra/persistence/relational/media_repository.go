@@ -263,6 +263,18 @@ func (r *MediaJobRepository) TryClaimMediaJob(ctx context.Context, id string, no
 	return mediaJobToDomain(row), true, nil
 }
 
+// RenewMediaJobLease extends only the active owner's lease. Keeping this update
+// narrow prevents a heartbeat from overwriting generation progress or results.
+func (r *MediaJobRepository) RenewMediaJobLease(ctx context.Context, id, claimToken string, now, leaseUntil time.Time) (bool, error) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(claimToken) == "" || now.IsZero() || !leaseUntil.After(now) {
+		return false, repository.ErrInvalid
+	}
+	result := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).
+		Where("id = ? AND claim_token = ? AND status = ?", id, claimToken, media.StatusInProgress).
+		Updates(map[string]any{"lease_until": leaseUntil.UTC(), "updated_at": now.UTC()})
+	return result.RowsAffected == 1, result.Error
+}
+
 func mediaJobFromDomain(value media.Job) *mediaJobModel {
 	kind := value.Kind
 	if kind == "" {

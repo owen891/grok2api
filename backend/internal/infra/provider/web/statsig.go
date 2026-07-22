@@ -415,7 +415,7 @@ func (a *Adapter) WarmStatsig(ctx context.Context, credential account.Credential
 			BaseURL: cfg.BaseURL, Endpoint: baseURL + "/rest/app-chat/conversations/new",
 			ProxyURL: lease.ProxyURL, UserAgent: lease.UserAgent, CloudflareCookie: lease.CFCookies,
 			SSOToken: token, StatsigSignerURL: cfg.StatsigSignerURL, RequestID: newRequestUUID(),
-			TimeoutSeconds: cfg.ImageTimeoutSeconds, Payload: map[string]any{},
+			TimeoutSeconds: browserWorkerTimeoutSeconds(ctx, cfg.ImageTimeoutSeconds), Payload: map[string]any{},
 		}
 		warm, err := callBrowserWorkerWarmState(ctx, cfg.BrowserWorkerURL, value)
 		if err != nil {

@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +47,11 @@ class BrowserProxyTests(unittest.TestCase):
             self.assertIn('"password": "p@ss"', worker)
             self.assertIn("details.isProxy", worker)
             self.assertIn("asyncBlocking", worker)
+            self.assertEqual([], list(extension.glob(".*.tmp")))
+            if os.name != "nt":
+                self.assertEqual(0o700, stat.S_IMODE(extension.stat().st_mode))
+                self.assertEqual(0o600, stat.S_IMODE((extension / "manifest.json").stat().st_mode))
+                self.assertEqual(0o600, stat.S_IMODE((extension / "service_worker.js").stat().st_mode))
 
     def test_authenticated_socks_proxy_requires_local_relay(self):
         options = FakeOptions()

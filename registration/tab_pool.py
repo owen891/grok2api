@@ -53,6 +53,12 @@ class TabPool:
             return None
         options = factory()
         browser = Chromium(options)
+        try:
+            from browser_runtime import hide_browser_windows
+
+            hide_browser_windows(getattr(browser, "process_id", None))
+        except Exception:
+            pass
         with cls._all_browsers_lock:
             cls._all_browsers.append(browser)
         return browser
@@ -250,4 +256,3 @@ class TabPool:
     @classmethod
     def get_browser(cls):
         return getattr(cls._thread_local, "browser", None)
-

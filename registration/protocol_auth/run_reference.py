@@ -20,8 +20,6 @@ from __future__ import annotations
 import sys
 import os
 import uuid
-import json
-import base64
 import time
 import threading
 import argparse
@@ -40,13 +38,14 @@ try:
 except Exception:
     pass
 
-from xconsole_client import XConsoleAuthClient, YesCaptchaSolver, config as C
-from xconsole_client.xai_oauth import (
+from xconsole_client import XConsoleAuthClient, YesCaptchaSolver, config as C  # noqa: E402
+from xconsole_client.xai_oauth import (  # noqa: E402
     CLIPROXYAPI_GROK_BASE_URL,
+    _write_private_json,
     complete_build_oauth,
     default_cliproxyapi_auth_dir,
 )
-from xconsole_client.oauth_protocol import extract_cookies_from_auth_client
+from xconsole_client.oauth_protocol import extract_cookies_from_auth_client  # noqa: E402
 
 # -- secrets from environment only ---------------------------------------
 YESCAPTCHA_KEY = os.environ.get("YESCAPTCHA_API_KEY", "")
@@ -92,13 +91,12 @@ def _make_email_provider(backend: str):
 
 def _save_account_bundle(result: dict, output_dir: Path) -> Path:
     """Persist a combined signup+oauth record for later tooling."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     email = str(result.get("email") or "unknown")
     safe = "".join(ch if ch.isalnum() or ch in "._-@" else "_" for ch in email) or "unknown"
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     path = output_dir / f"account_{safe}_{ts}.json"
-    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    return _write_private_json(path, result)
 
 
 def register_one(
@@ -145,7 +143,7 @@ def register_one(
 
         c.create_email_validation_code(email)
         code = receiver.wait_for_code(timeout=120)
-        _log(index, f"code: {code}")
+        _log(index, "verification code received")
         c.verify_email_validation_code(email, code)
         c.validate_password(email, password)
         _log(index, "email verified")
@@ -187,8 +185,7 @@ def register_one(
                 "cliproxyapi_auth": None,
                 "error": "SSO failed",
             }
-        payload = json.loads(base64.urlsafe_b64decode(sso.split(".")[1] + "=="))
-        _log(index, f"SSO saved  session_id={payload.get('session_id', '?')[:12]}...")
+        _log(index, "SSO saved")
 
         result = {
             "email": email,
@@ -234,7 +231,7 @@ def register_one(
             result["cliproxyapi_auth"] = str(oauth.cliproxyapi_path) if oauth.cliproxyapi_path else None
             _log(
                 index,
-                f"Build OAuth OK  access={oauth.access_token[:20]}...  "
+                "Build OAuth OK  access=obtained  "
                 f"cliproxy={oauth.cliproxyapi_path.name if oauth.cliproxyapi_path else '?'}",
             )
         else:
@@ -364,7 +361,6 @@ def main():
                 _results.append(f.result())
 
     # summary
-    ok_build = [r for r in _results if r.get("cliproxyapi_auth") or (r.get("sso") and not do_oauth)]
     ok_sso = [r for r in _results if r.get("sso")]
     fail = [r for r in _results if r.get("error")]
     print(f"\n{'=' * 50}")
@@ -379,7 +375,7 @@ def main():
         if r.get("cliproxyapi_auth"):
             print(f"  {email:40s}  BUILD  {r['cliproxyapi_auth']}")
         elif r.get("sso") and not do_oauth:
-            print(f"  {email:40s}  SSO    {r['sso'][:36]}...")
+            print(f"  {email:40s}  SSO    saved")
         elif r.get("sso") and r.get("error"):
             print(f"  {email:40s}  SSO-ok OAuth-FAIL: {r.get('error')}")
         else:

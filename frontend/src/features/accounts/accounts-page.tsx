@@ -37,6 +37,7 @@ import {
   deleteAccounts,
   convertWebAccountsToBuild,
   exportAccounts,
+  exportSub2Accounts,
   getAccountSummary,
   importAccounts,
   importConsoleAccounts,
@@ -69,6 +70,7 @@ import {
 } from "@/features/accounts/accounts-api";
 import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/account-quota";
 import { AccountInspectionDialog } from "@/features/accounts/account-inspection-dialog";
+import { getOperations } from "@/features/dashboard/operations-api";
 
 function isAbortError(error: unknown): boolean {
   return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
@@ -78,6 +80,8 @@ type BuildConversionProgressState = {
   converting?: AccountTaskProgressDTO;
   syncing?: AccountTaskProgressDTO;
 };
+
+type AccountExportFormat = "native" | "sub2api";
 
 export function AccountsPage() {
   const { t, i18n } = useTranslation();
@@ -100,7 +104,7 @@ export function AccountsPage() {
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<AccountExportFormat | null>(null);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [syncProgress, setSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [conversionTargets, setConversionTargets] = useState<string[] | "all" | null>(null);
@@ -152,9 +156,15 @@ export function AccountsPage() {
     queryFn: getAccountSummary,
   });
 
+  const operationsQuery = useQuery({
+    queryKey: ["operations"],
+    queryFn: getOperations,
+  });
+
   const invalidateAccountData = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["accounts"] });
     void queryClient.invalidateQueries({ queryKey: ["accounts", "summary"] });
+    void queryClient.invalidateQueries({ queryKey: ["operations"] });
   }, [queryClient]);
 
   const updateMutation = useMutation({
@@ -350,10 +360,15 @@ export function AccountsPage() {
   });
 
   const exportMutation = useMutation({
-    mutationFn: exportAccounts,
-    onSuccess: (blob) => {
-      downloadAccountExport(blob);
-      setExportOpen(false);
+    mutationFn: (format: AccountExportFormat) => format === "sub2api" ? exportSub2Accounts() : exportAccounts(),
+    onSuccess: (result, format) => {
+      downloadAccountExport(result, format);
+      setExportFormat(null);
+      if (format === "sub2api") {
+        toast.success(t("accountExport.sub2Success", { exported: result.exportedCount }));
+        if (result.skippedCount > 0) toast.warning(t("accountExport.sub2Skipped", { skipped: result.skippedCount }));
+        return;
+      }
       toast.success(t("accounts.exported"));
     },
     onError: showError,
@@ -554,8 +569,19 @@ export function AccountsPage() {
   const buildSummary = summary?.providers.grok_build ?? { total: 0, available: 0 };
   const webSummary = summary?.providers.grok_web ?? { total: 0, available: 0 };
   const consoleSummary = summary?.providers.grok_console ?? { total: 0, available: 0 };
+  const build45Route = operationsQuery.data?.routes.find((route) =>
+    route.provider === "grok_build"
+    && (route.publicModel === "grok-4.5" || route.upstreamModel === "grok-4.5")
+  );
   const summaryLoading = summaryQuery.isPending;
   const summaryUnavailable = summaryQuery.isError;
+  const buildRouteLoading = operationsQuery.isPending;
+  const buildRouteDetail = build45Route
+    ? `grok-4.5 ${t("dashboard.availableSummary", {
+        active: formatNumber(build45Route.eligible, i18n.language, 0),
+        total: formatNumber(build45Route.total, i18n.language, 0),
+      })}`
+    : "-";
   const providerAccountTotal = provider === "grok_build" ? buildSummary.total : provider === "grok_web" ? webSummary.total : consoleSummary.total;
   const hasProviderAccounts = providerAccountTotal > 0 || (result?.total ?? 0) > 0;
   const syncAllPending = allBillingMutation.isPending || allWebQuotaMutation.isPending || allConsoleQuotaMutation.isPending;
@@ -567,6 +593,9 @@ export function AccountsPage() {
     { value: "cooldown", label: t("accounts.statusCooldown") },
     { value: "waitingReset", label: t("accounts.waitingReset") },
     { value: "probing", label: t("accounts.probing") },
+    ...(provider === "grok_build"
+      ? [{ value: "modelDenied", label: t("accountInspection.classification.permission_denied") }]
+      : []),
   ] as const;
 
   return (
@@ -576,7 +605,7 @@ export function AccountsPage() {
         <p className="sr-only">{t("console.accountsDescription")}</p>
       </header>
       <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        <AccountMetricPanel icon={<SquareTerminal />} loading={summaryLoading} label={t("accounts.buildAccountCount")} value={summaryUnavailable ? "-" : formatNumber(buildSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(buildSummary.available, i18n.language, 0) })} />
+        <AccountMetricPanel icon={<SquareTerminal />} loading={summaryLoading || buildRouteLoading} label={t("accounts.buildAccountCount")} value={summaryUnavailable ? "-" : formatNumber(buildSummary.total, i18n.language, 0)} detail={buildRouteDetail} />
         <AccountMetricPanel icon={<Compass />} loading={summaryLoading} label={t("accounts.webAccountCount")} value={summaryUnavailable ? "-" : formatNumber(webSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(webSummary.available, i18n.language, 0) })} />
         <AccountMetricPanel icon={<Webhook />} loading={summaryLoading} label={t("accounts.consoleAccountCount")} value={summaryUnavailable ? "-" : formatNumber(consoleSummary.total, i18n.language, 0)} detail={t("accounts.routableAccountCount", { count: formatNumber(consoleSummary.available, i18n.language, 0) })} />
         <AccountMetricPanel icon={<TriangleAlert />} loading={summaryLoading} label={t("accounts.abnormalAccountCount")} value={summaryUnavailable ? "-" : formatNumber(abnormalAccounts, i18n.language, 0)} detail={t("accounts.abnormalAccountBreakdown", { recovering: formatNumber(recoveringAccounts, i18n.language, 0), attention: formatNumber(attentionAccounts, i18n.language, 0) })} />
@@ -681,7 +710,8 @@ export function AccountsPage() {
                     {hasProviderAccounts && provider === "grok_build" ? (
                       <>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onClick={() => setExportOpen(true)}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setExportFormat("native")}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setExportFormat("sub2api")}><Download />{t("accountExport.sub2Action")}</DropdownMenuItem>
                       </>
                     ) : null}
                   </DropdownMenuContent>
@@ -721,7 +751,8 @@ export function AccountsPage() {
                       {hasProviderAccounts && provider === "grok_build" ? (
                         <>
                           <DropdownMenuSeparator />
-                          <DropdownMenuItem onClick={() => setExportOpen(true)}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setExportFormat("native")}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setExportFormat("sub2api")}><Download />{t("accountExport.sub2Action")}</DropdownMenuItem>
                         </>
                       ) : null}
                     </DropdownMenuContent>
@@ -871,10 +902,10 @@ export function AccountsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={exportOpen} onOpenChange={setExportOpen}>
+      <AlertDialog open={exportFormat !== null} onOpenChange={(open) => { if (!open) setExportFormat(null); }}>
         <AlertDialogContent>
-          <AlertDialogHeader><AlertDialogTitle>{t("accounts.exportTitle")}</AlertDialogTitle><AlertDialogDescription>{t("accounts.exportDescription")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={exportMutation.isPending} onClick={() => exportMutation.mutate()}>{t("accounts.exportAuth")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogHeader><AlertDialogTitle>{t(exportFormat === "sub2api" ? "accountExport.sub2Title" : "accounts.exportTitle")}</AlertDialogTitle><AlertDialogDescription>{t(exportFormat === "sub2api" ? "accountExport.sub2Description" : "accounts.exportDescription")}</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={exportMutation.isPending || exportFormat === null} onClick={() => { if (exportFormat) exportMutation.mutate(exportFormat); }}>{t(exportFormat === "sub2api" ? "accountExport.sub2Action" : "accounts.exportAuth")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
@@ -968,11 +999,12 @@ export function AccountsPage() {
   );
 }
 
-function downloadAccountExport(blob: Blob): void {
-  const url = URL.createObjectURL(blob);
+function downloadAccountExport(result: Awaited<ReturnType<typeof exportAccounts>>, format: AccountExportFormat): void {
+  const url = URL.createObjectURL(result.blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `grok2api-accounts-${new Date().toISOString().slice(0, 10)}.json`;
+  const prefix = format === "sub2api" ? "sub2api-grok-accounts" : "grok2api-accounts";
+  anchor.download = result.filename ?? `${prefix}-${new Date().toISOString().slice(0, 10)}.json`;
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
@@ -1027,6 +1059,9 @@ function AccountStatus({ account }: { account: AccountDTO }) {
   }
   if (account.authStatus === "reauthRequired") {
     return <Badge variant="destructive">{t("accounts.statusReauthRequired")}</Badge>;
+  }
+  if (account.inferenceHealth?.status === "permission_denied") {
+    return <Badge variant="destructive">{t("accountInspection.classification.permission_denied")}</Badge>;
   }
   if (account.provider === "grok_console" && account.quotaWindows?.some((window) => window.mode === "console" && window.remaining <= 0)) {
     return <Badge variant="secondary" className="bg-amber-500/10 text-amber-700 dark:text-amber-300">{t("accounts.waitingReset")}</Badge>;

@@ -134,7 +134,7 @@ docker compose -f docker-compose.yml -f compose.browser-registration.yml build g
 docker compose -f docker-compose.yml -f compose.browser-registration.yml up -d
 ```
 
-然后在注册设置中将 `engine` 切为 `browser`。容器以 `DISPLAY=:99` 启动 Xvfb，并用非 headless Chromium 后台运行。HTTP(S) 认证代理由临时 MV3 扩展处理；认证 SOCKS 代理必须先经本地 relay 转成无认证端口。Browser preflight 会通过同一注册代理检查出口 IP、注册页和邮箱 API；出口检查默认使用 `https://api.ipify.org?format=json`，可用 `REGISTRATION_PREFLIGHT_EGRESS_URL` 覆盖。需要在管理端随时切换协议与浏览器引擎时，同时加载 `compose.registration.yml` 和 `compose.browser-registration.yml`；此时才会下载两套运行时。
+然后在注册设置中将 `engine` 切为 `browser`。Linux 容器默认使用 Xvfb 中的 Chromium，不会在宿主机弹窗；Windows 本地使用正常 Chrome 但自动隐藏顶层窗口，以保留 Cloudflare 所需的浏览器环境。`headless` 仍可显式设置，但可能被 Cloudflare 拦截。HTTP(S) 认证代理由临时 MV3 扩展处理；认证 SOCKS 代理必须先经本地 relay 转成无认证端口。Browser preflight 会通过同一注册代理检查出口 IP、注册页和邮箱 API；出口检查默认使用 `https://api.ipify.org?format=json`，可用 `REGISTRATION_PREFLIGHT_EGRESS_URL` 覆盖。需要在管理端随时切换协议与浏览器引擎时，同时加载 `compose.registration.yml` 和 `compose.browser-registration.yml`；此时才会下载两套运行时。
 
 Browser 注册支持与 Protocol 相同的账号类型选择。`Build` 在同一注册线程内完成 OAuth、CPA hotload 和首次同步；`Web` 读取 SSO 后写入 `grok_web` 凭据、导入并完成首次同步，可选 `autoNSFW`。每个已拿到 SSO 的账号最多按 `cpa_mint_retry_attempts` 重试；耗尽后凭据写入数据目录下权限受限的 `browser_pending_oauth.json`，下次相同账号类型的 browser run 会优先 resume，不会重新注册替代账号。收到 `SIGINT`/`SIGTERM` 后 worker 会停止领取新账号、保留已注册账号的 pending 凭据状态并回收浏览器。`browser_state.json` 的 `resumable` 表示当前账号类型待恢复数量；`browser_metrics.json` 只保存阶段和资源统计，不写密码、SSO 或 Cookie。
 
@@ -339,7 +339,7 @@ docker compose exec grok2api sh -lc 'command -v chromium; test -f /app/registrat
 | `register_cli.py: No such file` | 使用 `main-browser` 镜像，重建容器时带 browser overlay |
 | `No module named DrissionPage` | 旧 runtime 部署需追加 `compose.browser-registration.legacy.yml`，并重新拉取 browser 镜像 |
 | `Chromium ... not found` | 当前仍在运行标准 protocol 镜像，拉取并切换 `main-browser` |
-| `DISPLAY is empty and Xvfb is unavailable` | 浏览器模式需使用 `REGISTRATION_BROWSER_MODE=xvfb` 的 browser overlay |
+| `DISPLAY is empty and Xvfb is unavailable` | Linux 容器浏览器注册需要 `REGISTRATION_BROWSER_MODE=xvfb`；Windows 本地可使用 `background`，不需要 DISPLAY |
 | `v3.0.9` 点击“检查更新”仍显示 `v3.0.9` | 该版本会优先读取镜像内旧清单，需先按原 Compose 文件组合执行一次 `pull` 和 `up -d --force-recreate`；升级到 `v3.1.0` 后恢复远端检查 |
 
 修改源码后的本地镜像构建：

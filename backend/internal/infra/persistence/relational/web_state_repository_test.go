@@ -112,4 +112,18 @@ func TestWebResponseStateAndMediaJobRoundTrip(t *testing.T) {
 	if err != nil || !ok || claimedImage.ID != staleImage.ID {
 		t.Fatalf("stale image claim = %#v, ok=%v err=%v", claimedImage, ok, err)
 	}
+	renewedAt := now.Add(30 * time.Second)
+	if renewed, renewErr := jobs.RenewMediaJobLease(ctx, staleImage.ID, claimedImage.ClaimToken, renewedAt, renewedAt.Add(mediadomain.ImageJobRecoveryTimeout)); renewErr != nil || !renewed {
+		t.Fatalf("image lease renewal = %v, err=%v", renewed, renewErr)
+	}
+	if _, ok, claimErr := jobs.TryClaimMediaJob(ctx, staleImage.ID, renewedAt.Add(time.Minute), renewedAt.Add(2*time.Minute), "claim_token_0000000000000005"); claimErr != nil || ok {
+		t.Fatalf("renewed image job was reclaimed: ok=%v err=%v", ok, claimErr)
+	}
+	_, ok, err = jobs.TryClaimMediaJob(ctx, staleImage.ID, renewedAt.Add(mediadomain.ImageJobRecoveryTimeout+time.Second), renewedAt.Add(2*mediadomain.ImageJobRecoveryTimeout), "claim_token_0000000000000006")
+	if err != nil || !ok {
+		t.Fatalf("expired renewed image claim: ok=%v err=%v", ok, err)
+	}
+	if renewed, renewErr := jobs.RenewMediaJobLease(ctx, staleImage.ID, claimedImage.ClaimToken, renewedAt, renewedAt.Add(mediadomain.ImageJobRecoveryTimeout)); renewErr != nil || renewed {
+		t.Fatalf("stale image owner renewed: renewed=%v err=%v", renewed, renewErr)
+	}
 }

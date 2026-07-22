@@ -1,12 +1,19 @@
 import unittest
 
 from protocol_auth.xconsole_client.oauth_protocol import (
+    _redact_url,
     extract_submit_oauth_action,
     script_sources,
 )
 
 
 class OAuthActionDiscoveryTests(unittest.TestCase):
+    def test_redacts_oauth_query_and_fragment_from_debug_urls(self):
+        self.assertEqual(
+            "https://accounts.x.ai/oauth2/callback",
+            _redact_url("https://accounts.x.ai/oauth2/callback?code=secret&state=state#done"),
+        )
+
     def test_extracts_action_nearest_to_consent_export(self):
         unrelated = "a" * 40
         expected = "4f09e49af5a7498fabcbbabc11dfcc71f79c19ab2"

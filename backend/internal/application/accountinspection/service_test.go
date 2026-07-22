@@ -72,6 +72,28 @@ func TestInspectionKeepsBareRateLimitOutOfAccountHealth(t *testing.T) {
 	}
 }
 
+func TestInspectionPersistsModelUnavailableInferenceHealth(t *testing.T) {
+	service, accountRepo, runs, route, credential, adapter := newInspectionTestService(t)
+	adapter.set(credential.ID, http.StatusNotFound, `{"error":{"code":"model_not_found","message":"model unavailable"}}`)
+	run, err := service.Start(context.Background(), StartInput{
+		Provider: account.ProviderBuild, ModelRouteID: route.ID, Mode: inspectiondomain.RunModeFull, Concurrency: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.processAvailable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	results, _, err := runs.ListInspectionResults(context.Background(), run.ID, 0, 10)
+	if err != nil || len(results) != 1 || results[0].Classification != inspectiondomain.ClassificationModelUnavailable || results[0].ApplyStatus != inspectiondomain.ApplyStatusSkipped {
+		t.Fatalf("results=%#v err=%v", results, err)
+	}
+	candidates, err := accountRepo.ListRoutingCandidates(context.Background(), account.ProviderBuild, route.UpstreamModel, "")
+	if err != nil || len(candidates) != 1 || candidates[0].InferenceHealth == nil || candidates[0].InferenceHealth.Status != account.InferenceHealthModelUnavailable {
+		t.Fatalf("candidates=%#v err=%v", candidates, err)
+	}
+}
+
 func TestInspectionDoesNotApplyReauthForRefreshableOAuth401(t *testing.T) {
 	service, accountRepo, runs, route, credential, adapter := newInspectionTestService(t)
 	updated, err := accountRepo.UpdateTokens(context.Background(), credential.ID, credential.EncryptedAccessToken, "encrypted-refresh", time.Now().UTC().Add(time.Hour))

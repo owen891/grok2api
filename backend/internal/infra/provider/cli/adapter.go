@@ -131,6 +131,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if err != nil {
 		return nil, err
 	}
+	resp, reqURL, reasoningRecovery := a.recoverReasoningDecodeFailure(ctx, request, accessToken, body, base, resp, reqURL)
 	// 未标记账号：仅可回退操作在主地址明确 403 时用等价请求探测 XAI。
 	if a.shouldProbeXAIInferenceFallback(ctx, request.Credential, request.Method, request.Path, resp.StatusCode) {
 		// 缓冲主 403 正文，备用失败时原样回放，避免二次 primary POST。
@@ -143,9 +144,17 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		fallbackBase := a.fallbackBaseURL()
 		if fallbackBase != "" && !strings.EqualFold(fallbackBase, base) {
 			fallbackResp, fallbackURL, fallbackErr := a.doResponseRequest(ctx, request, accessToken, body, fallbackBase)
+			fallbackRecovery := reasoningRecoveryOutcome{}
+			if fallbackErr == nil {
+				fallbackErr = normalizeGzipResponse(fallbackResp)
+			}
+			if fallbackErr == nil {
+				fallbackResp, fallbackURL, fallbackRecovery = a.recoverReasoningDecodeFailure(ctx, request, accessToken, body, fallbackBase, fallbackResp, fallbackURL)
+			}
 			if fallbackErr == nil && isHTTPSuccess(fallbackResp.StatusCode) {
 				a.activateBuildAPIFallback(ctx, &request.Credential)
 				resp, reqURL = fallbackResp, fallbackURL
+				reasoningRecovery = reasoningRecovery.merge(fallbackRecovery)
 			} else {
 				if fallbackErr == nil {
 					_ = fallbackResp.Body.Close()
@@ -161,11 +170,14 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if err := normalizeGzipResponse(resp); err != nil {
 		return nil, err
 	}
+	reasoningRecovery.appendWarnings(resp.Header)
 	modelCatalogChanged := a.modelCatalogChanged(request.Credential.ID, resp.Header.Get("x-models-etag"))
 	responsesOperation := request.Operation == "" || request.Operation == conversation.OperationResponses
 	if responsesOperation && toolCompatibility != nil {
 		if warnings := toolCompatibility.warningHeader(); warnings != "" {
-			resp.Header.Set("X-Grok2API-Compatibility-Warnings", warnings)
+			for _, warning := range strings.Split(warnings, ",") {
+				appendCompatibilityWarning(resp.Header, warning)
+			}
 		}
 	}
 	if responsesOperation && toolCompatibility != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {

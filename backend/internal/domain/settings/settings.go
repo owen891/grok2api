@@ -12,6 +12,7 @@ type Config struct {
 	Routing           RoutingConfig
 	Audit             AuditConfig
 	ClientKeyDefaults ClientKeyDefaultsConfig
+	Accounts          AccountsConfig
 }
 
 type ProviderConsoleConfig struct {
@@ -80,4 +81,12 @@ type AuditConfig struct {
 type ClientKeyDefaultsConfig struct {
 	RPMLimit      int
 	MaxConcurrent int
+}
+
+// AccountsConfig defines persisted account-pool maintenance settings.
+type AccountsConfig struct {
+	AutoCleanReauthEnabled   bool
+	AutoCleanReauthInterval  time.Duration
+	AutoCleanReauthMinAge    time.Duration
+	AutoCleanDisabledEnabled bool
 }

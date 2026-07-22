@@ -25,6 +25,8 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 
+from .logging_utils import redact_url
+
 try:
     from curl_cffi import requests as cc_requests  # type: ignore
     _HAS_CURL_CFFI = True
@@ -195,8 +197,11 @@ class FingerprintTransport:
         set_cookies = _split_set_cookie(raw_sc) if raw_sc else []
         hdrs = {k.lower(): v for k, v in resp.headers.items()}
         if self._debug:
-            print(f"  <- {status} {method} {url}  ({len(raw)} bytes, {len(set_cookies)} set-cookie, "
-                  f"impersonate={self._impersonate}, http={self._http_version})")
+            print(
+                f"  <- {status} {method} {redact_url(url)}  "
+                f"({len(raw)} bytes, {len(set_cookies)} set-cookie, "
+                f"impersonate={self._impersonate}, http={self._http_version})"
+            )
         return status, hdrs, set_cookies, raw
 
     @property

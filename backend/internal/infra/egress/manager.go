@@ -223,7 +223,7 @@ func (m *Manager) acquireGroup(ctx context.Context, groupID uint64, scope domain
 	highestPriority := -int(^uint(0)>>1) - 1
 	for _, node := range nodes {
 		limit, ok := allowed[node.ID]
-		if !ok || !node.Enabled || (node.CooldownUntil != nil && now.Before(*node.CooldownUntil)) {
+		if !ok || !node.Enabled || (!node.ProxyPool && node.CooldownUntil != nil && now.Before(*node.CooldownUntil)) {
 			continue
 		}
 		m.mu.Lock()
@@ -361,7 +361,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 				continue
 			}
 			configured = true
-			if node.CooldownUntil != nil && now.Before(*node.CooldownUntil) {
+			if !node.ProxyPool && node.CooldownUntil != nil && now.Before(*node.CooldownUntil) {
 				if recovered, ok := m.tryRecoverCoolingNode(ctx, node, now); ok {
 					candidateAvailable = append(candidateAvailable, recovered)
 				}
@@ -651,7 +651,7 @@ func fallbackScopes(scope domain.Scope) []domain.Scope {
 func (m *Manager) selectNode(nodes []domain.Node, affinity string) domain.Node {
 	if affinity != "" {
 		digest := sha256.Sum256([]byte(affinity))
-		selected := nodes[int(binary.BigEndian.Uint64(digest[:8])%uint64(len(nodes)))]
+		selected := nodes[binary.BigEndian.Uint64(digest[:8])%uint64(len(nodes))]
 		if selected.Health >= 0.8 || len(nodes) == 1 {
 			return selected
 		}
@@ -722,7 +722,7 @@ func (m *Manager) FeedbackLease(ctx context.Context, lease *Lease, status int, t
 
 func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error) {
 	if nodeID == 0 {
-		if transportErr != nil || status >= 500 || (scope != domain.ScopeBuild && status == http.StatusForbidden) {
+		if transportErr != nil || (scope != domain.ScopeBuild && status == http.StatusForbidden) {
 			m.mu.Lock()
 			m.invalidateClientLocked(0)
 			m.mu.Unlock()
@@ -731,6 +731,9 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 	}
 	value, err := m.repository.GetEgressNode(ctx, nodeID)
 	if err != nil {
+		return
+	}
+	if value.ProxyPool && (transportErr != nil || status == http.StatusForbidden) {
 		return
 	}
 	now := time.Now().UTC()
@@ -754,20 +757,19 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		m.mu.Lock()
 		m.invalidateClientLocked(nodeID)
 		m.mu.Unlock()
-	default:
+	case transportErr != nil:
 		value.FailureCount++
 		value.Health = max(0.05, value.Health*0.7)
 		cooldown := min(10*time.Minute, 30*time.Second*time.Duration(1<<min(value.FailureCount-1, 4)))
 		until := now.Add(cooldown)
 		value.CooldownUntil = &until
-		if transportErr != nil {
-			value.LastError = "transport error"
-		} else {
-			value.LastError = fmt.Sprintf("upstream status %d", status)
-		}
+		value.LastError = "transport error"
 		m.mu.Lock()
 		m.invalidateClientLocked(nodeID)
 		m.mu.Unlock()
+	default:
+		// HTTP status codes describe the upstream response, not proxy health.
+		return
 	}
 	if _, err := m.repository.UpdateEgressNode(ctx, value); err == nil {
 		m.invalidateNodes(value.Scope)

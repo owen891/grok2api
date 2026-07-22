@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import secrets
+import tempfile
 import threading
 import time
 import webbrowser
@@ -28,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
@@ -57,7 +58,7 @@ DEFAULT_SCOPES = [
 CLIPROXYAPI_GROK_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 CLIPROXYAPI_GROK_HEADERS = {
     "X-XAI-Token-Auth": "xai-grok-cli",
-    "x-grok-client-version": "0.2.93",
+    "x-grok-client-version": "0.2.106",
     "x-grok-client-identifier": "grok-shell",
 }
 
@@ -88,6 +89,28 @@ def parse_jwt_payload(jwt_token: str) -> Optional[Dict[str, Any]]:
 
 def default_output_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "oauth_output"
+
+
+def _write_private_json(path: Path, value: Dict[str, Any]) -> Path:
+    """Atomically persist credential JSON with owner-only permissions."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(target.parent, 0o700)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.stem}-", suffix=".tmp", dir=target.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, target)
+        os.chmod(target, 0o600)
+    finally:
+        Path(temporary_name).unlink(missing_ok=True)
+    return target
 
 
 @dataclass
@@ -284,7 +307,7 @@ def save_oauth_record(
     output_dir: Optional[str | Path] = None,
 ) -> Path:
     target = Path(output_dir) if output_dir else default_output_dir()
-    target.mkdir(parents=True, exist_ok=True)
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     id_payload = parse_jwt_payload(str(token.get("id_token") or ""))
     email = ""
@@ -294,7 +317,7 @@ def save_oauth_record(
         email = str(id_payload.get("email") or "")
     safe_email = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in email) or "unknown"
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     path = target / f"xai_oauth_{safe_email}_{ts}.json"
     record = {
         "type": "xai",
@@ -311,8 +334,7 @@ def save_oauth_record(
         "expires_at": token.get("expires_at", None),
         "scope": token.get("scope", ""),
     }
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    return _write_private_json(path, record)
 
 
 def _safe_email_for_filename(email: str) -> str:
@@ -404,7 +426,7 @@ def save_cliproxyapi_auth_record(
         headers=headers,
     )
     target = Path(auth_dir)
-    target.mkdir(parents=True, exist_ok=True)
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
     email = str(record.get("email") or "")
     safe = _safe_email_for_filename(email)
     # Avoid "xai-xai..." when the address local-part already starts with "xai".
@@ -414,8 +436,7 @@ def save_cliproxyapi_auth_record(
     else:
         fname = f"xai-{safe}"
     path = target / f"{fname}.json"
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    return _write_private_json(path, record)
 
 
 def _start_pkce_callback_server(
@@ -885,9 +906,9 @@ def main() -> None:
     print("xAI OAuth login successful")
     if result.email:
         print(f"email: {result.email}")
-    print(f"access_token: {result.access_token[:24]}...")
+    print("access_token: obtained")
     if result.refresh_token:
-        print(f"refresh_token: {result.refresh_token[:24]}...")
+        print("refresh_token: obtained")
     if result.path:
         print(f"saved: {result.path}")
     if result.cliproxyapi_path:

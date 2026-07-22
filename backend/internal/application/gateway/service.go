@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -400,9 +401,6 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
 		elapsed := time.Since(started)
 		timing.markUpstream(elapsed)
-		if err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-			s.selector.ObserveRouteResult(credential.ID, route.UpstreamModel, elapsed, true)
-		}
 		return response, err
 	}
 	ensureCredential := func(credential accountdomain.Credential, force bool) (accountdomain.Credential, error) {
@@ -499,10 +497,26 @@ attemptLoop:
 				continue
 			}
 		}
-		if isRetryable(response.StatusCode) {
+		var preclassifiedFailure *UpstreamFailure
+		var preloadedBody []byte
+		modelUnavailableResponse := isPossibleModelUnavailableStatus(response.StatusCode)
+		if modelUnavailableResponse {
+			preloadedBody, _ = readRetryableBody(response.Body)
+			preclassifiedFailure = newHTTPUpstreamFailure(response.StatusCode, preloadedBody, credential.ID, credential.Name)
+			modelUnavailableResponse = preclassifiedFailure.ModelUnavailable
+			if !modelUnavailableResponse {
+				response.Body = io.NopCloser(bytes.NewReader(preloadedBody))
+			}
+		}
+		if isRetryable(response.StatusCode) || modelUnavailableResponse {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-			body, _ := readRetryableBody(response.Body)
-			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			body := preloadedBody
+			if preclassifiedFailure != nil {
+				lastFailure = preclassifiedFailure
+			} else {
+				body, _ = readRetryableBody(response.Body)
+				lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			}
 			s.selector.ObserveRouteFailure(credential.ID, route.UpstreamModel, time.Since(selectionStarted), DecideFailure(lastFailure))
 			egressForbidden := s.providers.RetryForbiddenAsEgress(credential.Provider) &&
 				response.StatusCode == http.StatusForbidden && !lastFailure.AccountScoped
@@ -537,7 +551,17 @@ attemptLoop:
 				}
 				goto handleResponse
 			}
-			failureHandled := s.reconcileQuotaFailure(ctx, credential, route.UpstreamModel, lease.QuotaMode, lastFailure, response.StatusCode, retryAfter)
+			failureHandled := false
+			if lastFailure.ModelUnavailable {
+				s.selector.MarkInferenceUnavailable(ctx, credential.ID, route.UpstreamModel, response.StatusCode, lastFailure.AuditCode())
+				failureHandled = true
+			} else if lastFailure.PermanentAccountDenial {
+				s.selector.MarkInferenceDenied(ctx, credential.ID, route.UpstreamModel, response.StatusCode, lastFailure.AuditCode())
+				failureHandled = true
+			}
+			if !failureHandled {
+				failureHandled = s.reconcileQuotaFailure(ctx, credential, route.UpstreamModel, lease.QuotaMode, lastFailure, response.StatusCode, retryAfter)
+			}
 			if !failureHandled {
 				if used, limit, exhausted := parseFreeQuotaExhaustion(body); exhausted {
 					s.selector.MarkFreeQuotaExhausted(ctx, credential, used, limit)
@@ -556,11 +580,7 @@ attemptLoop:
 					failureHandled = s.selector.MarkPaidQuotaExhausted(ctx, credential, lease.Billing)
 				}
 			}
-			if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
-				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
-				s.selector.MarkQuotaStateChanged(credential.Provider)
-				failureHandled = true
-			} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
+			if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
 				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
 				s.selector.MarkQuotaStateChanged(credential.Provider)
 				failureHandled = true
@@ -576,16 +596,13 @@ attemptLoop:
 			lease.Release()
 			lastErr = fmt.Errorf("上游返回 %d", response.StatusCode)
 			s.logger.Warn("upstream_request_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "status", response.StatusCode, "upstream_code", lastFailure.UpstreamCode, "account_scoped", lastFailure.AccountScoped)
-			if !lastFailure.AccountScoped {
+			if !lastFailure.AccountScoped && !lastFailure.ModelUnavailable {
 				failureFingerprints[lastFailure.Fingerprint]++
 				if failureFingerprints[lastFailure.Fingerprint] >= 2 {
 					break
 				}
 			}
 			continue
-		}
-		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			s.selector.markSuccess(ctx, credential, false)
 		}
 		routingTrace.recordAttempt(attempt+1, credential.ID, "response", response.StatusCode, "", "return_response", FailureScopeUnknown, time.Since(selectionStarted), false, false)
 		accountID := credential.ID
@@ -595,6 +612,13 @@ attemptLoop:
 				lease.Release()
 				persistCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
 				defer cancel()
+				succeeded := response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == ""
+				if succeeded {
+					s.selector.markSuccess(persistCtx, credential, false)
+					s.selector.ObserveRouteResult(accountID, route.UpstreamModel, time.Since(startedAt), true)
+				} else {
+					s.selector.ObserveRouteResult(accountID, route.UpstreamModel, time.Since(startedAt), false)
+				}
 				now := time.Now().UTC()
 				record := auditBase
 				record.AccountID = &accountID
@@ -653,7 +677,7 @@ attemptLoop:
 					_ = s.responses.Save(persistCtx, inferencedomain.ResponseOwnership{ResponseID: responseID, AccountID: accountID, ClientKeyID: input.ClientKey.ID, Provider: route.Provider, ExpiresAt: now.Add(responseOwnershipTTL), CreatedAt: now, UpdatedAt: now})
 				}
 				outcome := "failed"
-				if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" {
+				if succeeded {
 					outcome = "success"
 				}
 				timing.finish(s.logger, outcome)
@@ -767,15 +791,24 @@ func imageProtocolFailure(err error, credential accountdomain.Credential) (*Upst
 	}
 	message := "Grok Web Lite 响应结束但没有返回可用的最终图片"
 	status := http.StatusBadGateway
+	if code == "image_subscription_required" {
+		return &UpstreamFailure{
+			HTTPStatus: http.StatusBadGateway, Code: code,
+			PublicMessage: "当前 Grok 账号没有 Imagine 生图权限，请导入或绑定有 Imagine 生图权限的账号",
+			AccountID:     credential.ID, AccountName: credential.Name,
+			Scope: FailureScopeAccount, AccountScoped: true, PermanentAccountDenial: true, Cause: err,
+		}, true
+	}
 	if code == "image_moderated" {
 		message = "图片被 Grok 内容策略拦截，请调整提示词后重试"
 		status = http.StatusBadRequest
 	}
-	return &UpstreamFailure{
+	failure := &UpstreamFailure{
 		HTTPStatus: status, Code: code,
 		PublicMessage: message,
 		AccountID:     credential.ID, AccountName: credential.Name, Scope: FailureScopeProtocol, Cause: err,
-	}, true
+	}
+	return failure, true
 }
 
 type ImageEditInput struct {
@@ -900,10 +933,7 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			s.cancelBillingReservation(eventID)
 		}
 	}()
-	attempts := int(s.maxAttempts.Load())
-	if attempts <= 0 {
-		attempts = 3
-	}
+	attempts := s.imageAttempts()
 	excluded := make(map[uint64]bool)
 	var lease *accountLease
 	var credential accountdomain.Credential
@@ -955,12 +985,6 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 		s.logger.Info("image_attempt_started", "request_id", requestID, "attempt", attempt+1, "route_id", route.ID, "egress_group_id", route.EgressGroupID, "account_id", credential.ID)
 		executionStarted := time.Now()
 		response, err = execute(ctx, adapter, credential, route.UpstreamModel)
-		_, protocolError := provider.AsMediaProtocolError(err)
-		if !provider.IsMediaPostProcessingError(err) && !protocolError {
-			if err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-				s.selector.ObserveRouteResult(credential.ID, route.UpstreamModel, time.Since(executionStarted), true)
-			}
-		}
 		if err != nil {
 			s.logger.Error("image_upstream_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", credential.ID, "error", err)
 			var egressUnavailable *infraegress.UnavailableError
@@ -986,15 +1010,21 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 				lastErr = err
 				failedCredential := credential
 				lastCredentialFailure = &failedCredential
-				if lease.QuotaMode != "" {
+				accountStateUpdated := protocolFailure.PermanentAccountDenial
+				if accountStateUpdated {
+					s.selector.MarkInferenceDenied(ctx, credential.ID, route.UpstreamModel, http.StatusForbidden, protocolFailure.Code)
+				}
+				if lease.QuotaMode != "" && !accountStateUpdated {
 					s.accounts.QueueQuotaRefresh(credential.ID, lease.QuotaMode)
 				}
 				lease.Release()
 				action := "fail_request"
 				if rawProtocolFailure.Retryable && attempt+1 < attempts {
 					action = "rotate_account"
+				} else if accountStateUpdated {
+					action = "update_account_state"
 				}
-				routingTrace.recordAttempt(attempt+1, credential.ID, "protocol", protocolFailure.HTTPStatus, protocolFailure.Code, action, FailureScopeProtocol, time.Since(executionStarted), false, false)
+				routingTrace.recordAttempt(attempt+1, credential.ID, "protocol", protocolFailure.HTTPStatus, protocolFailure.Code, action, protocolFailure.Scope, time.Since(executionStarted), protocolFailure.AccountScoped, accountStateUpdated)
 				s.logger.Warn("image_protocol_failure", "request_id", requestID, "attempt", attempt+1, "account_id", credential.ID, "code", protocolFailure.Code, "retryable", rawProtocolFailure.Retryable)
 				if rawProtocolFailure.Retryable && attempt+1 < attempts {
 					continue
@@ -1037,11 +1067,27 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			}
 			continue
 		}
-		if isRetryableMediaStatus(response.StatusCode) {
+		var preclassifiedFailure *UpstreamFailure
+		var preloadedBody []byte
+		modelUnavailableResponse := isPossibleModelUnavailableStatus(response.StatusCode)
+		if modelUnavailableResponse {
+			preloadedBody, _ = readRetryableBody(response.Body)
+			preclassifiedFailure = newHTTPUpstreamFailure(response.StatusCode, preloadedBody, credential.ID, credential.Name)
+			modelUnavailableResponse = preclassifiedFailure.ModelUnavailable
+			if !modelUnavailableResponse {
+				response.Body = io.NopCloser(bytes.NewReader(preloadedBody))
+			}
+		}
+		if isRetryableMediaStatus(response.StatusCode) || modelUnavailableResponse {
 			status := response.StatusCode
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-			body, bodyErr := readRetryableBody(response.Body)
-			failure := newHTTPUpstreamFailure(status, body, credential.ID, credential.Name)
+			var bodyErr error
+			failure := preclassifiedFailure
+			if failure == nil {
+				body, err := readRetryableBody(response.Body)
+				bodyErr = err
+				failure = newHTTPUpstreamFailure(status, body, credential.ID, credential.Name)
+			}
 			s.selector.ObserveRouteFailure(credential.ID, route.UpstreamModel, time.Since(executionStarted), DecideFailure(failure))
 			if bodyErr != nil {
 				failure.Cause = bodyErr
@@ -1049,7 +1095,17 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			lastErr = failure
 			failedCredential := credential
 			lastCredentialFailure = &failedCredential
-			failureHandled := s.reconcileQuotaFailure(ctx, credential, route.UpstreamModel, lease.QuotaMode, failure, status, retryAfter)
+			failureHandled := false
+			if failure.ModelUnavailable {
+				s.selector.MarkInferenceUnavailable(ctx, credential.ID, route.UpstreamModel, status, failure.AuditCode())
+				failureHandled = true
+			} else if failure.PermanentAccountDenial {
+				s.selector.MarkInferenceDenied(ctx, credential.ID, route.UpstreamModel, status, failure.AuditCode())
+				failureHandled = true
+			}
+			if !failureHandled {
+				failureHandled = s.reconcileQuotaFailure(ctx, credential, route.UpstreamModel, lease.QuotaMode, failure, status, retryAfter)
+			}
 			if failure.AccountScoped && !failureHandled {
 				s.selector.MarkFailure(ctx, credential, status, retryAfter)
 			}
@@ -1094,8 +1150,10 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 			record.DurationMS, record.CreatedAt = time.Since(startedAt).Milliseconds(), time.Now().UTC()
 			applyAuditEgress(&record, egressTrace, route.Provider)
 			applyRoutingTrace(&record, routingTrace)
-			if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" {
+			succeeded := response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == ""
+			if succeeded {
 				s.selector.markSuccess(persistCtx, credential, false)
+				s.selector.ObserveRouteResult(accountID, route.UpstreamModel, time.Since(startedAt), true)
 				record.MediaOutputImages = int64(max(0, requestedCount))
 				var pricing audit.PricingResult
 				var priced bool
@@ -1110,6 +1168,9 @@ func (s *Service) executeImage(ctx context.Context, requestID string, key client
 					record.PricingModel = pricing.Model
 					record.PricingVersion = audit.OfficialPricingAsOf
 				}
+			}
+			if !succeeded {
+				s.selector.ObserveRouteResult(accountID, route.UpstreamModel, time.Since(startedAt), false)
 			}
 			if err := s.audits.Create(persistCtx, record); err != nil {
 				s.logger.Error("request_usage_write_failed", "event_id", record.EventID, "request_id", requestID, "error", err)
@@ -1292,6 +1353,10 @@ func (s *Service) reconcileQuotaFailure(ctx context.Context, credential accountd
 
 func isRetryable(status int) bool {
 	return status == 402 || status == 403 || status == 429 || status >= 500
+}
+
+func isPossibleModelUnavailableStatus(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusUnprocessableEntity
 }
 
 func isRetryableMediaStatus(status int) bool {

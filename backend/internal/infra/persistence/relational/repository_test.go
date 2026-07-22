@@ -13,6 +13,7 @@ import (
 	auditdomain "github.com/owen891/grok2api/backend/internal/domain/audit"
 	clientkeydomain "github.com/owen891/grok2api/backend/internal/domain/clientkey"
 	inferencedomain "github.com/owen891/grok2api/backend/internal/domain/inference"
+	mediadomain "github.com/owen891/grok2api/backend/internal/domain/media"
 	"github.com/owen891/grok2api/backend/internal/repository"
 )
 
@@ -267,6 +268,10 @@ func TestAccountRepositorySummarizesOperationalStates(t *testing.T) {
 	}
 
 	create(account.ProviderBuild, "build-active")
+	denied := create(account.ProviderBuild, "build-model-denied")
+	if err := repo.SetInferenceHealth(ctx, denied.ID, "grok-4.5", account.InferenceHealthPermissionDenied, nil, 403, "permission_denied"); err != nil {
+		t.Fatal(err)
+	}
 	cooldown := create(account.ProviderBuild, "build-cooldown")
 	cooldownUntil := now.Add(time.Hour)
 	if err := repo.UpdateHealth(ctx, cooldown.ID, 1, &cooldownUntil, "cooldown", false); err != nil {
@@ -297,8 +302,16 @@ func TestAccountRepositorySummarizesOperationalStates(t *testing.T) {
 		byProvider[row.Provider] = row
 	}
 	build := byProvider[string(account.ProviderBuild)]
-	if build.Total != 3 || build.Available != 1 || build.Cooldown != 1 || build.Disabled != 1 {
+	if build.Total != 4 || build.Available != 1 || build.Cooldown != 1 || build.Disabled != 1 {
 		t.Fatalf("build summary = %#v", build)
+	}
+	active, total, err := repo.List(ctx, repository.AccountListQuery{Page: repository.PageQuery{Limit: 20}, Filter: repository.AccountListFilter{Provider: string(account.ProviderBuild), Status: "active", Now: now}})
+	if err != nil || total != 1 || len(active) != 1 || active[0].Name != "build-active" {
+		t.Fatalf("active build accounts total=%d values=%#v err=%v", total, active, err)
+	}
+	modelDenied, total, err := repo.List(ctx, repository.AccountListQuery{Page: repository.PageQuery{Limit: 20}, Filter: repository.AccountListFilter{Provider: string(account.ProviderBuild), Status: "modelDenied", Now: now}})
+	if err != nil || total != 1 || len(modelDenied) != 1 || modelDenied[0].InferenceHealth == nil || modelDenied[0].InferenceHealth.Status != account.InferenceHealthPermissionDenied {
+		t.Fatalf("model denied accounts total=%d values=%#v err=%v", total, modelDenied, err)
 	}
 	web := byProvider[string(account.ProviderWeb)]
 	if web.Total != 2 || web.Available != 0 || web.WaitingReset != 1 || web.ReauthRequired != 1 {
@@ -437,6 +450,150 @@ func TestForeignKeysCascadeRuntimeStateButPreserveAuditHistory(t *testing.T) {
 	}
 	if count := tableRowCount(t, database, "response_ownership"); count != 0 {
 		t.Fatalf("response ownership rows after key delete = %d", count)
+	}
+}
+
+func TestAccountRepositoryDeleteRemovesMediaJobs(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDatabase(t)
+	accounts := NewAccountRepository(database)
+	jobs := NewMediaJobRepository(database)
+
+	key := clientKeyModel{Name: "delete-media-key", Prefix: "delete-media-key", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
+	if err := database.db.WithContext(ctx).Create(&key).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	first, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider:             account.ProviderWeb,
+		AuthType:             account.AuthTypeSSO,
+		WebTier:              account.WebTierBasic,
+		Name:                 "delete-media-first",
+		SourceKey:            "delete-media-first",
+		EncryptedAccessToken: testEncryptedToken,
+		AuthStatus:           account.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider:             account.ProviderWeb,
+		AuthType:             account.AuthTypeSSO,
+		WebTier:              account.WebTierBasic,
+		Name:                 "delete-media-second",
+		SourceKey:            "delete-media-second",
+		EncryptedAccessToken: testEncryptedToken,
+		AuthStatus:           account.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
+	for _, job := range []struct {
+		id        string
+		accountID uint64
+	}{
+		{id: "delete_media_job_1", accountID: first.ID},
+		{id: "delete_media_job_2", accountID: first.ID},
+		{id: "delete_media_job_3", accountID: second.ID},
+	} {
+		if err := jobs.CreateMediaJob(ctx, testMediaJob(job.id, job.accountID, key.ID, mediadomain.StatusCompleted, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if deleted, err := accounts.DeleteMany(ctx, []uint64{first.ID, second.ID}); err != nil || deleted != 2 {
+		t.Fatalf("DeleteMany deleted=%d err=%v", deleted, err)
+	}
+	if count := tableRowCount(t, database, "media_jobs"); count != 0 {
+		t.Fatalf("media jobs after batch delete = %d", count)
+	}
+	if count := tableRowCount(t, database, "provider_accounts"); count != 0 {
+		t.Fatalf("accounts after batch delete = %d", count)
+	}
+
+	solo, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider:             account.ProviderWeb,
+		AuthType:             account.AuthTypeSSO,
+		WebTier:              account.WebTierBasic,
+		Name:                 "delete-media-solo",
+		SourceKey:            "delete-media-solo",
+		EncryptedAccessToken: testEncryptedToken,
+		AuthStatus:           account.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.CreateMediaJob(ctx, testMediaJob("delete_media_job_solo", solo.ID, key.ID, mediadomain.StatusCompleted, now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.Delete(ctx, solo.ID); err != nil {
+		t.Fatal(err)
+	}
+	if count := tableRowCount(t, database, "media_jobs"); count != 0 {
+		t.Fatalf("media jobs after single delete = %d", count)
+	}
+}
+
+func TestAccountRepositoryAutoCleanSkipsActiveMediaJobs(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDatabase(t)
+	accounts := NewAccountRepository(database)
+	jobs := NewMediaJobRepository(database)
+
+	key := clientKeyModel{Name: "auto-clean-media-key", Prefix: "auto-clean-media-key", SecretHash: testSecretHash, EncryptedSecret: testEncryptedToken, Enabled: true, RPMLimit: 60, MaxConcurrent: 4}
+	if err := database.db.WithContext(ctx).Create(&key).Error; err != nil {
+		t.Fatal(err)
+	}
+	value, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierBasic,
+		Name: "auto-clean-media", SourceKey: "auto-clean-media", EncryptedAccessToken: testEncryptedToken,
+		Enabled: true, AuthStatus: account.AuthStatusReauthRequired,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	if err := database.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", value.ID).Update("updated_at", old).Error; err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().UTC().Add(-time.Hour)
+	queued := testMediaJob("auto_clean_queued", value.ID, key.ID, mediadomain.StatusQueued, old)
+	if err := jobs.CreateMediaJob(ctx, queued); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := accounts.ListAutoCleanReauthIDs(ctx, cutoff, false, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("queued media job allowed cleanup: %#v", ids)
+	}
+	if err := database.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", queued.ID).Update("status", string(mediadomain.StatusCompleted)).Error; err != nil {
+		t.Fatal(err)
+	}
+	inProgress := testMediaJob("auto_clean_in_progress", value.ID, key.ID, mediadomain.StatusInProgress, old)
+	if err := jobs.CreateMediaJob(ctx, inProgress); err != nil {
+		t.Fatal(err)
+	}
+	ids, err = accounts.ListAutoCleanReauthIDs(ctx, cutoff, false, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("in-progress media job allowed cleanup: %#v", ids)
+	}
+	if err := database.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", inProgress.ID).Update("status", string(mediadomain.StatusCompleted)).Error; err != nil {
+		t.Fatal(err)
+	}
+	ids, err = accounts.ListAutoCleanReauthIDs(ctx, cutoff, false, 0, 100)
+	if err != nil || len(ids) != 1 || ids[0] != value.ID {
+		t.Fatalf("completed media jobs should allow cleanup: ids=%#v err=%v", ids, err)
+	}
+	deleted, err := accounts.DeleteAutoCleanReauthIDs(ctx, cutoff, false, ids)
+	if err != nil || len(deleted) != 1 || deleted[0] != value.ID {
+		t.Fatalf("auto-clean delete = %#v, %v", deleted, err)
 	}
 }
 

@@ -25,7 +25,11 @@ from urllib.parse import parse_qs, quote, urlparse, urlunparse
 
 MAX_REQUEST_BYTES = 2 << 20
 MAX_RESPONSE_BYTES = 20 << 20
+# Accept usable low-resolution images, but never treat Grok's blurred
+# subscription preview as a completed image.
+MIN_USABLE_IMAGE_DIMENSION = 256
 MIN_FINAL_IMAGE_DIMENSION = 768
+TRUSTED_IMAGE_ASSET_HOSTS = {"assets.grok.com", "imagine-public.x.ai", "imgen.x.ai"}
 ALLOWED_CF_COOKIES = {"cf_clearance", "__cf_bm", "_cfuvid"}
 CHALLENGE_MARKERS = (
     "just a moment",
@@ -34,6 +38,19 @@ CHALLENGE_MARKERS = (
     "checking your browser",
     "enable javascript and cookies",
 )
+DRIVER_INITIALIZATION_LOCK = threading.Lock()
+
+
+class WorkerBusyError(TimeoutError):
+    """The caller's queue budget expired before Chromium became available."""
+
+
+class ImageGenerationIncompleteError(RuntimeError):
+    """Grok completed the UI flow without exposing a usable image asset."""
+
+
+class ImageSubscriptionRequiredError(RuntimeError):
+    """The selected Grok account cannot use the Imagine generation UI."""
 
 
 def session_fingerprint(value: dict) -> str:
@@ -46,8 +63,23 @@ def session_fingerprint(value: dict) -> str:
 
 
 def classify_worker_error(error: Exception) -> str:
+    if isinstance(error, ImageSubscriptionRequiredError):
+        return "image_subscription_required"
+    if isinstance(error, ImageGenerationIncompleteError):
+        return "image_generation_incomplete"
+    if isinstance(error, WorkerBusyError):
+        return "worker_busy"
     message = str(error).lower()
-    if "err_proxy_connection_failed" in message or "proxy connection" in message:
+    if any(
+        marker in message
+        for marker in (
+            "err_proxy_connection_failed",
+            "err_tunnel_connection_failed",
+            "err_connection_closed",
+            "err_connection_reset",
+            "proxy connection",
+        )
+    ):
         return "proxy_unavailable"
     if "cloudflare challenge" in message or any(marker in message for marker in CHALLENGE_MARKERS):
         return "anti_bot"
@@ -62,6 +94,14 @@ def is_antibot_result(result: dict) -> bool:
     except Exception:
         return False
     return "request rejected by anti-bot" in body or "cloudflare" in body or any(marker in body for marker in CHALLENGE_MARKERS)
+
+
+def is_generated_image_source(source: str) -> bool:
+    value = str(source or "").strip()
+    if value.startswith("blob:") or value.startswith("data:image/"):
+        return True
+    parsed = urlparse(value)
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() in TRUSTED_IMAGE_ASSET_HOSTS
 
 
 def parse_cookie_header(value: str) -> dict[str, str]:
@@ -86,8 +126,11 @@ def validate_request(
         raise ValueError("request must be an object")
     base_url = str(value.get("baseURL", "")).rstrip("/")
     endpoint = str(value.get("endpoint", ""))
-    parsed_base = urlparse(base_url)
-    parsed_endpoint = urlparse(endpoint)
+    try:
+        parsed_base = urlparse(base_url)
+        parsed_endpoint = urlparse(endpoint)
+    except ValueError as exc:
+        raise ValueError("baseURL or endpoint is invalid") from exc
     if parsed_base.scheme != "https" or parsed_base.hostname != "grok.com":
         raise ValueError("baseURL must be https://grok.com")
     if allowed_paths is None:
@@ -111,13 +154,26 @@ def validate_request(
         raise ValueError("payload must be an object")
     if not str(value.get("ssoToken", "")).strip():
         raise ValueError("ssoToken is required")
-    timeout = int(value.get("timeoutSeconds", 180))
+    try:
+        timeout = int(value.get("timeoutSeconds", 180))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("timeoutSeconds is invalid") from exc
     if timeout < 5 or timeout > 1800:
         raise ValueError("timeoutSeconds is invalid")
     proxy_url = str(value.get("proxyURL", "")).strip()
     if proxy_url:
-        parsed_proxy = urlparse(proxy_url)
-        if parsed_proxy.scheme.lower() not in {"http", "https", "socks4", "socks4a", "socks5", "socks5h"} or not parsed_proxy.hostname:
+        try:
+            parsed_proxy = urlparse(proxy_url)
+            proxy_port = parsed_proxy.port
+        except ValueError as exc:
+            raise ValueError("proxyURL is invalid") from exc
+        if (
+            parsed_proxy.scheme.lower()
+            not in {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+            or not parsed_proxy.hostname
+            or proxy_port is not None
+            and not 1 <= proxy_port <= 65535
+        ):
             raise ValueError("proxyURL is invalid")
     value["baseURL"] = base_url
     value["timeoutSeconds"] = timeout
@@ -187,6 +243,52 @@ class BrowserSession:
         self.private_chat_enabled = False
         self.composer_conversations.clear()
 
+    def _acquire(self, value: dict) -> float:
+        try:
+            timeout = float(value.get("timeoutSeconds", 180))
+        except (TypeError, ValueError):
+            timeout = 180.0
+        deadline = time.monotonic() + max(0.0, timeout)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self.lock.acquire(timeout=remaining):
+            raise WorkerBusyError("browser worker queue wait timed out")
+        if time.monotonic() >= deadline:
+            self.lock.release()
+            raise WorkerBusyError("browser worker request budget expired while waiting for Chromium")
+        return deadline
+
+    @staticmethod
+    def _request_deadline(value: dict) -> float:
+        deadline = value.get("_deadline")
+        if isinstance(deadline, (int, float)):
+            return float(deadline)
+        try:
+            timeout = float(value.get("timeoutSeconds", 180))
+        except (TypeError, ValueError):
+            timeout = 180.0
+        return time.monotonic() + max(0.0, timeout)
+
+    @staticmethod
+    def _remaining_seconds(value: dict, maximum: float | None = None) -> float:
+        remaining = BrowserSession._request_deadline(value) - time.monotonic()
+        if remaining <= 0.05:
+            raise WorkerBusyError("browser worker request budget expired")
+        if maximum is not None:
+            remaining = min(remaining, float(maximum))
+        return remaining
+
+    @staticmethod
+    def _sleep_with_deadline(seconds: float, deadline: float | None = None) -> None:
+        if deadline is None:
+            time.sleep(seconds)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.05:
+            raise WorkerBusyError("browser worker request budget expired")
+        time.sleep(min(seconds, remaining))
+        if time.monotonic() >= deadline:
+            raise WorkerBusyError("browser worker request budget expired")
+
     def _ensure_driver(self, value: dict):
         proxy_url = str(value.get("proxyURL", "")).strip()
         user_agent = str(value.get("userAgent", "")).strip()
@@ -198,9 +300,26 @@ class BrowserSession:
             sys.path.insert(0, "/app")
         import utils  # FlareSolverr image runtime
 
-        utils.USER_AGENT = user_agent or None
-        self.driver = utils.get_webdriver(proxy_config(proxy_url))
-        self.driver.set_page_load_timeout(90)
+        driver = None
+        try:
+            # FlareSolverr stores the requested UA in a process-global. Keep
+            # the two independent sessions from observing each other's value.
+            with DRIVER_INITIALIZATION_LOCK:
+                previous_user_agent = utils.USER_AGENT
+                try:
+                    utils.USER_AGENT = user_agent or None
+                    driver = utils.get_webdriver(proxy_config(proxy_url))
+                finally:
+                    utils.USER_AGENT = previous_user_agent
+            driver.set_page_load_timeout(self._remaining_seconds(value, 90))
+        except Exception:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            raise
+        self.driver = driver
         self.fingerprint = fingerprint
         logging.info("browser session started (proxy=%s)", bool(proxy_url))
         return self.driver
@@ -229,6 +348,8 @@ class BrowserSession:
                 pass
 
     def _prepare_page(self, driver, value: dict) -> None:
+        deadline = self._request_deadline(value)
+        driver.set_page_load_timeout(self._remaining_seconds(value, 90))
         driver.execute_cdp_cmd("Network.enable", {})
         if not self.cloudflare_seeded:
             for name, cookie_value in parse_cookie_header(str(value.get("cloudflareCookies", ""))).items():
@@ -248,13 +369,15 @@ class BrowserSession:
 
         should_navigate = account_changed or not str(driver.current_url).startswith(value["baseURL"]) or time.monotonic() - self.last_navigation > 600
         if should_navigate:
+            self._remaining_seconds(value)
+            driver.set_page_load_timeout(self._remaining_seconds(value, 90))
             driver.get(value["baseURL"] + "/")
             self.last_navigation = time.monotonic()
-            self._wait_for_challenge(driver, 45)
-            self._dismiss_tos_gate(driver)
+            self._wait_for_challenge(driver, 45, deadline)
+            self._dismiss_tos_gate(driver, deadline)
 
     @staticmethod
-    def _dismiss_tos_gate(driver) -> None:
+    def _dismiss_tos_gate(driver, deadline: float | None = None) -> None:
         """Acknowledge Grok's per-account TOS gate before API work starts.
 
         New SSO sessions are redirected to /tos-gate.  Leaving that page in
@@ -268,16 +391,21 @@ class BrowserSession:
         # returned, while the React shell hydrates.  Observe that hand-off
         # before deciding there is no gate.
         observe_until = time.monotonic() + 5
-        deadline = time.monotonic() + 20
+        gate_deadline = time.monotonic() + 20
+        if deadline is not None:
+            observe_until = min(observe_until, deadline)
+            gate_deadline = min(gate_deadline, deadline)
         clicked = False
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise WorkerBusyError("browser worker request budget expired")
             on_gate = "/tos-gate" in str(driver.current_url or "")
             if not on_gate:
                 if clicked:
                     return
                 if time.monotonic() >= observe_until:
                     return
-                time.sleep(0.2)
+                BrowserSession._sleep_with_deadline(0.2, deadline)
                 continue
             buttons = driver.find_elements(
                 By.XPATH,
@@ -298,10 +426,10 @@ class BrowserSession:
                     continue
             if not on_gate:
                 return
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= gate_deadline:
                 state = "after acknowledgement" if clicked else "without acknowledgement control"
                 raise RuntimeError(f"Grok TOS gate did not clear {state}")
-            time.sleep(0.25)
+            BrowserSession._sleep_with_deadline(0.25, deadline)
 
     @staticmethod
     def _challenge_visible(driver) -> bool:
@@ -309,11 +437,15 @@ class BrowserSession:
         source = str(driver.page_source or "")[:500_000].lower()
         return any(marker in title or marker in source for marker in CHALLENGE_MARKERS)
 
-    def _wait_for_challenge(self, driver, timeout: int) -> None:
+    def _wait_for_challenge(self, driver, timeout: int, request_deadline: float | None = None) -> None:
         deadline = time.monotonic() + timeout
+        if request_deadline is not None:
+            deadline = min(deadline, request_deadline)
         clicked_at = 0.0
         while self._challenge_visible(driver):
             if time.monotonic() >= deadline:
+                if request_deadline is not None and time.monotonic() >= request_deadline:
+                    raise WorkerBusyError("browser worker request budget expired")
                 raise RuntimeError("Cloudflare challenge did not clear in Chromium")
             if time.monotonic() - clicked_at >= 6:
                 try:
@@ -323,11 +455,14 @@ class BrowserSession:
                 except Exception:
                     pass
                 clicked_at = time.monotonic()
-            time.sleep(1)
+            self._sleep_with_deadline(
+                min(1.0, max(0.0, deadline - time.monotonic())),
+                request_deadline,
+            )
 
     @staticmethod
     def _fetch(driver, value: dict) -> dict:
-        driver.set_script_timeout(value["timeoutSeconds"] + 15)
+        driver.set_script_timeout(BrowserSession._remaining_seconds(value))
         result = driver.execute_async_script(
             """
             const endpoint = arguments[0];
@@ -385,6 +520,7 @@ class BrowserSession:
 
     def _start_composer_chat(self, driver, value: dict) -> None:
         """Open the right page for a native Grok composer send."""
+        deadline = self._request_deadline(value)
         endpoint = urlparse(str(value["endpoint"]))
         parts = [part for part in endpoint.path.split("/") if part]
         # /rest/app-chat/conversations/new starts a clean, temporary chat.
@@ -398,10 +534,11 @@ class BrowserSession:
             # click.
             root = str(value["baseURL"]).rstrip("/") + "/"
             if str(driver.current_url or "") != root:
+                driver.set_page_load_timeout(self._remaining_seconds(value, 90))
                 driver.get(root)
-                self._wait_for_challenge(driver, 45)
-            self._dismiss_tos_gate(driver)
-            time.sleep(0.6)
+                self._wait_for_challenge(driver, 45, deadline)
+            self._dismiss_tos_gate(driver, deadline)
+            self._sleep_with_deadline(0.6, deadline)
             return
         # A response resource names the upstream conversation directly.  Grok's
         # normal conversation route preserves the visible context before typing.
@@ -417,12 +554,13 @@ class BrowserSession:
             if response_id:
                 target += "?rid=" + quote(response_id, safe="")
             if str(driver.current_url or "") != target:
+                driver.set_page_load_timeout(self._remaining_seconds(value, 90))
                 driver.get(target)
-                self._wait_for_challenge(driver, 45)
-                self._dismiss_tos_gate(driver)
-                time.sleep(0.6)
+                self._wait_for_challenge(driver, 45, deadline)
+                self._dismiss_tos_gate(driver, deadline)
+                self._sleep_with_deadline(0.6, deadline)
 
-    def _select_composer_model(self, driver, mode: str) -> None:
+    def _select_composer_model(self, driver, mode: str, deadline: float | None = None) -> None:
         mode = str(mode or "").strip().lower()
         if mode not in {"fast", "auto", "expert", "heavy"}:
             return
@@ -433,7 +571,7 @@ class BrowserSession:
             if str(selector.text or "").strip().split("\n", 1)[0].strip().lower() == mode:
                 return
             selector.click()
-            time.sleep(0.35)
+            self._sleep_with_deadline(0.35, deadline)
             from selenium.webdriver.common.by import By
 
             for item in driver.find_elements(By.CSS_SELECTOR, "[role='menuitem'], [role='menuitemradio'], [role='option'], button, a, li, div, span"):
@@ -444,16 +582,20 @@ class BrowserSession:
                     if len(text) > 80 or text.split("\n", 1)[0].strip().lower() != mode:
                         continue
                     item.click()
-                    time.sleep(0.35)
+                    self._sleep_with_deadline(0.35, deadline)
                     return
+                except WorkerBusyError:
+                    raise
                 except Exception:
                     continue
             # Close a menu when this account cannot select the requested tier.
             selector.click()
+        except WorkerBusyError:
+            raise
         except Exception:
             return
 
-    def _enable_private_composer_chat(self, driver) -> None:
+    def _enable_private_composer_chat(self, driver, deadline: float | None = None) -> None:
         if self.private_chat_enabled:
             return
         control = self._first_visible(driver, "[aria-label*='Switch to Private Chat' i], [aria-label*='Private Chat' i]")
@@ -462,7 +604,9 @@ class BrowserSession:
         try:
             control.click()
             self.private_chat_enabled = True
-            time.sleep(0.25)
+            self._sleep_with_deadline(0.25, deadline)
+        except WorkerBusyError:
+            raise
         except Exception:
             return
 
@@ -510,10 +654,16 @@ class BrowserSession:
                         continue
                     last_intercepted = error
                     continue
-            time.sleep(0.1)
+            BrowserSession._sleep_with_deadline(0.1, deadline)
+        BrowserSession._assert_deadline(deadline)
         if last_intercepted is not None:
             raise RuntimeError("Grok composer submit control remained blocked") from last_intercepted
         raise RuntimeError("Grok composer submit control was not clickable")
+
+    @staticmethod
+    def _assert_deadline(deadline: float | None) -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise WorkerBusyError("browser worker request budget expired")
 
     @staticmethod
     def _synthetic_composer_response(conversation_id: str, parent_id: str, message: str) -> bytes:
@@ -557,24 +707,150 @@ class BrowserSession:
     def _image_sources(driver) -> list[dict]:
         values = driver.execute_script(
             """
-            return Array.from(document.querySelectorAll('img[alt="Generated image"]')).map((image) => ({
-              src: image.currentSrc || image.src || '',
-              complete: Boolean(image.complete),
-              width: Number(image.naturalWidth || 0),
-              height: Number(image.naturalHeight || 0)
-            }));
+            const resolveAssetURL = (value) => {
+              const source = String(value || '').trim();
+              if (!source) return '';
+              const trustedHosts = new Set(['assets.grok.com', 'imagine-public.x.ai', 'imgen.x.ai']);
+              if (source.startsWith('blob:') || source.startsWith('data:image/')) return source;
+              try {
+                const parsed = new URL(source, window.location.href);
+                const original = parsed.searchParams.get('url');
+                if (original) {
+                  const originalURL = new URL(original, window.location.href);
+                  if (originalURL.protocol === 'https:' && trustedHosts.has(originalURL.hostname.toLowerCase())) {
+                    return originalURL.href;
+                  }
+                }
+                if (parsed.protocol === 'https:' && trustedHosts.has(parsed.hostname.toLowerCase())) {
+                  return parsed.href;
+                }
+              } catch (_) {}
+              return '';
+            };
+            const bestSource = (image) => {
+              const anchor = image.closest('a[href]');
+              const candidates = [
+                anchor && anchor.href,
+                image.getAttribute('data-original'),
+                image.getAttribute('data-full-src'),
+                image.getAttribute('data-image-url'),
+                image.getAttribute('data-src'),
+                image.currentSrc,
+                image.src
+              ];
+              const srcset = String(image.srcset || '').split(',').map((entry) => entry.trim().split(/\\s+/, 1)[0]);
+              candidates.push(...srcset.reverse());
+              for (const attribute of Array.from(image.attributes)) {
+                if (/(src|url|image)/i.test(attribute.name)) candidates.push(attribute.value);
+              }
+              for (const candidate of candidates) {
+                const resolved = resolveAssetURL(candidate);
+                if (resolved) return resolved;
+              }
+              return '';
+            };
+            const selector = [
+              'img[alt="Generated image"]',
+              'img[src*="imagine-public"]',
+              'img[src*="assets.grok.com"]',
+              'img[src*="imgen.x.ai"]',
+              '[data-testid*="generated"] img',
+              '[data-testid*="image"] img'
+            ].join(',');
+            const images = Array.from(document.querySelectorAll(selector)).map((image) => {
+              return {
+                src: bestSource(image),
+                complete: Boolean(image.complete),
+                width: Number(image.naturalWidth || 0),
+                height: Number(image.naturalHeight || 0)
+              };
+            });
+            const known = new Set(images.map((item) => item.src).filter(Boolean));
+            for (const entry of performance.getEntriesByType('resource')) {
+              const source = resolveAssetURL(entry.name);
+              if (!source || known.has(source) || !/(\\/generated\\/|\\/imagine-public\\/images\\/)/i.test(source)) continue;
+              known.add(source);
+              images.push({src: source, complete: true, width: 0, height: 0, resource: true});
+            }
+            return images;
             """
         )
         return values if isinstance(values, list) else []
 
     @staticmethod
-    def _materialize_image_url(driver, source: str) -> str:
+    def _new_generated_image(
+        images: list[dict], before_sources: set[str], before_count: int
+    ) -> tuple[str, bool]:
+        """Return the latest loaded generated image and whether it is full-size."""
+        for index in range(len(images) - 1, -1, -1):
+            item = images[index]
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("src", "")).strip()
+            try:
+                width = int(item.get("width", 0))
+                height = int(item.get("height", 0))
+            except (TypeError, ValueError):
+                continue
+            if (
+                not source
+                or not is_generated_image_source(source)
+                or not item.get("complete")
+                or min(width, height) < MIN_USABLE_IMAGE_DIMENSION
+                or (index < before_count and source in before_sources)
+            ):
+                continue
+            is_final = min(width, height) >= MIN_FINAL_IMAGE_DIMENSION
+            return source, is_final
+        return "", False
+
+    @staticmethod
+    def _subscription_preview_visible(driver) -> bool:
+        current_url = str(driver.current_url or "").lower()
+        if "#subscribe" in current_url or "/subscribe" in current_url:
+            return True
+        return bool(
+            driver.execute_script(
+                r"""
+                const selector = [
+                  'img[alt="Generated image"]',
+                  'img[src*="imagine-public"]',
+                  'img[src*="assets.grok.com"]',
+                  'img[src*="imgen.x.ai"]',
+                  '[data-testid*="generated"] img',
+                  '[data-testid*="image"] img'
+                ].join(',');
+                const subscriptionHref = /(?:#|\/)subscribe(?:$|[/?#])/i;
+                const hasBlur = (node) => {
+                  const style = getComputedStyle(node);
+                  const filter = `${style.filter || ''} ${style.backdropFilter || ''}`;
+                  return /blur\((?!0(?:px|rem|em)?\))/i.test(filter);
+                };
+                for (const image of document.querySelectorAll(selector)) {
+                  const link = image.closest('a[href]');
+                  if (link && subscriptionHref.test(String(link.getAttribute('href') || ''))) return true;
+                  let node = image;
+                  for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+                    if (hasBlur(node)) return true;
+                  }
+                }
+                return false;
+                """
+            )
+        )
+
+    @staticmethod
+    def _materialize_image_url(driver, source: str, deadline: float | None = None) -> str:
         source = str(source or "").strip()
-        if source.startswith("data:") or source.startswith("https://"):
-            return source
-        if not source.startswith("blob:"):
+        if not is_generated_image_source(source):
             raise RuntimeError("Grok Imagine returned an unsupported image URL")
-        driver.set_script_timeout(30)
+        if source.startswith("data:image/") or source.startswith("https://"):
+            return source
+        BrowserSession._assert_deadline(deadline)
+        remaining = 30.0 if deadline is None else min(30.0, deadline - time.monotonic())
+        if remaining <= 0.05:
+            raise WorkerBusyError("browser worker request budget expired")
+        driver.set_script_timeout(remaining)
         result = driver.execute_async_script(
             """
             const source = arguments[0];
@@ -595,14 +871,14 @@ class BrowserSession:
             raise RuntimeError("Grok Imagine image blob could not be materialized")
         return str(result["value"])
 
-    def _select_image_aspect_ratio(self, driver, ratio: str) -> None:
+    def _select_image_aspect_ratio(self, driver, ratio: str, deadline: float | None = None) -> None:
         control = self._first_visible(driver, "button[aria-label='Aspect Ratio'], [aria-label='Aspect Ratio']")
         if control is None:
             raise RuntimeError("Grok Imagine aspect-ratio control was not found")
         if str(control.text or "").strip().split("\n", 1)[0] == ratio:
             return
         control.click()
-        time.sleep(0.35)
+        self._sleep_with_deadline(0.35, deadline)
         from selenium.webdriver.common.by import By
 
         for item in driver.find_elements(
@@ -616,8 +892,10 @@ class BrowserSession:
                 if text != ratio:
                     continue
                 item.click()
-                time.sleep(0.35)
+                self._sleep_with_deadline(0.35, deadline)
                 break
+            except WorkerBusyError:
+                raise
             except Exception:
                 continue
         if str(control.text or "").strip().split("\n", 1)[0] != ratio:
@@ -625,6 +903,10 @@ class BrowserSession:
 
     def _composer_image_fetch(self, driver, value: dict) -> dict:
         """Generate through Grok's native Imagine UI so the app signs the request."""
+        deadline = min(
+            self._request_deadline(value),
+            time.monotonic() + min(float(value.get("timeoutSeconds", 180)), 1800.0),
+        )
         payload = value["payload"]
         message = str(payload.get("message", "")).strip()
         attachments = payload.get("fileAttachments") or payload.get("imageAttachments")
@@ -634,12 +916,17 @@ class BrowserSession:
             raise RuntimeError("Grok Imagine worker does not support attachments")
 
         target = str(value["baseURL"]).rstrip("/") + "/imagine"
+        self._assert_deadline(deadline)
+        driver.set_page_load_timeout(min(90.0, deadline - time.monotonic()))
         driver.get(target)
         self.last_navigation = time.monotonic()
-        self._wait_for_challenge(driver, 45)
-        self._dismiss_tos_gate(driver)
+        self._wait_for_challenge(driver, 45, deadline)
+        self._dismiss_tos_gate(driver, deadline)
+        if self._subscription_preview_visible(driver):
+            raise ImageSubscriptionRequiredError(
+                "Grok Imagine requires an account with image-generation access"
+            )
 
-        deadline = time.monotonic() + min(int(value["timeoutSeconds"]), 1800)
         input_box = None
         while input_box is None and time.monotonic() < deadline:
             input_box = self._first_visible(
@@ -649,11 +936,13 @@ class BrowserSession:
                 "textarea[placeholder], div[contenteditable='true'], [role='textbox']",
             )
             if input_box is None:
-                time.sleep(0.2)
+                self._sleep_with_deadline(0.2, deadline)
         if input_box is None:
+            self._assert_deadline(deadline)
             raise RuntimeError("Grok Imagine prompt input was not found")
 
-        self._select_image_aspect_ratio(driver, "1:1")
+        self._select_image_aspect_ratio(driver, "1:1", deadline)
+        driver.execute_script("if (window.performance && performance.clearResourceTimings) performance.clearResourceTimings();")
         before_images = self._image_sources(driver)
         before_sources = {str(item.get("src", "")) for item in before_images if isinstance(item, dict)}
         before_count = len(before_images)
@@ -691,38 +980,36 @@ class BrowserSession:
         self._click_composer_submit(driver, deadline)
 
         candidate = ""
+        final_resolution = False
         stable_since = 0.0
         while time.monotonic() < deadline:
+            if self._subscription_preview_visible(driver):
+                raise ImageSubscriptionRequiredError(
+                    "Grok Imagine returned a subscription preview instead of a generated image"
+                )
             images = self._image_sources(driver)
-            selected = ""
-            for index in range(len(images) - 1, -1, -1):
-                item = images[index]
-                if not isinstance(item, dict):
-                    continue
-                source = str(item.get("src", "")).strip()
-                width = int(item.get("width", 0))
-                height = int(item.get("height", 0))
-                if (
-                    not source
-                    or not item.get("complete")
-                    or min(width, height) < MIN_FINAL_IMAGE_DIMENSION
-                ):
-                    continue
-                if index >= before_count or source not in before_sources:
-                    selected = source
-                    break
+            selected, selected_is_final = self._new_generated_image(images, before_sources, before_count)
             if selected:
                 if selected != candidate:
                     candidate = selected
+                    final_resolution = selected_is_final
                     stable_since = time.monotonic()
                 elif time.monotonic() - stable_since >= 2.0:
                     break
-            time.sleep(0.25)
+            self._sleep_with_deadline(0.25, deadline)
         if not candidate:
-            raise RuntimeError("Grok Imagine did not return a final-resolution generated image")
+            raise ImageGenerationIncompleteError("Grok Imagine did not expose a usable generated image")
+        if self._subscription_preview_visible(driver):
+            raise ImageSubscriptionRequiredError(
+                "Grok Imagine returned a subscription preview instead of a generated image"
+            )
 
-        image_url = self._materialize_image_url(driver, candidate)
-        logging.info("Grok Imagine final image captured (source=%s)", image_url.split(":", 1)[0])
+        image_url = self._materialize_image_url(driver, candidate, deadline)
+        logging.info(
+            "Grok Imagine image captured (source=%s final_resolution=%s)",
+            image_url.split(":", 1)[0],
+            final_resolution,
+        )
         body = self._synthetic_image_response("composer_image_" + uuid.uuid4().hex, image_url)
         return {
             "statusCode": HTTPStatus.OK,
@@ -740,6 +1027,10 @@ class BrowserSession:
         """
         from selenium.webdriver.common.by import By
 
+        deadline = min(
+            self._request_deadline(value),
+            time.monotonic() + min(float(value.get("timeoutSeconds", 180)), 180.0),
+        )
         payload = value["payload"]
         message = str(payload.get("message", "")).strip()
         attachments = payload.get("fileAttachments") or payload.get("imageAttachments")
@@ -748,16 +1039,25 @@ class BrowserSession:
         if attachments:
             raise RuntimeError("Grok composer worker does not support attachments")
         self._start_composer_chat(driver, value)
-        self._enable_private_composer_chat(driver)
-        self._select_composer_model(driver, str(payload.get("modeId", "")))
+        self._enable_private_composer_chat(driver, deadline)
+        self._select_composer_model(driver, str(payload.get("modeId", "")), deadline)
+        capture_image = bool(value.get("captureImage"))
+        before_images = []
+        before_sources: set[str] = set()
+        before_image_count = 0
+        if capture_image:
+            driver.execute_script("if (window.performance && performance.clearResourceTimings) performance.clearResourceTimings();")
+            before_images = self._image_sources(driver)
+            before_sources = {str(item.get("src", "")) for item in before_images if isinstance(item, dict)}
+            before_image_count = len(before_images)
 
-        deadline = time.monotonic() + min(int(value["timeoutSeconds"]), 180)
         input_box = None
         while input_box is None and time.monotonic() < deadline:
             input_box = self._first_visible(driver, "[aria-label='Ask Grok anything'][contenteditable='true'], textarea[placeholder], textarea, div[contenteditable='true'], [role='textbox']")
             if input_box is None:
-                time.sleep(0.2)
+                self._sleep_with_deadline(0.2, deadline)
         if input_box is None:
+            self._assert_deadline(deadline)
             raise RuntimeError("Grok composer input was not found")
         before_count = len(driver.find_elements(By.CSS_SELECTOR, "[data-testid='assistant-message']"))
         try:
@@ -797,10 +1097,37 @@ class BrowserSession:
                 except Exception:
                     continue
             if submit is None:
-                time.sleep(0.15)
+                self._sleep_with_deadline(0.15, deadline)
         if submit is None:
+            self._assert_deadline(deadline)
             raise RuntimeError("Grok composer submit control was not available")
         self._click_composer_submit(driver, deadline)
+
+        if capture_image:
+            candidate = ""
+            stable_since = 0.0
+            while time.monotonic() < deadline:
+                images = self._image_sources(driver)
+                selected, _ = self._new_generated_image(images, before_sources, before_image_count)
+                if selected:
+                    if selected != candidate:
+                        candidate = selected
+                        stable_since = time.monotonic()
+                    elif time.monotonic() - stable_since >= 2.0:
+                        break
+                self._sleep_with_deadline(0.25, deadline)
+            if not candidate:
+                raise ImageGenerationIncompleteError(
+                    "Grok Web composer did not expose a usable generated image"
+                )
+            image_url = self._materialize_image_url(driver, candidate, deadline)
+            body = self._synthetic_image_response("composer_image_" + uuid.uuid4().hex, image_url)
+            return {
+                "statusCode": HTTPStatus.OK,
+                "status": "200 OK",
+                "headers": {"content-type": "application/x-ndjson"},
+                "bodyBase64": base64.b64encode(body).decode(),
+            }
 
         latest = None
         latest_text = ""
@@ -823,8 +1150,9 @@ class BrowserSession:
                     else:
                         latest_text = text
                         stable_since = time.monotonic()
-            time.sleep(0.25)
+            self._sleep_with_deadline(0.25, deadline)
         if latest is None or not latest_text:
+            self._assert_deadline(deadline)
             raise RuntimeError("Grok composer did not return an assistant response")
 
         parsed = urlparse(str(driver.current_url or ""))
@@ -845,38 +1173,47 @@ class BrowserSession:
         }
 
     def request(self, value: dict) -> dict:
-        with self.lock:
-            driver = self._ensure_driver(value)
+        deadline = self._acquire(value)
+        work_value = dict(value)
+        work_value["_deadline"] = deadline
+        try:
+            driver = self._ensure_driver(work_value)
             try:
-                self._prepare_page(driver, value)
-                if value.get("imageMode"):
-                    result = self._composer_image_fetch(driver, value)
-                elif value.get("useComposer"):
-                    result = self._composer_fetch(driver, value)
+                self._remaining_seconds(work_value)
+                self._prepare_page(driver, work_value)
+                if work_value.get("imageMode"):
+                    result = self._composer_image_fetch(driver, work_value)
+                elif work_value.get("useComposer"):
+                    result = self._composer_fetch(driver, work_value)
                 else:
-                    result = self._fetch(driver, value)
+                    result = self._fetch(driver, work_value)
                 if is_antibot_result(result):
-                    driver.get(value["baseURL"] + "/")
+                    driver.set_page_load_timeout(self._remaining_seconds(work_value, 90))
+                    driver.get(work_value["baseURL"] + "/")
                     self.last_navigation = time.monotonic()
-                    self._wait_for_challenge(driver, 45)
-                    if value.get("imageMode"):
-                        result = self._composer_image_fetch(driver, value)
-                    elif value.get("useComposer"):
-                        result = self._composer_fetch(driver, value)
+                    self._wait_for_challenge(driver, 45, deadline)
+                    if work_value.get("imageMode"):
+                        result = self._composer_image_fetch(driver, work_value)
+                    elif work_value.get("useComposer"):
+                        result = self._composer_fetch(driver, work_value)
                     else:
-                        result = self._fetch(driver, value)
+                        result = self._fetch(driver, work_value)
+                self._remaining_seconds(work_value)
                 state = self._cloudflare_state(driver)
                 result.update(state)
-                self._remember_cloudflare_state(value, state)
+                self._remember_cloudflare_state(work_value, state)
                 return result
-            except Exception:
+            except Exception as error:
                 logging.exception(
                     "browser request failed (trace_id=%s upstream_request_id=%s)",
-                    value.get("traceID", ""),
-                    value.get("requestID", ""),
+                    work_value.get("traceID", ""),
+                    work_value.get("requestID", ""),
                 )
-                self._close_unlocked()
+                if not isinstance(error, (ImageSubscriptionRequiredError, ImageGenerationIncompleteError)):
+                    self._close_unlocked()
                 raise
+        finally:
+            self.lock.release()
 
     @staticmethod
     def _cloudflare_state(driver) -> dict[str, str]:
@@ -906,22 +1243,31 @@ class BrowserSession:
         self.fingerprint = session_fingerprint(current)
 
     def warm(self, value: dict) -> dict[str, str]:
-        with self.lock:
-            driver = self._ensure_driver(value)
+        deadline = self._acquire(value)
+        work_value = dict(value)
+        work_value["_deadline"] = deadline
+        try:
+            driver = self._ensure_driver(work_value)
             try:
-                self._prepare_page(driver, value)
-                self._probe_signed_fetch(driver)
+                self._prepare_page(driver, work_value)
+                self._probe_signed_fetch(driver, deadline)
+                self._remaining_seconds(work_value)
                 state = self._cloudflare_state(driver)
-                self._remember_cloudflare_state(value, state)
+                self._remember_cloudflare_state(work_value, state)
                 return state
             except Exception:
                 logging.exception("browser warmup failed")
                 self._close_unlocked()
                 raise
+        finally:
+            self.lock.release()
 
     @staticmethod
-    def _probe_signed_fetch(driver) -> None:
-        driver.set_script_timeout(30)
+    def _probe_signed_fetch(driver, deadline: float | None = None) -> None:
+        remaining = 30.0 if deadline is None else min(30.0, deadline - time.monotonic())
+        if remaining <= 0.05:
+            raise WorkerBusyError("browser worker request budget expired")
+        driver.set_script_timeout(remaining)
         result = driver.execute_async_script(
             """
             const done = arguments[arguments.length - 1];
@@ -943,6 +1289,19 @@ class BrowserSession:
 
 
 SESSION = BrowserSession()
+QUOTA_SESSION = BrowserSession()
+
+
+def is_worker_ready() -> bool:
+    return SESSION.driver is not None
+
+
+def session_for_path(path: str) -> BrowserSession:
+    # Quota refreshes must not sit behind a multi-minute image generation.
+    # Separate Chromium instances also keep account cookies isolated.
+    if path == "/v1/grok/quota":
+        return QUOTA_SESSION
+    return SESSION
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -961,10 +1320,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
-            self._json(HTTPStatus.OK, {"ok": True, "browserReady": SESSION.driver is not None})
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "browserReady": SESSION.driver is not None,
+                    "quotaBrowserReady": QUOTA_SESSION.driver is not None,
+                },
+            )
             return
         if self.path == "/readyz":
-            ready = SESSION.driver is not None
+            ready = is_worker_ready()
             self._json(HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE, {"ready": ready})
             return
         if self.path not in {"/healthz", "/readyz"}:
@@ -985,14 +1351,15 @@ class Handler(BaseHTTPRequestHandler):
                 allowed_paths,
                 allow_conversation_responses=self.path == "/v1/grok/chat",
             )
-            value["imageMode"] = self.path == "/v1/grok/fast-image"
+            value["imageMode"] = bool(value.get("imageMode", False)) and self.path == "/v1/grok/fast-image"
+            value["captureImage"] = self.path == "/v1/grok/fast-image"
             value["useComposer"] = self.path in {"/v1/grok/chat", "/v1/grok/fast-image"}
             if self.path == "/v1/grok/warm":
                 state = SESSION.warm(value)
                 self._json(HTTPStatus.OK, {"ok": True, **state})
                 return
             started = time.monotonic()
-            result = SESSION.request(value)
+            result = session_for_path(self.path).request(value)
             status_code = int(result.get("statusCode", 0))
             if status_code < 200 or status_code >= 300:
                 try:
@@ -1044,6 +1411,7 @@ def main() -> None:
         server.serve_forever()
     finally:
         SESSION.close()
+        QUOTA_SESSION.close()
         server.server_close()
 
 

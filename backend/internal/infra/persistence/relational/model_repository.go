@@ -23,6 +23,39 @@ const availableRoutePredicate = `
 		WHERE account.provider = model_routes.provider
 			AND account.enabled = ?
 			AND account.auth_status = ?
+			AND NOT EXISTS (
+				SELECT 1 FROM account_model_inference_health health
+				WHERE health.account_id = account.id
+					AND health.upstream_model = model_routes.upstream_model
+					AND health.updated_at >= ?
+					AND health.status IN ('permission_denied', 'reauth', 'model_unavailable')
+			)
+			AND (
+				EXISTS (
+					SELECT 1 FROM model_route_accounts binding
+					WHERE binding.model_route_id = model_routes.id
+						AND binding.account_id = account.id
+				)
+				OR (
+					NOT EXISTS (SELECT 1 FROM model_route_accounts binding WHERE binding.model_route_id = model_routes.id)
+					AND EXISTS (
+						SELECT 1 FROM account_model_capabilities capability
+						WHERE capability.account_id = account.id
+							AND capability.upstream_model = model_routes.upstream_model
+					)
+				)
+			)
+)
+`
+
+// diagnosticRoutePredicate keeps an enabled route discoverable when every
+// matching account is currently disabled or requires reauthorization. The
+// selector still excludes those accounts; this fallback only preserves the
+// route long enough to return an actionable availability reason.
+const diagnosticRoutePredicate = `
+	EXISTS (
+		SELECT 1 FROM provider_accounts account
+		WHERE account.provider = model_routes.provider
 			AND (
 				EXISTS (
 					SELECT 1 FROM model_route_accounts binding
@@ -134,6 +167,19 @@ func (r *ModelRepository) GetByPublicID(ctx context.Context, publicID string) (m
 func (r *ModelRepository) GetByPublicIDCandidates(ctx context.Context, publicID string) ([]model.Route, error) {
 	db := r.availableRoutes(r.db.db.WithContext(ctx)).Where("enabled = ?", true)
 	rows, err := findModelRoutesByPublicID(db, publicID)
+	if err == nil {
+		return mapModelRows(rows), nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, mapError(err)
+	}
+
+	// A route with no healthy account must still reach the selector so it can
+	// distinguish reauthorization, disabled accounts, and model health blocks.
+	diagnosticDB := r.db.db.WithContext(ctx).
+		Where("enabled = ?", true).
+		Where(diagnosticRoutePredicate)
+	rows, err = findModelRoutesByPublicID(diagnosticDB, publicID)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -183,7 +229,16 @@ func findModelRoutesByPublicID(db *gorm.DB, publicID string) ([]modelRouteModel,
 
 func (r *ModelRepository) GetByProviderUpstream(ctx context.Context, provider account.Provider, upstreamModel string) (model.Route, error) {
 	var row modelRouteModel
-	if err := r.availableRoutes(r.db.db.WithContext(ctx)).Where("provider = ? AND upstream_model = ? AND enabled = ?", provider, upstreamModel, true).First(&row).Error; err != nil {
+	query := r.availableRoutes(r.db.db.WithContext(ctx)).Where("provider = ? AND upstream_model = ? AND enabled = ?", provider, upstreamModel, true)
+	if err := query.First(&row).Error; err == nil {
+		return toModelDomain(row), nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return model.Route{}, mapError(err)
+	}
+	if err := r.db.db.WithContext(ctx).
+		Where("provider = ? AND upstream_model = ? AND enabled = ?", provider, upstreamModel, true).
+		Where(diagnosticRoutePredicate).
+		First(&row).Error; err != nil {
 		return model.Route{}, mapError(err)
 	}
 	return toModelDomain(row), nil
@@ -209,6 +264,13 @@ func (r *ModelRepository) ReplaceAccountCapabilities(ctx context.Context, accoun
 		}
 		if len(rows) > 0 {
 			if err := tx.CreateInBatches(rows, 200).Error; err != nil {
+				return err
+			}
+			healthRows := make([]accountModelInferenceHealthModel, 0, len(rows))
+			for _, row := range rows {
+				healthRows = append(healthRows, accountModelInferenceHealthModel{AccountID: accountID, UpstreamModel: row.UpstreamModel, Status: account.InferenceHealthPending, UpdatedAt: syncedAt})
+			}
+			if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "account_id"}, {Name: "upstream_model"}}, DoNothing: true}).CreateInBatches(healthRows, 200).Error; err != nil {
 				return err
 			}
 		}
@@ -579,7 +641,11 @@ func (r *ModelRepository) UpdateManyEnabled(ctx context.Context, ids []uint64, e
 }
 
 func (r *ModelRepository) availableRoutes(query *gorm.DB) *gorm.DB {
-	return query.Where(availableRoutePredicate, true, account.AuthStatusActive)
+	return query.Where(availableRoutePredicate, availableRoutePredicateArgs(time.Now().UTC())...)
+}
+
+func availableRoutePredicateArgs(at time.Time) []any {
+	return []any{true, account.AuthStatusActive, at.Add(-account.InferenceHealthMaxAge)}
 }
 
 func (r *ModelRepository) annotateAvailability(ctx context.Context, values []model.Route) error {

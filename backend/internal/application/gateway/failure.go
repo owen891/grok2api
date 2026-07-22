@@ -15,6 +15,7 @@ type FailureScope string
 const (
 	FailureScopeUnknown     FailureScope = "unknown"
 	FailureScopeAccount     FailureScope = "account"
+	FailureScopeModel       FailureScope = "model"
 	FailureScopeQuota       FailureScope = "quota"
 	FailureScopeEgress      FailureScope = "egress"
 	FailureScopeProvider    FailureScope = "provider"
@@ -51,6 +52,7 @@ type UpstreamFailure struct {
 	AccountID              uint64
 	AccountName            string
 	AccountScoped          bool
+	ModelUnavailable       bool
 	Scope                  FailureScope
 	PermanentAccountDenial bool
 	QuotaExhausted         bool
@@ -69,6 +71,9 @@ func DecideFailure(failure *UpstreamFailure) FailureDecision {
 	}
 	if failure.QuotaExhausted || failure.FreeQuotaExhausted || failure.ModelQuotaExhausted {
 		return FailureDecision{Scope: FailureScopeQuota, Action: FailureActionUpdateQuota, Retryable: true}
+	}
+	if failure.ModelUnavailable {
+		return FailureDecision{Scope: FailureScopeModel, Action: FailureActionRotateAccount, Retryable: true}
 	}
 	if failure.PermanentAccountDenial || failure.CredentialRejected {
 		return FailureDecision{Scope: FailureScopeAccount, Action: FailureActionRequireReauth, PenalizeAccount: true, Retryable: true}
@@ -181,12 +186,32 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.Code = "upstream_server_error"
 		failure.PublicMessage = "上游服务暂时异常"
 	}
+	if isModelUnavailable(status, metadataText) {
+		failure.Code = "upstream_model_unavailable"
+		failure.PublicMessage = "上游模型当前不可用"
+		failure.ModelUnavailable = true
+		failure.AccountScoped = false
+		failure.Scope = FailureScopeModel
+	}
 	fingerprintPart := normalizeFailureCode(firstNonEmptyFailure(upstreamCode, upstreamType, upstreamMessage))
 	if fingerprintPart == "" {
 		fingerprintPart = "unknown"
 	}
 	failure.Fingerprint = fmt.Sprintf("%d:%s", status, fingerprintPart)
 	return failure
+}
+
+func isModelUnavailable(status int, metadataText string) bool {
+	if containsAny(metadataText,
+		"model_not_found", "model-not-found", "model not found",
+		"model_unavailable", "model-unavailable", "model unavailable",
+		"model_not_available", "model-not-available", "model not available",
+		"unknown_model", "unknown-model", "unknown model",
+		"unsupported_model", "unsupported-model", "unsupported model",
+	) {
+		return true
+	}
+	return status == http.StatusNotFound && strings.Contains(metadataText, "model")
 }
 
 // ClassifyHTTPFailure exposes the shared routing taxonomy to active account
