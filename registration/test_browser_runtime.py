@@ -36,6 +36,7 @@ class BrowserRuntimeTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("shutil.which", return_value=None),
+                patch.object(browser_runtime, "_LINUX_BROWSER_CANDIDATES", ()),
             ):
                 self.assertIsNone(browser_runtime.browser_path())
 

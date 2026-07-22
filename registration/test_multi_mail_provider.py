@@ -1,3 +1,6 @@
+import unittest
+from unittest.mock import patch
+
 import multi_mail_provider as mail
 
 
@@ -22,28 +25,24 @@ class _Session:
         pass
 
 
-def test_yyds_jwt_can_create_mailbox_without_api_key(monkeypatch):
-    session = _Session()
-    monkeypatch.setattr(mail, "_create_session", lambda conf: session)
-    provider = mail.YydsMailProvider(
-        {"id": "jwt-only", "api_base": "https://mail.test/v1", "jwt": "jwt-value", "domain": ["example.com"]},
-        mail._config({"providers": []}),
-    )
+class YydsMailProviderTests(unittest.TestCase):
+    def test_yyds_jwt_can_create_mailbox_without_api_key(self):
+        session = _Session()
+        with patch.object(mail, "_create_session", return_value=session):
+            provider = mail.YydsMailProvider(
+                {"id": "jwt-only", "api_base": "https://mail.test/v1", "jwt": "jwt-value", "domain": ["example.com"]},
+                mail._config({"providers": []}),
+            )
 
-    mailbox = provider.create_mailbox()
+        mailbox = provider.create_mailbox()
 
-    assert mailbox["address"] == "test@example.com"
-    assert mailbox["token"] == "mail-token"
-    assert session.calls[0][2]["headers"]["Authorization"] == "Bearer jwt-value"
-    assert "X-API-Key" not in session.calls[0][2]["headers"]
+        self.assertEqual("test@example.com", mailbox["address"])
+        self.assertEqual("mail-token", mailbox["token"])
+        self.assertEqual("Bearer jwt-value", session.calls[0][2]["headers"]["Authorization"])
+        self.assertNotIn("X-API-Key", session.calls[0][2]["headers"])
 
+    def test_create_mailbox_keeps_provider_initialization_error(self):
+        config = {"providers": [{"type": "yyds_mail", "id": "missing-auth", "enable": True}]}
 
-def test_create_mailbox_keeps_provider_initialization_error(monkeypatch):
-    config = {"providers": [{"type": "yyds_mail", "id": "missing-auth", "enable": True}]}
-
-    try:
-        mail.create_mailbox(config)
-    except RuntimeError as exc:
-        assert "api_key" in str(exc) or "jwt" in str(exc)
-    else:
-        raise AssertionError("expected provider initialization failure")
+        with self.assertRaisesRegex(RuntimeError, "api_key|jwt"):
+            mail.create_mailbox(config)
