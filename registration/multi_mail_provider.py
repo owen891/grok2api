@@ -1497,7 +1497,10 @@ class YydsMailProvider(BaseMailProvider):
     def __init__(self, entry: dict, conf: dict):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
         self.api_base = str(entry.get("api_base") or "https://maliapi.215.im/v1").rstrip("/")
-        self.api_key = str(entry["api_key"]).strip()
+        self.api_key = str(entry.get("api_key") or "").strip()
+        self.jwt = str(entry.get("jwt") or entry.get("jwt_token") or "").strip()
+        if not self.api_key and not self.jwt:
+            raise RuntimeError("YYDSMail 缺少 api_key 或 jwt")
         self.domain = [str(item).strip() for item in (entry.get("domain") or []) if str(item).strip()]
         self.subdomain = str(entry.get("subdomain") or "").strip()
         self.wildcard = bool(entry.get("wildcard"))
@@ -1505,7 +1508,8 @@ class YydsMailProvider(BaseMailProvider):
         self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
 
     def _request(self, method: str, path: str, token: str = "", params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200, 201, 204)):
-        headers = {"Authorization": f"Bearer {token}"} if token else {"X-API-Key": self.api_key}
+        auth_token = token or self.jwt
+        headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {"X-API-Key": self.api_key}
         resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers=headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code not in expected:
             raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
@@ -2192,9 +2196,10 @@ def create_mailbox(mail_config: dict, username: str | None = None) -> dict:
     tried: set[str] = set()
     last_error = ""
     for _ in range(len(enabled)):
-        provider = _create_provider(mail_config)
-        provider_key = f"{provider.name}#{provider.provider_ref}"
+        provider = None
         try:
+            provider = _create_provider(mail_config)
+            provider_key = f"{provider.name}#{provider.provider_ref}"
             if provider_key in tried:
                 continue
             tried.add(provider_key)
@@ -2205,7 +2210,8 @@ def create_mailbox(mail_config: dict, username: str | None = None) -> dict:
             last_error = str(error)
             continue
         finally:
-            provider.close()
+            if provider is not None:
+                provider.close()
     raise RuntimeError(last_error or "所有启用的邮箱提供商均无法创建邮箱")
 
 
@@ -2261,9 +2267,10 @@ def get_existing_mailbox(mail_config: dict, email: str) -> dict:
     tried: set[str] = set()
     last_error = ""
     for _ in range(len(enabled)):
-        provider = _create_provider(mail_config)
-        provider_key = f"{provider.name}#{provider.provider_ref}"
+        provider = None
         try:
+            provider = _create_provider(mail_config)
+            provider_key = f"{provider.name}#{provider.provider_ref}"
             if provider_key in tried:
                 continue
             tried.add(provider_key)
@@ -2277,5 +2284,6 @@ def get_existing_mailbox(mail_config: dict, email: str) -> dict:
             if "DDG日上限已达" not in last_error:
                 raise
         finally:
-            provider.close()
+            if provider is not None:
+                provider.close()
     raise RuntimeError(last_error or "所有启用的邮箱提供商均无法查询已有邮箱")
