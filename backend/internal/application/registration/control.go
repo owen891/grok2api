@@ -142,27 +142,30 @@ func (e *PreflightError) Error() string {
 func (e *PreflightError) Unwrap() error { return ErrPreflight }
 
 type EmailSourceSettings struct {
-	ID               string `json:"id"`
-	Type             string `json:"type"`
-	Enabled          bool   `json:"enabled"`
-	APIBase          string `json:"apiBase"`
-	APIKey           string `json:"apiKey"`
-	JWT              string `json:"jwt"`
-	Domain           string `json:"domain"`
-	Prefix           string `json:"prefix"`
-	APIKeyConfigured bool   `json:"apiKeyConfigured"`
-	JWTConfigured    bool   `json:"jwtConfigured"`
+	ID               string          `json:"id"`
+	Type             string          `json:"type"`
+	Enabled          bool            `json:"enabled"`
+	APIBase          string          `json:"apiBase"`
+	APIKey           string          `json:"apiKey"`
+	JWT              string          `json:"jwt"`
+	Domain           string          `json:"domain"`
+	Prefix           string          `json:"prefix"`
+	APIKeyConfigured bool            `json:"apiKeyConfigured"`
+	JWTConfigured    bool            `json:"jwtConfigured"`
+	Options          map[string]any  `json:"options"`
+	OptionConfigured map[string]bool `json:"optionConfigured"`
 }
 
 type storedEmailSource struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	Enabled bool   `json:"enabled"`
-	APIBase string `json:"api_base,omitempty"`
-	APIKey  string `json:"api_key,omitempty"`
-	JWT     string `json:"jwt,omitempty"`
-	Domain  string `json:"domain,omitempty"`
-	Prefix  string `json:"prefix,omitempty"`
+	ID      string         `json:"id"`
+	Type    string         `json:"type"`
+	Enabled bool           `json:"enabled"`
+	APIBase string         `json:"api_base,omitempty"`
+	APIKey  string         `json:"api_key,omitempty"`
+	JWT     string         `json:"jwt,omitempty"`
+	Domain  string         `json:"domain,omitempty"`
+	Prefix  string         `json:"prefix,omitempty"`
+	Options map[string]any `json:"options,omitempty"`
 }
 
 type WorkerSettings struct {
@@ -600,7 +603,10 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 			continue
 		}
 		enabledSources = append(enabledSources, source)
-		if source.Type == "yyds" && !source.APIKeyConfigured && !source.JWTConfigured {
+		if engine == registrationEngineProtocol && !isProtocolEmailProvider(source.Type) {
+			credentialsReady = false
+		}
+		if (source.Type == "yyds" || source.Type == "yyds_mail") && !source.APIKeyConfigured && !source.JWTConfigured {
 			credentialsReady = false
 		}
 	}
@@ -609,9 +615,13 @@ func (c *Controller) preflightLocked(ctx context.Context) PreflightResult {
 		providerNames = append(providerNames, source.Type)
 	}
 	add("emailSources", len(enabledSources) > 0, strings.Join(providerNames, ", "))
-	add("emailCredentials", len(enabledSources) > 0 && credentialsReady, "API key or YYDS JWT for every enabled source")
+	add("emailCredentials", len(enabledSources) > 0 && credentialsReady, "configured credentials for every enabled source")
 	for _, source := range enabledSources {
 		apiBase := strings.TrimSpace(source.APIBase)
+		if source.Type == "outlook_token" && apiBase == "" {
+			add("emailAPI:"+source.ID, true, "Outlook Graph/IMAP does not require an API base")
+			continue
+		}
 		_, apiErr := validateHTTPURL(apiBase)
 		add("emailAPI:"+source.ID, apiErr == nil, apiBase)
 	}
@@ -1731,14 +1741,27 @@ func applySettingsPatch(value map[string]any, patch WorkerSettingsPatch) error {
 }
 
 func isSupportedEmailProvider(provider string) bool {
-	return slices.Contains([]string{"tempmail_lol", "yyds"}, strings.TrimSpace(provider))
+	return slices.Contains([]string{
+		"cloudmail_gen", "cloudflare_temp_email", "tempmail_lol", "moemail", "inbucket",
+		"duckmail", "gptmail", "donemail", "yyds_mail", "yyds", "ddg_mail", "outlook_token",
+	}, strings.TrimSpace(provider))
+}
+
+func isProtocolEmailProvider(provider string) bool {
+	return slices.Contains([]string{"tempmail_lol", "yyds", "yyds_mail"}, strings.TrimSpace(provider))
 }
 
 func defaultEmailAPIBase(provider string) string {
-	if provider == "tempmail_lol" {
+	switch provider {
+	case "tempmail_lol":
 		return "https://api.tempmail.lol"
+	case "yyds", "yyds_mail":
+		return "https://maliapi.215.im/v1"
+	case "gptmail":
+		return "https://mail.chatgpt.org.uk"
+	default:
+		return ""
 	}
-	return "https://maliapi.215.im/v1"
 }
 
 func readStoredEmailSources(value map[string]any) []storedEmailSource {
@@ -1793,14 +1816,38 @@ func emailSourcesView(value map[string]any) []EmailSourceSettings {
 		if apiBase == "" {
 			apiBase = defaultEmailAPIBase(source.Type)
 		}
+		options := make(map[string]any, len(source.Options))
+		optionConfigured := make(map[string]bool, len(source.Options))
+		for key, item := range source.Options {
+			if item == nil || strings.TrimSpace(fmt.Sprint(item)) == "" {
+				continue
+			}
+			if isSecretEmailOptionKey(key) {
+				options[key] = ""
+			} else {
+				options[key] = item
+			}
+			optionConfigured[key] = true
+		}
 		sources = append(sources, EmailSourceSettings{
 			ID: source.ID, Type: source.Type, Enabled: source.Enabled, APIBase: apiBase,
 			Domain: source.Domain, Prefix: source.Prefix,
 			APIKeyConfigured: strings.TrimSpace(source.APIKey) != "",
 			JWTConfigured:    strings.TrimSpace(source.JWT) != "",
+			Options:          options, OptionConfigured: optionConfigured,
 		})
 	}
 	return sources
+}
+
+func isSecretEmailOptionKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, marker := range []string{"password", "token", "secret", "api_key", "apikey", "jwt", "refresh", "client_id", "mailboxes"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func applyEmailSourcesPatch(value map[string]any, patch []EmailSourceSettings) error {
@@ -1837,14 +1884,48 @@ func applyEmailSourcesPatch(value map[string]any, patch []EmailSourceSettings) e
 		if apiBase == "" {
 			apiBase = defaultEmailAPIBase(source.Type)
 		}
-		normalizedBase, err := validateHTTPURL(apiBase)
-		if err != nil {
+		if apiBase == "" {
+			if configured, ok := source.Options["api_base"].(string); ok {
+				apiBase = strings.TrimSpace(configured)
+			}
+		}
+		normalizedBase := strings.TrimRight(apiBase, "/")
+		var err error
+		if normalizedBase != "" {
+			normalizedBase, err = validateHTTPURL(apiBase)
+		}
+		if (err != nil || normalizedBase == "") && !emailProviderAllowsEmptyAPIBase(source.Type) {
 			return fmt.Errorf("%w: email source API base is invalid", ErrInvalidInput)
 		}
 		if len(source.Domain) > 2048 || len(source.Prefix) > 128 {
 			return fmt.Errorf("%w: email source configuration is too long", ErrInvalidInput)
 		}
 		current := existing[source.ID]
+		options := make(map[string]any, len(source.Options))
+		if current.Type == source.Type {
+			for key, item := range current.Options {
+				options[key] = item
+			}
+		}
+		for key, item := range source.Options {
+			key = strings.TrimSpace(key)
+			if key == "" || len(key) > 80 {
+				return fmt.Errorf("%w: email source option key is invalid", ErrInvalidInput)
+			}
+			if len(fmt.Sprint(item)) > 16384 {
+				return fmt.Errorf("%w: email source option is too long", ErrInvalidInput)
+			}
+			if isSecretEmailOptionKey(key) && strings.TrimSpace(fmt.Sprint(item)) == "" {
+				if previous, ok := current.Options[key]; ok {
+					options[key] = previous
+					continue
+				}
+			}
+			options[key] = item
+		}
+		if source.Type == "outlook_token" && options["mailboxes"] == nil {
+			options["mailboxes"] = ""
+		}
 		secret := strings.TrimSpace(source.APIKey)
 		jwt := strings.TrimSpace(source.JWT)
 		if secret == "" && current.Type == source.Type {
@@ -1856,9 +1937,28 @@ func applyEmailSourcesPatch(value map[string]any, patch []EmailSourceSettings) e
 		if len(secret) > 4096 || len(jwt) > 4096 {
 			return fmt.Errorf("%w: email source secret is too long", ErrInvalidInput)
 		}
+		if normalizedBase != "" {
+			options["api_base"] = normalizedBase
+		}
+		if strings.TrimSpace(source.Domain) != "" {
+			options["domain"] = strings.TrimSpace(source.Domain)
+		}
+		if secret != "" {
+			options["api_key"] = secret
+		}
+		engine, _ := normalizeRegistrationEngine(stringValue(value["engine"], registrationEngineProtocol))
+		if engine == registrationEngineProtocol && !isProtocolEmailProvider(source.Type) && source.Enabled {
+			return fmt.Errorf("%w: %s requires the browser registration engine", ErrInvalidInput, source.Type)
+		}
+		if engine == registrationEngineBrowser && source.Enabled {
+			if missing := missingEmailProviderOptions(source.Type, options); len(missing) > 0 {
+				return fmt.Errorf("%w: %s requires %s", ErrInvalidInput, source.Type, strings.Join(missing, ", "))
+			}
+		}
 		item := storedEmailSource{
 			ID: source.ID, Type: source.Type, Enabled: source.Enabled, APIBase: normalizedBase,
 			APIKey: secret, JWT: jwt, Domain: strings.TrimSpace(source.Domain), Prefix: strings.TrimSpace(source.Prefix),
+			Options: options,
 		}
 		stored = append(stored, item)
 		if item.Enabled {
@@ -1886,6 +1986,30 @@ func applyEmailSourcesPatch(value map[string]any, patch []EmailSourceSettings) e
 		}
 	}
 	return nil
+}
+
+func emailProviderAllowsEmptyAPIBase(provider string) bool {
+	return slices.Contains([]string{"outlook_token", "duckmail", "gptmail", "tempmail_lol", "yyds", "yyds_mail"}, provider)
+}
+
+func missingEmailProviderOptions(provider string, options map[string]any) []string {
+	required := map[string][]string{
+		"cloudmail_gen": {"api_base", "admin_email", "admin_password", "domain"},
+		"cloudflare_temp_email": {"api_base", "admin_password", "domain"},
+		"moemail": {"api_base", "api_key"},
+		"inbucket": {"api_base", "domain"},
+		"duckmail": {"api_key"},
+		"donemail": {"api_base", "admin_key"},
+		"ddg_mail": {"ddg_token", "api_base"},
+		"outlook_token": {"mailboxes"},
+	}
+	missing := make([]string, 0)
+	for _, key := range required[provider] {
+		if value, ok := options[key]; !ok || strings.TrimSpace(fmt.Sprint(value)) == "" {
+			missing = append(missing, key)
+		}
+	}
+	return missing
 }
 
 func validateHTTPURL(raw string) (string, error) {

@@ -378,6 +378,7 @@ class ResolveMintWorkersTests(unittest.TestCase):
                 self.assertEqual(1, mint.call_count)
                 self.assertEqual(0, worker._stats["mint_success"])
                 self.assertEqual(1, worker._stats["mint_fail"])
+                self.assertEqual(1, worker._stats["mint_terminal_fail"])
                 self.assertEqual(0, worker._pending_count())
             finally:
                 self._restore_pending_fixture(original)
@@ -518,6 +519,49 @@ class ResolveMintWorkersTests(unittest.TestCase):
             worker._next_idx[0] = original_next
             worker._replacement_max_index[0] = original_limit
             worker._stop_event.clear()
+            with worker._stats_lock:
+                worker._stats.clear()
+                worker._stats.update(original_stats)
+
+    def test_terminal_cpa_failures_queue_replacements_until_usable_target(self):
+        tasks = queue.Queue()
+        original_stats = dict(worker._stats)
+        original_next = worker._next_idx[0]
+        original_limit = worker._replacement_max_index[0]
+        try:
+            with worker._stats_lock:
+                worker._stats.update(mint_success=62, mint_fail=38, mint_terminal_fail=38)
+            worker._next_idx[0] = 101
+            worker._replacement_max_index[0] = 300
+
+            queued, usable, deficit = worker._enqueue_terminal_cpa_replacements(
+                tasks,
+                target=100,
+                already_queued=0,
+            )
+
+            self.assertEqual((38, 62, 38), (queued, usable, deficit))
+            self.assertEqual(list(range(101, 139)), [tasks.get_nowait() for _ in range(queued)])
+            self.assertEqual(139, worker._next_idx[0])
+
+            queued_again, _, _ = worker._enqueue_terminal_cpa_replacements(
+                tasks,
+                target=100,
+                already_queued=38,
+            )
+            self.assertEqual(0, queued_again)
+
+            with worker._stats_lock:
+                worker._stats.update(mint_success=62, mint_fail=38, mint_terminal_fail=0)
+            recoverable_queued, _, _ = worker._enqueue_terminal_cpa_replacements(
+                tasks,
+                target=100,
+                already_queued=0,
+            )
+            self.assertEqual(0, recoverable_queued)
+        finally:
+            worker._next_idx[0] = original_next
+            worker._replacement_max_index[0] = original_limit
             with worker._stats_lock:
                 worker._stats.clear()
                 worker._stats.update(original_stats)

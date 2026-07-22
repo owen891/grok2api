@@ -319,6 +319,32 @@ func TestEmailSourcesRejectDuplicateTypesAndAllDisabled(t *testing.T) {
 	}
 }
 
+func TestEmailSourceOptionsPreserveSecretsAndValidateBrowserProviders(t *testing.T) {
+	value := map[string]any{
+		"engine": "browser",
+		"email_sources": []any{map[string]any{
+			"id": "outlook", "type": "outlook_token", "enabled": true,
+			"options": map[string]any{"mailboxes": "account----password----client----refresh"},
+		}},
+	}
+	patch := []EmailSourceSettings{{
+		ID: "outlook", Type: "outlook_token", Enabled: true,
+		Options: map[string]any{"mailboxes": ""},
+	}}
+	if err := applyEmailSourcesPatch(value, patch); err != nil {
+		t.Fatalf("redacted option patch should preserve the existing secret: %v", err)
+	}
+	stored := readStoredEmailSources(value)
+	if len(stored) != 1 || stored[0].Options["mailboxes"] != "account----password----client----refresh" {
+		t.Fatalf("stored secret option was lost: %#v", stored)
+	}
+
+	missing := []EmailSourceSettings{{ID: "cloud", Type: "cloudmail_gen", Enabled: true, APIBase: "https://mail.example.test"}}
+	if err := applyEmailSourcesPatch(map[string]any{"engine": "browser"}, missing); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("incomplete browser provider should be rejected: %v", err)
+	}
+}
+
 func TestResolveProxyGroupPersistsWorkerProxyPool(t *testing.T) {
 	controller := newControllerTest(t, 0)
 	controller.config.ResolveProxyGroup = func(_ context.Context, id uint64, _ string) ([]string, error) {

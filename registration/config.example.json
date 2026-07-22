@@ -151,7 +151,7 @@
   "// ===== 协议注册调度 / 恢复 =====": "",
   "// engine": "protocol=协议注册回滚路径；browser=真实 Chromium，可注册 Build OAuth 或 Web SSO。",
   "engine": "protocol",
-  "// browser_attempt_multiplier": "Browser 批次为达到目标可用账号数允许的注册槽位倍数，1-10；只补注册失败，OAuth 失败保留原账号续跑。",
+  "// browser_attempt_multiplier": "Browser 批次为达到目标可用账号数允许的注册槽位倍数，1-10；补注册失败和明确不可恢复的 CPA 失败，可恢复 OAuth 失败仍保留原账号续跑。",
   "browser_attempt_multiplier": 3,
   "// protocol_fallback_browser": "协议注册或 OAuth 失败时是否允许使用浏览器回退；默认关闭，确保协议引擎全程不拉起浏览器。",
   "protocol_fallback_browser": false,

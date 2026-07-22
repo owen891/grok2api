@@ -245,7 +245,7 @@ class YydsCodeReceiver:
 
 def make_email(cfg: dict[str, Any], backend: str):
     backend = (backend or "tempmail_lol").strip().lower()
-    if backend in {"yyds", "mail_yyds"}:
+    if backend in {"yyds", "yyds_mail", "mail_yyds"}:
         if not cfg.get("yyds_api_key") and not cfg.get("yyds_jwt"):
             raise RuntimeError("config 缺少 yyds_api_key / yyds_jwt")
         reg.config.update(
@@ -286,7 +286,10 @@ def configured_email_backends(cfg: dict[str, Any]) -> list[str]:
     primary = str(cfg.get("email_provider") or cfg.get("protocol_email_backend") or "yyds").strip().lower()
     configured = [primary]
     configured.extend(str(value).strip().lower() for value in (cfg.get("email_provider_fallbacks") or []))
-    return list(dict.fromkeys("tempmail" if value == "tempmail_lol" else value for value in configured if value))
+    return list(dict.fromkeys(
+        "tempmail" if value == "tempmail_lol" else "yyds" if value == "yyds_mail" else value
+        for value in configured if value
+    ))
 
 
 def write_state(state_dir: Path, **fields: Any) -> None:

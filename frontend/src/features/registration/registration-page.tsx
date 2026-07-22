@@ -26,6 +26,7 @@ import {
   stopRegistration,
   updateRegistrationSettings,
   type EmailSourceDTO,
+  type EmailSourceType,
   type RegistrationSettingsDTO,
   type RegistrationStartInput,
 } from "@/features/registration/registration-api";
@@ -130,21 +131,23 @@ export function RegistrationPage() {
   }
 
   function addEmailSource(): void {
-    if (!settings || settings.emailSources.length >= 2) return;
-    if (settings.emailSources.some((source) => source.type === "tempmail_lol")) return;
-    const type: EmailSourceDTO["type"] = "tempmail_lol";
+    if (!settings || settings.emailSources.length >= 10) return;
+    const type = (["tempmail_lol", "yyds_mail", "cloudmail_gen", "cloudflare_temp_email", "moemail", "inbucket", "duckmail", "gptmail", "donemail", "ddg_mail", "outlook_token"] as const).find((candidate) => !settings.emailSources.some((source) => source.type === candidate));
+    if (!type) return;
     const nextID = Array.from({ length: 10 }, (_, index) => `source-new-${index + 1}`).find((id) => !settings.emailSources.some((source) => source.id === id)) ?? "source-new";
     const source: EmailSourceDTO = {
       id: nextID,
       type,
       enabled: true,
-      apiBase: type === "tempmail_lol" ? "https://api.tempmail.lol" : "https://maliapi.215.im/v1",
+      apiBase: defaultEmailSourceAPIBase(type),
       apiKey: "",
       jwt: "",
       domain: "",
       prefix: type === "tempmail_lol" ? "xai" : "",
       apiKeyConfigured: false,
       jwtConfigured: false,
+      options: {},
+      optionConfigured: {},
     };
     updateDraft("emailSources", [...settings.emailSources, source]);
   }
@@ -368,7 +371,7 @@ export function RegistrationPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       <Badge variant="outline">{t("registration.emailSourcesEnabled", { enabled: enabledEmailSourceCount, total: settings.emailSources.length })}</Badge>
-                      <Button variant="outline" size="sm" disabled={busy || settings.emailSources.length >= 2} onClick={addEmailSource}>
+                      <Button variant="outline" size="sm" disabled={busy || settings.emailSources.length >= 10} onClick={addEmailSource}>
                         <Plus />{t("registration.addEmailSource")}
                       </Button>
                     </div>
@@ -553,19 +556,24 @@ function EmailSourceCard({ source, index, disabled, canDisable, canDelete, usedT
   onDelete: () => void;
 }) {
   const { t } = useTranslation();
-  const providerName = source.type === "tempmail_lol" ? "TempMail.lol" : "YYDS Mail";
-  const available = source.type === "tempmail_lol" || Boolean(source.apiKey.trim() || source.apiKeyConfigured || source.jwt.trim() || source.jwtConfigured);
+  const providerNames: Record<EmailSourceType, string> = {
+    cloudmail_gen: "CloudMail Gen", cloudflare_temp_email: "Cloudflare Temp Email", tempmail_lol: "TempMail.lol", moemail: "MoEmail", inbucket: "Inbucket", duckmail: "DuckMail", gptmail: "GPTMail", donemail: "DoneMail", yyds_mail: "YYDS Mail", ddg_mail: "DDG + CF", outlook_token: "Microsoft Outlook", yyds: "YYDS Mail",
+  };
+  const providerName = providerNames[source.type];
+  const available = source.type === "tempmail_lol" || Boolean(source.apiKey.trim() || source.apiKeyConfigured || source.jwt.trim() || source.jwtConfigured || Object.keys(source.optionConfigured).length);
 
   function changeType(type: EmailSourceDTO["type"]): void {
     onChange({
       type,
-      apiBase: type === "tempmail_lol" ? "https://api.tempmail.lol" : "https://maliapi.215.im/v1",
+      apiBase: defaultEmailSourceAPIBase(type),
       apiKey: "",
       jwt: "",
       domain: "",
       prefix: type === "tempmail_lol" ? "xai" : "",
       apiKeyConfigured: false,
       jwtConfigured: false,
+      options: {},
+      optionConfigured: {},
     });
   }
 
@@ -605,14 +613,13 @@ function EmailSourceCard({ source, index, disabled, canDisable, canDelete, usedT
           <Select value={source.type} disabled={disabled} onValueChange={(value) => changeType(value as EmailSourceDTO["type"])}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="tempmail_lol" disabled={usedTypes.includes("tempmail_lol")}>TempMail.lol</SelectItem>
-              <SelectItem value="yyds" disabled={usedTypes.includes("yyds")}>YYDS Mail</SelectItem>
+              {Object.entries(providerNames).filter(([type]) => type !== "yyds").map(([type, label]) => <SelectItem key={type} value={type} disabled={usedTypes.includes(type as EmailSourceDTO["type"])}>{label}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
         <TextField label={t("registration.emailSourceAPIBase")} value={source.apiBase} disabled={disabled} onChange={(value) => onChange({ apiBase: value })} />
         <SecretField label={t("registration.emailSourceAPIKey")} value={source.apiKey} configured={source.apiKeyConfigured} disabled={disabled} onChange={(value) => onChange({ apiKey: value })} />
-        {source.type === "yyds" ? (
+        {source.type === "yyds" || source.type === "yyds_mail" ? (
           <SecretField label={t("registration.yydsJwt")} value={source.jwt} configured={source.jwtConfigured} disabled={disabled} onChange={(value) => onChange({ jwt: value })} />
         ) : (
           <TextField label={t("registration.tempmailPrefix")} value={source.prefix} disabled={disabled} placeholder="xai" onChange={(value) => onChange({ prefix: value })} />
@@ -623,9 +630,24 @@ function EmailSourceCard({ source, index, disabled, canDisable, canDelete, usedT
             <Textarea value={source.domain} disabled={disabled} placeholder={t("registration.emailSourceDomainsPlaceholder")} onChange={(event) => onChange({ domain: event.target.value })} />
           </div>
         ) : null}
+        {source.type !== "tempmail_lol" && source.type !== "yyds" && source.type !== "yyds_mail" ? (
+          <div className="space-y-2 sm:col-span-2">
+            <Label className="text-xs">Provider options (JSON)</Label>
+            <Textarea value={JSON.stringify(source.options, null, 2)} disabled={disabled} onChange={(event) => {
+              try { onChange({ options: JSON.parse(event.target.value) as Record<string, unknown> }); } catch { /* keep editing invalid JSON */ }
+            }} />
+          </div>
+        ) : null}
       </div>
     </div>
   );
+}
+
+function defaultEmailSourceAPIBase(type: EmailSourceType): string {
+  if (type === "tempmail_lol") return "https://api.tempmail.lol";
+  if (type === "yyds" || type === "yyds_mail") return "https://maliapi.215.im/v1";
+  if (type === "gptmail") return "https://mail.chatgpt.org.uk";
+  return "";
 }
 
 function SectionHeading({ title, description }: { title: string; description: string }) {

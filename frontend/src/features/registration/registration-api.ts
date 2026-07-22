@@ -1,5 +1,5 @@
 import { apiRequest } from "@/shared/api/client";
-import { createObjectDecoder, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isString, type ValueValidator } from "@/shared/api/decoder";
+import { createObjectDecoder, hasShape, isArrayOf, isBoolean, isNumber, isObject, isOneOf, isOptional, isRecordOf, isString, type ValueValidator } from "@/shared/api/decoder";
 
 export type RegistrationFailureDTO = {
   code: string;
@@ -44,7 +44,7 @@ export type RegistrationLogsDTO = {
 
 export type EmailSourceDTO = {
   id: string;
-  type: "tempmail_lol" | "yyds";
+  type: EmailSourceType;
   enabled: boolean;
   apiBase: string;
   apiKey: string;
@@ -53,7 +53,13 @@ export type EmailSourceDTO = {
   prefix: string;
   apiKeyConfigured: boolean;
   jwtConfigured: boolean;
+  options: Record<string, unknown>;
+  optionConfigured: Record<string, boolean>;
 };
+
+export type EmailSourceType =
+  | "cloudmail_gen" | "cloudflare_temp_email" | "tempmail_lol" | "moemail" | "inbucket"
+  | "duckmail" | "gptmail" | "donemail" | "yyds_mail" | "ddg_mail" | "outlook_token" | "yyds";
 
 export type RegistrationSettingsDTO = {
   engine: string;
@@ -134,7 +140,7 @@ const logsDecoder = createObjectDecoder<RegistrationLogsDTO>("registration logs"
 });
 const emailSourceValidator = hasShape({
   id: isString,
-  type: isOneOf("tempmail_lol", "yyds"),
+  type: isOneOf("cloudmail_gen", "cloudflare_temp_email", "tempmail_lol", "moemail", "inbucket", "duckmail", "gptmail", "donemail", "yyds_mail", "ddg_mail", "outlook_token", "yyds"),
   enabled: isBoolean,
   apiBase: isString,
   apiKey: isString,
@@ -143,6 +149,8 @@ const emailSourceValidator = hasShape({
   prefix: isString,
   apiKeyConfigured: isBoolean,
   jwtConfigured: isBoolean,
+  options: isObject,
+  optionConfigured: isRecordOf(isBoolean),
 });
 const settingsShape = {
   engine: isString,

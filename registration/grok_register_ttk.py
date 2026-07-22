@@ -1418,8 +1418,41 @@ def get_email_provider():
     return config.get("email_provider", "duckmail")
 
 
+def _multi_mail_config() -> dict:
+    """Adapt Go email_sources into the reference provider configuration shape."""
+    sources = config.get("email_sources")
+    if not isinstance(sources, list) or not sources:
+        return {"providers": []}
+    providers = []
+    for source in sources:
+        if not isinstance(source, dict) or source.get("enabled") is False:
+            continue
+        options = source.get("options") if isinstance(source.get("options"), dict) else {}
+        entry = dict(options)
+        raw_domain = source.get("domain") or entry.get("domain", "")
+        domains = raw_domain if isinstance(raw_domain, list) else [item.strip() for item in str(raw_domain).replace(",", "\n").splitlines() if item.strip()]
+        provider_type = "yyds_mail" if source.get("type") == "yyds" else source.get("type", "")
+        entry.update({
+            "id": source.get("id", ""),
+            "type": provider_type,
+            "enable": True,
+            "api_base": source.get("apiBase") or source.get("api_base") or entry.get("api_base", ""),
+            "api_key": source.get("apiKey") or source.get("api_key") or entry.get("api_key", ""),
+            "domain": domains,
+            "email_prefix": source.get("prefix") or source.get("email_prefix") or entry.get("email_prefix", ""),
+        })
+        if source.get("jwt") or source.get("jwt_token"):
+            entry.setdefault("jwt", source.get("jwt") or source.get("jwt_token"))
+        providers.append(entry)
+    return {"providers": providers, "proxy": config.get("proxy", ""), "request_timeout": 30, "wait_timeout": float(config.get("mail_timeout", 150) or 150), "wait_interval": float(config.get("mail_poll_interval", 2) or 2), "user_agent": config.get("user_agent", "")}
+
+
 def get_email_and_token(api_key=None, provider=None):
     provider = provider or get_email_provider()
+    if isinstance(config.get("email_sources"), list) and config.get("email_sources"):
+        from multi_mail_provider import create_mailbox
+        mailbox = create_mailbox(_multi_mail_config())
+        return str(mailbox.get("address") or ""), mailbox
     if provider == "tempmail_lol":
         return tempmail_lol_create_inbox()
     if provider == "yyds":
@@ -1490,6 +1523,9 @@ def get_oai_code(
     email_provider=None,
 ):
     provider = email_provider or get_email_provider()
+    if isinstance(config.get("email_sources"), list) and config.get("email_sources"):
+        from multi_mail_provider import wait_for_code
+        return wait_for_code(_multi_mail_config(), dev_token if isinstance(dev_token, dict) else {"address": email, "provider": provider})
     if provider == "tempmail_lol":
         return tempmail_lol_get_oai_code(
             dev_token,

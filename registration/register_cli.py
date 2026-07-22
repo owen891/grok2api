@@ -237,6 +237,7 @@ _stats = {
     "reg_fail": 0,
     "mint_success": 0,
     "mint_fail": 0,
+    "mint_terminal_fail": 0,
     "mint_skip": 0,
 }
 _progress_state_path = ""
@@ -280,6 +281,7 @@ def _write_progress_state_locked(*, status: str = "running", finished: bool = Fa
         "registration_failed": registration_failed,
         "mint_success": mint_success,
         "mint_failed": int(_stats.get("mint_fail", 0)),
+        "mint_terminal_failed": int(_stats.get("mint_terminal_fail", 0)),
         "mint_skipped": int(_stats.get("mint_skip", 0)),
         "resumable": _pending_count(_progress_account_type),
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1008,6 +1010,7 @@ def _run_mint_with_retry(
             _remove_pending_job(email)
             if count_batch_stats:
                 _inc("mint_fail")
+                _inc("mint_terminal_fail")
             return {
                 **result,
                 "ok": False,
@@ -1075,6 +1078,36 @@ def registration_exit_code(
     if cpa_export_enabled and stats.get("mint_success", 0) < required:
         return 2
     return 0
+
+
+def _enqueue_terminal_cpa_replacements(
+    task_queue: queue.Queue,
+    *,
+    target: int,
+    already_queued: int,
+) -> tuple[int, int, int]:
+    """Queue replacements only for CPA failures that cannot be resumed."""
+    with _stats_lock:
+        usable = max(0, int(_stats.get("mint_success", 0)))
+        terminal_failures = max(0, int(_stats.get("mint_terminal_fail", 0)))
+
+    deficit = max(0, int(target) - usable)
+    eligible = max(0, terminal_failures - max(0, int(already_queued)))
+    requested = min(deficit, eligible)
+    if requested <= 0:
+        return 0, usable, deficit
+
+    with _next_idx_lock:
+        first = _next_idx[0]
+        limit = _replacement_max_index[0]
+        available = requested if limit <= 0 else max(0, limit - first + 1)
+        queued = min(requested, available)
+        indices = list(range(first, first + queued))
+        _next_idx[0] = first + queued
+
+    for index in indices:
+        task_queue.put(index)
+    return len(indices), usable, deficit
 
 
 def _register_worker(
@@ -1427,23 +1460,52 @@ def main() -> int:
             mint_threads.append(t)
 
     reg_threads: list[threading.Thread] = []
-    for wid in range(1, threads + 1):
-        t = threading.Thread(
-            target=_register_worker,
-            args=(wid, task_queue, args.count, args.accounts_file, mint_queue, forever, do_mint_inline, args.account_type, args.auto_nsfw),
-            daemon=True,
-            name=f"reg-{wid}",
-        )
-        t.start()
-        reg_threads.append(t)
+    terminal_replacements_queued = 0
+    while True:
+        reg_threads = []
+        for wid in range(1, threads + 1):
+            t = threading.Thread(
+                target=_register_worker,
+                args=(wid, task_queue, args.count, args.accounts_file, mint_queue, forever, do_mint_inline, args.account_type, args.auto_nsfw),
+                daemon=True,
+                name=f"reg-{wid}",
+            )
+            t.start()
+            reg_threads.append(t)
 
-    try:
-        while any(t.is_alive() for t in reg_threads):
-            for t in reg_threads:
-                t.join(timeout=0.25)
-    except KeyboardInterrupt:
-        _request_stop()
-        print("\n[!] 用户中断", flush=True)
+        try:
+            while any(t.is_alive() for t in reg_threads):
+                for t in reg_threads:
+                    t.join(timeout=0.25)
+        except KeyboardInterrupt:
+            _request_stop()
+            print("\n[!] 用户中断", flush=True)
+
+        if _stop_event.is_set():
+            break
+        if mint_queue is not None:
+            log(0, f"[cpa] waiting for mint queue to drain (qsize={mint_queue.qsize()})...")
+            mint_queue.join()
+        if forever or remaining is None or not _progress_cpa_required:
+            break
+
+        queued, usable, deficit = _enqueue_terminal_cpa_replacements(
+            task_queue,
+            target=remaining,
+            already_queued=terminal_replacements_queued,
+        )
+        terminal_replacements_queued += queued
+        if queued <= 0:
+            with _stats_lock:
+                terminal_failures = int(_stats.get("mint_terminal_fail", 0))
+            if deficit > 0:
+                if terminal_failures > terminal_replacements_queued:
+                    log(0, f"[cpa] usable target not reached ({usable}/{remaining}); registration attempt limit exhausted")
+                elif _pending_count(args.account_type) > 0:
+                    log(0, f"[cpa] usable target not reached ({usable}/{remaining}); resumable credential jobs remain")
+            break
+        log(0, f"[cpa] usable target is {usable}/{remaining}; queued {queued} replacement registrations")
+
     if _stop_event.is_set():
         print("[!] stop requested; preserving registered accounts for resume", flush=True)
         for t in reg_threads:
@@ -1489,17 +1551,18 @@ def main() -> int:
 
     with _stats_lock:
         s = dict(_stats)
-    print(
-        f"=== 完成: 注册成功 {s.get('reg_success', 0)}, 注册失败 {s.get('reg_fail', 0)}, "
-        f"CPA成功 {s.get('mint_success', 0)}, CPA失败 {s.get('mint_fail', 0)}, "
-        f"CPA跳过 {s.get('mint_skip', 0)} ===",
-        flush=True,
-    )
     exit_code = registration_exit_code(
         s,
         cpa_export_enabled=_progress_cpa_required,
         expected_successes=remaining,
         resumable=_pending_count(args.account_type),
+    )
+    summary_status = "完成" if exit_code == 0 else "未完成"
+    print(
+        f"=== {summary_status}: 注册成功 {s.get('reg_success', 0)}, 注册失败 {s.get('reg_fail', 0)}, "
+        f"CPA成功 {s.get('mint_success', 0)}, CPA失败 {s.get('mint_fail', 0)}, "
+        f"CPA跳过 {s.get('mint_skip', 0)} ===",
+        flush=True,
     )
     state_status = "completed" if exit_code == 0 else ("partial" if s.get("reg_success", 0) > 0 else "failed")
     with _stats_lock:
